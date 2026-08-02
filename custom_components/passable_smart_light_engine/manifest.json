@@ -1,0 +1,9 @@
+{
+  "domain": "passable_smart_light_engine",
+  "name": "Passable AI Smart Lighting Controller",
+  "codeowners": ["@GBear09"],
+  "config_flow": false,
+  "documentation": "https://github.com/GBear09/passable-smart-light-engine",
+  "iot_class": "local_push",
+  "version": "1.0.0"
+}
