@@ -162,8 +162,34 @@ def load_data():
         log.warning(f"PassableSmartLighting: Failed to load JSON data. ({e})")
 
     # Announce that Pyscript has loaded (supporting both new and legacy status entities)
-    state.set("pyscript.passable_smart_light_engine_ready", "on", new_attributes={"startup_time": time.time()})
-    state.set("pyscript.smart_light_engine_ready", "on", new_attributes={"startup_time": time.time()})
+    sync_active_rooms_state()
+
+def sync_active_rooms_state():
+    """
+    Exposes active rooms with stored learning data as state attributes on Pyscript status entities.
+    Enables zero-helper dynamic dashboard popups to auto-populate room options.
+    """
+    try:
+        rooms = set()
+        for key, category in LEARNING_DATA.items():
+            if isinstance(category, dict):
+                for rid, data in category.items():
+                    if data:
+                        rooms.add(rid)
+        
+        active_rooms = sorted(list(rooms))
+        reset_types = ["all", "user_prefs", "room_curves", "media_prefs", "late_night_prefs"]
+        
+        attrs = {
+            "startup_time": time.time(),
+            "active_rooms": active_rooms,
+            "available_reset_types": reset_types
+        }
+        
+        state.set("pyscript.passable_smart_light_engine_ready", "on", new_attributes=attrs)
+        state.set("pyscript.smart_light_engine_ready", "on", new_attributes=attrs)
+    except Exception as e:
+        log.warning(f"PassableSmartLighting: Failed to sync active room state attributes. ({e})")
 
 def save_data():
     """Saves LEARNING_DATA snapshot to JSON file."""
@@ -174,6 +200,7 @@ def save_data():
         data_str = json.dumps(data_copy, indent=4)
         task.executor(p.write_text, data_str)
         log.info("PassableSmartLighting: 💾 Successfully saved updated AI preferences to JSON.")
+        sync_active_rooms_state()
     except Exception as e:
         log.error(f"PassableSmartLighting: Failed to save JSON data - {e}")
 

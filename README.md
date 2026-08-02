@@ -14,6 +14,7 @@ An adaptive, machine-learning-inspired lighting automation system for Home Assis
 - **📺 Media Player Integration:** Automatically applies learned TV/media lighting presets when media players are active.
 - **🌙 Late Night Mode:** Overrides sun-based targeting during night hours with configurable start/stop times or helper entity triggers.
 - **🛑 Flexible Bypasses & Overrides:** Support for Freeze Bypasses (stay as-is), Force-Off Bypasses (e.g., Away mode), and customizable manual override timeouts.
+- **🧹 Dynamic Active Rooms State Sync:** Publishes `active_rooms` and `available_reset_types` state attributes to `pyscript.passable_smart_light_engine_ready`, allowing zero-helper dynamic dashboard cards & popup actions to auto-populate learning data reset options.
 
 ---
 
