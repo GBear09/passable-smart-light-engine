@@ -238,14 +238,12 @@ def passable_smart_light_engine_event_wrapper(trigger_type=None, event_type=None
     """
     passable_smart_light_engine(**kwargs)
 
-@service("pyscript.smart_light_engine")
 @service("smart_light_engine")
 @service
 def smart_light_engine(**kwargs):
     """Legacy service alias for backward compatibility with existing automations."""
     passable_smart_light_engine(**kwargs)
 
-@service("pyscript.passable_smart_light_engine")
 @service("passable_smart_light_engine")
 @service
 def passable_smart_light_engine(
@@ -779,7 +777,6 @@ def passable_smart_light_engine(
 # ==========================================
 # LEARNING DATA MANAGEMENT SERVICE
 # ==========================================
-@service("pyscript.passable_smart_light_engine_reset")
 @service("passable_smart_light_engine_reset")
 @service
 def passable_smart_light_engine_reset(room_id=None, reset_type="all"):
@@ -809,7 +806,6 @@ def passable_smart_light_engine_reset(room_id=None, reset_type="all"):
     save_data()
     log.info(f"PassableSmartLighting [{room_id}]: Learning data reset complete ({reset_type}).")
 
-@service("pyscript.smart_light_engine_reset")
 @service("smart_light_engine_reset")
 @service
 def smart_light_engine_reset(room_id=None, reset_type="all"):
