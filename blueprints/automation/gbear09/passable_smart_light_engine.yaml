@@ -275,19 +275,16 @@ blueprint:
 # ==========================================
 mode: queued
 
-# Pass !input lists safely to the trigger templates
 trigger_variables:
   presence_entities: !input presence_entity
   override_entity: !input manual_override_entity
 
 trigger:
-  # Trigger 1: Room occupied
   - platform: state
     entity_id: !input presence_entity
     to: "on"
     id: "presence_on"
     
-  # Trigger 2: Room vacant for the configured timeout
   - platform: template
     value_template: >
       {{ expand(presence_entities) | selectattr('state', 'eq', 'on') | list | length == 0 }}
@@ -295,44 +292,36 @@ trigger:
       minutes: !input presence_timeout_min
     id: "presence_off_timeout"
     
-  # Trigger 3: Light entity brightness changes or is toggled (For override monitoring/learning)
   - platform: state
     entity_id: !input light_entity
     id: "light_change"
     
-  # Trigger 4: Environmental lux changes (Instant hybrid reaction without waiting for heartbeat)
   - platform: state
     entity_id: !input lux_sensor
     id: "lux_change"
     
-  # Trigger 5: TV or Media changes state
   - platform: state
     entity_id: !input media_entities
     id: "media_change"
     
-  # Trigger 6: Catch when the user manually forces the override input_boolean ON
   - platform: template
     value_template: >
       {{ override_entity != '' and is_state(override_entity, 'on') }}
     id: "override_change"
     
-  # Trigger 7: Catch when the override input_boolean expires or is toggled OFF
   - platform: template
     value_template: >
       {{ override_entity != '' and is_state(override_entity, 'off') }}
     id: "override_change"
     
-  # Trigger 8: Periodic evaluation to slowly fade lights up/down if environmental lux shifts slightly
   - platform: time_pattern
     minutes: "/5"
     id: "heartbeat"
 
-  # Trigger 9: Bypass freeze entities change state (Instant evaluation when bypass state toggles)
   - platform: state
     entity_id: !input bypass_freeze_entities
     id: "bypass_change"
 
-  # Trigger 10: Bypass off entities change state (Instant evaluation when bypass state toggles)
   - platform: state
     entity_id: !input bypass_off_entities
     id: "bypass_change"
@@ -344,12 +333,6 @@ variables:
   light_var: !input light_entity
 
 action:
-
-  # ==========================================
-  # CONDITION CHECK
-  # Only let the 5-minute heartbeat pass through if the room is active in some way.
-  # Prevents unnecessary pyscript service calls on empty rooms.
-  # ==========================================
   - condition: template
     value_template: >
       {% if trigger is defined and trigger.id == 'heartbeat' %}
@@ -361,10 +344,6 @@ action:
         true
       {% endif %}
       
-  # ==========================================
-  # FIRE PYSCRIPT EVENT
-  # Pass all context and configuration variables to the backend engine
-  # ==========================================
   - event: "passable_smart_light_engine_event"
     event_data:
       trigger_id: >
