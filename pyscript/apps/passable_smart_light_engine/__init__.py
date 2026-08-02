@@ -19,9 +19,11 @@ MIN_VISIBLE_PCT = 5
 
 # Path to the JSON file where learning data will be persisted across HA restarts
 DATA_FILE = "/config/pyscript/apps/passable_smart_light_engine/learning_data.json"
+LEGACY_DATA_FILE = "/config/pyscript/apps/smart_light_engine/learning_data.json"
 
 # States that represent an entity being "active" or "on"
 ACTIVE_STATES = ["on", "playing", "true", "home", "paused", "idle", "standby", "buffering"]
+
 
 def safe_get_state(entity_id, default=0):
     """
@@ -147,21 +149,26 @@ def load_data():
     """Loads saved AI learning data into global memory dictionary."""
     global LEARNING_DATA
     try:
-        if task.executor(os.path.exists, DATA_FILE):
-            p = pathlib.Path(DATA_FILE)
+        target_file = DATA_FILE
+        if not task.executor(os.path.exists, target_file) or task.executor(os.path.getsize, target_file) < 150:
+            if task.executor(os.path.exists, LEGACY_DATA_FILE):
+                target_file = LEGACY_DATA_FILE
+
+        if task.executor(os.path.exists, target_file):
+            p = pathlib.Path(target_file)
             data_str = task.executor(p.read_text)
             if data_str:
                 loaded = json.loads(data_str)
                 for k in LEARNING_DATA:
                     if k in loaded: 
                         LEARNING_DATA[k] = loaded[k]
-                log.info(f"PassableSmartLighting: Loaded learning data from JSON for {len(LEARNING_DATA.get('user_prefs', {}))} rooms.")
+                log.info(f"PassableSmartLighting: Loaded learning data from {target_file} for {len(LEARNING_DATA.get('user_prefs', {}))} rooms.")
         else:
             log.info("PassableSmartLighting: No existing JSON data found. Starting fresh.")
     except Exception as e:
         log.warning(f"PassableSmartLighting: Failed to load JSON data. ({e})")
 
-    # Announce that Pyscript has loaded (supporting both new and legacy status entities)
+    # Announce that Pyscript has loaded and sync active room state attributes
     sync_active_rooms_state()
 
 def sync_active_rooms_state():
