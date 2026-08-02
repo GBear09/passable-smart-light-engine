@@ -166,23 +166,26 @@ def load_data():
 
 def sync_active_rooms_state():
     """
-    Exposes active rooms with stored learning data as state attributes on Pyscript status entities.
-    Enables zero-helper dynamic dashboard popups to auto-populate room options.
+    Exposes active rooms and their non-empty dataset keys as state attributes on Pyscript status entities.
+    Enables zero-helper dynamic dashboard popups to auto-populate room and dataset reset options.
     """
     try:
-        rooms = set()
-        for key, category in LEARNING_DATA.items():
-            if isinstance(category, dict):
-                for rid, data in category.items():
+        room_datasets = {}
+        for category_key, category_dict in LEARNING_DATA.items():
+            if isinstance(category_dict, dict):
+                for rid, data in category_dict.items():
                     if data:
-                        rooms.add(rid)
+                        if rid not in room_datasets:
+                            room_datasets[rid] = []
+                        room_datasets[rid].append(category_key)
         
-        active_rooms = sorted(list(rooms))
+        active_rooms = sorted(list(room_datasets.keys()))
         reset_types = ["all", "user_prefs", "room_curves", "media_prefs", "late_night_prefs"]
         
         attrs = {
             "startup_time": time.time(),
             "active_rooms": active_rooms,
+            "room_datasets": room_datasets,
             "available_reset_types": reset_types
         }
         
