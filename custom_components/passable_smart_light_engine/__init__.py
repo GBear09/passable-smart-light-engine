@@ -94,29 +94,8 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
             LEGACY_DOMAIN, SERVICE_RESET_LEARNING_DATA, _async_handle_reset_service, schema=RESET_SERVICE_SCHEMA
         )
 
-    # ==============================================================
-    # 3. AUTO-BUNDLE BLUEPRINT (Optional helper)
-    # Automatically ensures blueprint is available in HA blueprints directory
-    # ==============================================================
-    await hass.async_add_executor_job(_copy_bundled_blueprint, hass)
-
     _LOGGER.info("Passable AI Smart Lighting Controller component initialized successfully.")
     return True
-
-
-def _copy_bundled_blueprint(hass: HomeAssistant) -> None:
-    """Safely copy bundled blueprint to Home Assistant blueprints folder if present."""
-    try:
-        source = pathlib.Path(__file__).parent.parent.parent / "blueprints" / "automation" / "gbear09" / "passable_smart_light_engine.yaml"
-        target_dir = pathlib.Path(hass.config.path("blueprints", "automation", "gbear09"))
-        target_file = target_dir / "passable_smart_light_engine.yaml"
-
-        if source.is_file() and not target_file.is_file():
-            target_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target_file)
-            _LOGGER.info("PassableSmartLighting: Copied bundled blueprint to %s", target_file)
-    except Exception as err:
-        _LOGGER.debug("Could not copy bundled blueprint (normal during headless or testing): %s", err)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

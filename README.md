@@ -93,11 +93,12 @@ graph TD
 
 ---
 
-### Option B: Blueprint Bridge Setup
+### Option B: Blueprint Bridge Compatibility
 
-If you prefer using Home Assistant's Blueprint UI or wish to maintain your existing blueprint automations:
-1. The blueprint is bundled at `blueprints/automation/gbear09/passable_smart_light_engine.yaml`.
-2. Existing automations that fire `smart_light_engine_event` or `passable_smart_light_engine_event` are handled automatically by the native integration backend with zero reconfiguration required.
+If you currently have room automations configured using the Home Assistant Blueprint:
+* You do not need to delete or recreate your automations.
+* The native integration listens directly on Home Assistant's event bus for `smart_light_engine_event` and `passable_smart_light_engine_event`.
+* The integration acts as a direct, high-performance drop-in backend replacing the old Pyscript file.
 
 ---
 
