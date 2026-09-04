@@ -7,7 +7,7 @@ import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
+from homeassistant.core import CALLBACK_TYPE, Context, Event, HomeAssistant, State, callback
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
@@ -17,6 +17,7 @@ import homeassistant.util.dt as dt_util
 
 from .const import (
     ACTIVE_STATES,
+    BRIGHTNESS_HYSTERESIS_PCT,
     CONF_BYPASS_FREEZE_ENTITIES,
     CONF_BYPASS_OFF_ENTITIES,
     CONF_LIGHT_ENTITY,
@@ -35,6 +36,7 @@ from .const import (
     DEFAULT_LUX_RATIO,
     DEFAULT_MAX_COLOR_TEMP,
     DEFAULT_MEDIA_SEED_PCT,
+    DEFAULT_MESH_SETTLE_SEC,
     DEFAULT_MIN_COLOR_TEMP,
     DEFAULT_MIN_OCCUPIED_PCT,
     DEFAULT_OVERRIDE_TIMEOUT_MIN,
@@ -42,9 +44,16 @@ from .const import (
     DEFAULT_PRESENCE_TIMEOUT_MIN,
     DEFAULT_TARGET_LUX,
     DOMAIN,
+    DWELL_TIME_SEC,
+    ECHO_CONVERGENCE_SETTLE_SEC,
     ECHO_GUARD_TOLERANCE_PCT,
     ECHO_GUARD_WINDOW_SEC,
+    LUX_ADJUST_RATE_LIMIT_SEC,
+    LUX_DEADBAND_PCT,
+    MIN_LUX_DEADBAND,
     MIN_VISIBLE_PCT,
+    OVERRIDE_FADE_TRANSITION_SEC,
+    SENSOR_DEBOUNCE_SEC,
 )
 from .storage import LearningDataStore
 
@@ -56,15 +65,6 @@ def safe_get_state(hass: HomeAssistant, entity_id: Optional[str], default: Any =
     if not entity_id or not isinstance(entity_id, str):
         return default
     try:
-        if "." in entity_id and len(entity_id.split(".")) == 3:
-            domain, entity, attr = entity_id.split(".")
-            st = hass.states.get(f"{domain}.{entity}")
-            if st and st.attributes and attr in st.attributes:
-                val = st.attributes[attr]
-                if val is not None and val not in ("unknown", "unavailable"):
-                    return val
-            return default
-
         st = hass.states.get(entity_id)
         if st and st.state not in (None, "unknown", "unavailable"):
             return st.state
@@ -152,9 +152,12 @@ def calculate_required_pct(
 
 
 def calculate_learned_target_lux(
-    seed_lux: float, user_prefs: List[Dict[str, Any]], current_elevation: float
+    seed_lux: float,
+    user_prefs: List[Dict[str, Any]],
+    current_elevation: float,
+    current_azimuth: Optional[float] = None,
 ) -> float:
-    """Blend seed lux with historical user preferences weighted by sun elevation proximity."""
+    """Blend seed lux with historical user preferences weighted by sun elevation and azimuth proximity."""
     if not user_prefs:
         return float(seed_lux)
 
@@ -164,8 +167,16 @@ def calculate_learned_target_lux(
     for pref in user_prefs:
         pref_elev = float(pref.get("sun_elev", 0.0))
         pref_lux = float(pref.get("preferred_lux", seed_lux))
-        diff = abs(current_elevation - pref_elev)
-        weight = math.exp(-0.5 * (diff / 15.0) ** 2)
+        diff_elev = abs(current_elevation - pref_elev)
+
+        pref_azim = pref.get("sun_azimuth")
+        if current_azimuth is not None and pref_azim is not None:
+            diff_azim = abs(current_azimuth - float(pref_azim))
+            diff_azim = min(diff_azim, 360.0 - diff_azim)
+            weight = math.exp(-0.5 * ((diff_elev / 15.0) ** 2 + (diff_azim / 45.0) ** 2))
+        else:
+            weight = math.exp(-0.5 * (diff_elev / 15.0) ** 2)
+
         weighted_lux += pref_lux * weight
         total_weight += weight
 
@@ -189,9 +200,32 @@ class PassableLightingEngine:
         self._room_locks: Dict[str, asyncio.Lock] = {}
         self._echo_guards: Dict[str, Dict[str, Any]] = {}
         self._override_timers: Dict[str, Dict[str, Any]] = {}
-        self._vacancy_timers: Dict[str, CALLBACK_TYPE] = {}
+        self._pending_learning_handles: Dict[str, CALLBACK_TYPE] = {}
+        self._last_ambient_adjust: Dict[str, float] = {}
+        self._engine_contexts: Dict[str, float] = {}
         self._stabilizing_tasks: Dict[str, asyncio.Task] = {}
         self._controllers: Dict[str, "RoomController"] = {}
+
+    def _cleanup_contexts(self) -> None:
+        """Prune expired engine context IDs."""
+        now = time.time()
+        self._engine_contexts = {cid: exp for cid, exp in self._engine_contexts.items() if exp > now}
+
+    def register_engine_context(self, context_id: str, ttl_sec: float) -> None:
+        """Register an integration service call context ID with TTL."""
+        self._engine_contexts[context_id] = time.time() + ttl_sec
+        self._cleanup_contexts()
+
+    def is_engine_context(self, context: Optional[Context]) -> bool:
+        """Check if an event was triggered by an automated engine command."""
+        if not context:
+            return False
+        self._cleanup_contexts()
+        if context.id in self._engine_contexts:
+            return True
+        if context.parent_id and context.parent_id in self._engine_contexts:
+            return True
+        return False
 
     def get_lock(self, room_id: str) -> asyncio.Lock:
         """Return or create a mutex lock for a room."""
@@ -230,15 +264,19 @@ class PassableLightingEngine:
         return sum(history) / len(history)
 
     def set_echo_guard(
-        self, room_id: str, target_pct: int, start_pct: int, duration_sec: float = 1.0
+        self, room_id: str, target_pct: int, start_pct: int, transition_sec: float = 1.0
     ) -> None:
-        """Record an intended lighting adjustment for trajectory-bounded echo guarding."""
+        """Record an intended lighting adjustment for trajectory-bounded convergence guarding."""
         now = time.time()
+        duration_sec = transition_sec + DEFAULT_MESH_SETTLE_SEC
+        direction = 1 if target_pct > start_pct else (-1 if target_pct < start_pct else 0)
         self._echo_guards[room_id] = {
-            "expires_at": now + ECHO_GUARD_WINDOW_SEC + duration_sec,
+            "expires_at": now + duration_sec,
             "target_pct": target_pct,
             "start_pct": start_pct,
-            "duration": duration_sec,
+            "last_reported_pct": start_pct,
+            "direction": direction,
+            "settled_since": None,
             "timestamp": now,
         }
 
@@ -255,21 +293,66 @@ class PassableLightingEngine:
 
         target_pct = guard["target_pct"]
         start_pct = guard["start_pct"]
+        direction = guard["direction"]
         tolerance = ECHO_GUARD_TOLERANCE_PCT
 
-        if abs(current_pct - target_pct) <= tolerance:
-            return True
-
-        if abs(current_pct - start_pct) <= tolerance:
-            return True
-
-        # In-flight trajectory check
         min_p = min(start_pct, target_pct) - tolerance
         max_p = max(start_pct, target_pct) + tolerance
-        if min_p <= current_pct <= max_p:
-            return True
 
-        return False
+        # 1. Bounds check: must fall within trajectory
+        if not (min_p <= current_pct <= max_p):
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Incoming pct %s%% outside trajectory bounds [%.1f, %.1f]",
+                room_id,
+                current_pct,
+                min_p,
+                max_p,
+            )
+            self._echo_guards.pop(room_id, None)
+            return False
+
+        # 2. Directional check: does it progress toward target or reverse significantly?
+        last_pct = guard["last_reported_pct"]
+        if direction > 0 and current_pct < (last_pct - tolerance):
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Divergent counter-dimming detected (%s%% < %s%%)",
+                room_id,
+                current_pct,
+                last_pct,
+            )
+            self._echo_guards.pop(room_id, None)
+            return False
+        elif direction < 0 and current_pct > (last_pct + tolerance):
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Divergent counter-brightening detected (%s%% > %s%%)",
+                room_id,
+                current_pct,
+                last_pct,
+            )
+            self._echo_guards.pop(room_id, None)
+            return False
+
+        guard["last_reported_pct"] = current_pct
+
+        # 3. Early convergence termination:
+        # If hardware has reached target within ±3% and settled for ECHO_CONVERGENCE_SETTLE_SEC,
+        # close the guard early so user manual control is unblocked immediately!
+        if abs(current_pct - target_pct) <= 3:
+            if guard["settled_since"] is None:
+                guard["settled_since"] = now
+            elif (now - guard["settled_since"]) >= ECHO_CONVERGENCE_SETTLE_SEC:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Hardware reached target %s%% and settled for %.1fs. Closing echo guard early.",
+                    room_id,
+                    target_pct,
+                    ECHO_CONVERGENCE_SETTLE_SEC,
+                )
+                self._echo_guards.pop(room_id, None)
+                return True
+        else:
+            guard["settled_since"] = None
+
+        return True
 
     def is_manual_override_active(self, room_id: str) -> bool:
         """Check if manual override is currently active for a room."""
@@ -293,7 +376,6 @@ class PassableLightingEngine:
         self, room_id: str, timeout_min: int, cancel_cb: Optional[CALLBACK_TYPE] = None
     ) -> None:
         """Activate manual override for a room."""
-        # Cancel any previous HA timer callback
         prev = self._override_timers.get(room_id)
         if prev and prev.get("cancel_cb"):
             prev["cancel_cb"]()
@@ -325,7 +407,7 @@ class PassableLightingEngine:
         max_temp: int,
         transition: float = 1.0,
     ) -> None:
-        """Send turn_on command to Home Assistant light with echo guard."""
+        """Send turn_on command to Home Assistant light with echo guard and context tracking."""
         current_state = self.hass.states.get(light_entity)
         start_pct = 0
         if current_state and current_state.state == "on":
@@ -341,19 +423,29 @@ class PassableLightingEngine:
             kelvin = get_circadian_temp(self.hass, min_temp, max_temp)
             service_data["color_temp_kelvin"] = kelvin
 
+        # Track HA Context
+        engine_context = Context()
+        ttl = transition + DEFAULT_MESH_SETTLE_SEC + 5.0
+        self.register_engine_context(engine_context.id, ttl)
+
         self.set_echo_guard(room_id, brightness_pct, start_pct, transition)
-        await self.hass.services.async_call("light", "turn_on", service_data)
+        await self.hass.services.async_call("light", "turn_on", service_data, context=engine_context)
 
     async def async_turn_off_light(self, room_id: str, light_entity: str, transition: float = 2.0) -> None:
-        """Send turn_off command to Home Assistant light with echo guard."""
+        """Send turn_off command to Home Assistant light with echo guard and context tracking."""
         current_state = self.hass.states.get(light_entity)
         start_pct = 0
         if current_state and current_state.state == "on":
             start_pct = int(round((current_state.attributes.get("brightness", 0) / 255.0) * 100))
 
+        # Track HA Context
+        engine_context = Context()
+        ttl = transition + DEFAULT_MESH_SETTLE_SEC + 5.0
+        self.register_engine_context(engine_context.id, ttl)
+
         self.set_echo_guard(room_id, 0, start_pct, transition)
         await self.hass.services.async_call(
-            "light", "turn_off", {"entity_id": light_entity, "transition": transition}
+            "light", "turn_off", {"entity_id": light_entity, "transition": transition}, context=engine_context
         )
 
     async def async_sync_helper(self, entity_id: Optional[str], target_state: bool) -> None:
@@ -540,33 +632,40 @@ class PassableLightingEngine:
 
         # 3. Hardware Echo Guard & Manual Override Detection
         if trigger_id == "light_change":
-            if self.check_echo_guard(room_id, current_pct):
+            evt_context = p.get("context")
+            if self.is_engine_context(evt_context):
                 _LOGGER.debug(
-                    "PassableSmartLighting [%s]: Echo guard absorbed light change (%s%%)", room_id, current_pct
+                    "PassableSmartLighting [%s]: Echo guard absorbed light change via Context ID", room_id
                 )
                 return
 
-            # Detect manual override
-            is_manual_action = True
-            trigger_context_id = p.get("trigger_context_id", "none")
-            trigger_user_id = p.get("trigger_user_id", "none")
+            if self.check_echo_guard(room_id, current_pct):
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Echo guard absorbed light change via Trajectory (%s%%)", room_id, current_pct
+                )
+                return
 
-            # Max brightness ignore rule (e.g. flicked switch to 100% to cancel bedtime)
+            # Genuine manual action detected
+            is_manual_action = True
+
+            # Max brightness rule: lock override so the engine doesn't fight full-brightness commands
             if ignore_max_override and current_pct >= 95 and p.get("trigger_from_state") == "off":
                 _LOGGER.info(
-                    "PassableSmartLighting [%s]: Light turned on to 100%%. Bypassing override lock.", room_id
+                    "PassableSmartLighting [%s]: Light turned on to 100%% (Task full-brightness lock).", room_id
                 )
-                is_manual_action = False
+                is_manual_action = True
 
             if is_manual_action and is_light_on:
                 @callback
                 def _on_override_expired() -> None:
                     self.clear_manual_override(room_id)
                     self.hass.async_create_task(self.async_sync_helper(manual_override_entity, False))
-                    # Trigger a room re-evaluation
+                    # Trigger a room re-evaluation with graceful cross-fade
                     ctrl = self._controllers.get(room_id)
                     if ctrl:
-                        self.hass.async_create_task(ctrl.async_evaluate("override_expired"))
+                        self.hass.async_create_task(
+                            ctrl.async_evaluate("override_expired", {"transition": OVERRIDE_FADE_TRANSITION_SEC})
+                        )
 
                 cancel_listener = async_call_later(
                     self.hass, override_timeout_min * 60, lambda _: _on_override_expired()
@@ -574,13 +673,14 @@ class PassableLightingEngine:
                 self.set_manual_override(room_id, override_timeout_min, cancel_listener)
                 await self.async_sync_helper(manual_override_entity, True)
 
-                # Trigger background learning from manual override
+                # Trigger background learning from manual override with 180s dwell validation
                 self._schedule_preference_learning(room_id, lux_sensor, current_pct, p)
                 return
 
             if not is_light_on:
                 # Turned off manually
                 self.clear_manual_override(room_id)
+                self.cancel_pending_learning(room_id)
                 await self.async_sync_helper(manual_override_entity, False)
                 return
 
@@ -600,6 +700,7 @@ class PassableLightingEngine:
                 _LOGGER.info("PassableSmartLighting [%s]: Vacancy timeout elapsed. Turning lights OFF.", room_id)
                 await self.async_turn_off_light(room_id, light_entity)
                 self.clear_manual_override(room_id)
+                self.cancel_pending_learning(room_id)
                 await self.async_sync_helper(manual_override_entity, False)
             return
 
@@ -659,15 +760,23 @@ class PassableLightingEngine:
         # Mode C: Daytime Ambient Lux Targeting
         sun_state = self.hass.states.get("sun.sun")
         elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
-        target_lux = calculate_learned_target_lux(target_lux_seed, user_prefs, elev)
+        azim = float(sun_state.attributes.get("azimuth", 0)) if sun_state and "azimuth" in sun_state.attributes else None
+        target_lux = calculate_learned_target_lux(target_lux_seed, user_prefs, elev, azim)
         current_lux = self.get_smoothed_lux(room_id, lux_sensor)
 
         needed_pct = calculate_required_pct(
             target_lux, current_lux, room_curves, default_lux_ratio, min_occupied_pct
         )
 
-        # Check hysteresis
+        # Check hysteresis and deadbands
         pct_diff = abs(current_pct - needed_pct)
+        lux_diff = abs(current_lux - target_lux)
+        lux_deadband = max(MIN_LUX_DEADBAND, target_lux * LUX_DEADBAND_PCT)
+
+        now_ts = time.time()
+        last_adj = self._last_ambient_adjust.get(room_id, 0.0)
+        time_since_last_adj = now_ts - last_adj
+
         if not is_light_on and needed_pct > 0:
             _LOGGER.info(
                 "PassableSmartLighting [%s]: Occupancy detected. Turning lights ON to %s%% (Target Lux: %.1f, Current: %.1f)",
@@ -676,6 +785,7 @@ class PassableLightingEngine:
                 target_lux,
                 current_lux,
             )
+            self._last_ambient_adjust[room_id] = now_ts
             await self.async_turn_on_light(
                 room_id, light_entity, needed_pct, circadian_enabled, min_color_temp, max_color_temp
             )
@@ -687,133 +797,148 @@ class PassableLightingEngine:
                     current_lux,
                     target_lux,
                 )
+                self._last_ambient_adjust[room_id] = now_ts
                 await self.async_turn_off_light(room_id, light_entity)
-            elif pct_diff >= 4:
+            elif pct_diff >= BRIGHTNESS_HYSTERESIS_PCT and lux_diff > lux_deadband:
+                # Rate limit to prevent control hunting during passing clouds
+                if time_since_last_adj < LUX_ADJUST_RATE_LIMIT_SEC and trigger_id == "lux_change":
+                    _LOGGER.debug(
+                        "PassableSmartLighting [%s]: Ambient adjustment rate-limited (%.1fs < %.1fs).",
+                        room_id,
+                        time_since_last_adj,
+                        LUX_ADJUST_RATE_LIMIT_SEC,
+                    )
+                    return
+
+                transition = float(p.get("transition", 1.0))
                 _LOGGER.info(
-                    "PassableSmartLighting [%s]: Adjusting brightness from %s%% to %s%% (Target: %.1f, Lux: %.1f)",
+                    "PassableSmartLighting [%s]: Adjusting brightness from %s%% to %s%% (Target: %.1f, Lux: %.1f, Trans: %.1fs)",
                     room_id,
                     current_pct,
                     needed_pct,
                     target_lux,
                     current_lux,
+                    transition,
                 )
+                self._last_ambient_adjust[room_id] = now_ts
                 await self.async_turn_on_light(
-                    room_id, light_entity, needed_pct, circadian_enabled, min_color_temp, max_color_temp
+                    room_id,
+                    light_entity,
+                    needed_pct,
+                    circadian_enabled,
+                    min_color_temp,
+                    max_color_temp,
+                    transition=transition,
                 )
+
+    def cancel_pending_learning(self, room_id: str) -> None:
+        """Cancel any scheduled preference learning for a room."""
+        handle = self._pending_learning_handles.pop(room_id, None)
+        if handle:
+            try:
+                handle()
+            except Exception:
+                pass
+        task = self._stabilizing_tasks.pop(room_id, None)
+        if task and not task.done():
+            task.cancel()
 
     def _schedule_preference_learning(
         self, room_id: str, lux_sensor: str, current_pct: int, p: Dict[str, Any]
     ) -> None:
-        """Schedule asynchronous sensor lag compensation and preference saving."""
-        if room_id in self._stabilizing_tasks:
-            self._stabilizing_tasks[room_id].cancel()
+        """Schedule preference learning with 180s dwell validation to filter transient adjustments."""
+        self.cancel_pending_learning(room_id)
 
-        task = self.hass.async_create_task(
-            self._async_stabilize_and_learn(room_id, lux_sensor, current_pct, p)
+        @callback
+        def _on_dwell_completed(_now: Any) -> None:
+            self._pending_learning_handles.pop(room_id, None)
+            task = self.hass.async_create_task(
+                self._async_commit_learned_preference(room_id, lux_sensor, current_pct, p)
+            )
+            self._stabilizing_tasks[room_id] = task
+
+        _LOGGER.debug(
+            "PassableSmartLighting [%s]: Scheduled preference learning with %.0fs dwell validation",
+            room_id,
+            DWELL_TIME_SEC,
         )
-        self._stabilizing_tasks[room_id] = task
+        self._pending_learning_handles[room_id] = async_call_later(
+            self.hass, DWELL_TIME_SEC, _on_dwell_completed
+        )
 
-    async def _async_stabilize_and_learn(
+    async def _async_commit_learned_preference(
         self, room_id: str, lux_sensor: str, current_pct: int, p: Dict[str, Any]
     ) -> None:
-        """Wait up to 120s for sensor lag compensation, filter flare, and save user preference."""
+        """Commit learned user preference and update yield curves with daylight protection."""
         try:
-            lux_before = float(safe_get_state(self.hass, lux_sensor, 0.0))
-            current_lux_str = str(safe_get_state(self.hass, lux_sensor, 0.0))
-
-            _LOGGER.info(
-                "PassableSmartLighting [%s]: ⏳ Waiting up to 120s for lux sensor to stabilize at %s%%...",
-                room_id,
-                current_pct,
-            )
-
-            # Wait for state change on lux sensor
-            event_received = asyncio.Event()
-
-            @callback
-            def _lux_listener(evt: Event) -> None:
-                new_st = evt.data.get("new_state")
-                if new_st and new_st.state != current_lux_str:
-                    event_received.set()
-
-            unsub = async_track_state_change_event(self.hass, [lux_sensor], _lux_listener)
-            try:
-                await asyncio.wait_for(event_received.wait(), timeout=120.0)
-            finally:
-                unsub()
-
-            # Wait an extra 2s for hardware report settling
-            await asyncio.sleep(2.0)
-
-            lux_after = float(safe_get_state(self.hass, lux_sensor, 0.0))
-            if lux_after <= 0:
-                _LOGGER.warning(
-                    "PassableSmartLighting [%s]: Rejecting pref — lux_after is %.1f", room_id, lux_after
-                )
+            # 1. Verify light is still on and close to commanded percentage
+            light_entity = p.get("light_entity")
+            light_st = self.hass.states.get(light_entity) if light_entity else None
+            if not light_st or light_st.state != "on":
+                _LOGGER.debug("PassableSmartLighting [%s]: Light turned off during dwell; discarding preference.", room_id)
                 return
 
-            smoothed = self.get_smoothed_lux(room_id, lux_sensor)
-            if abs(lux_after - smoothed) > 20:
-                _LOGGER.info(
-                    "PassableSmartLighting [%s]: Lux reading %.1f contaminated (smoothed=%.1f). Using smoothed.",
-                    room_id,
-                    lux_after,
-                    smoothed,
-                )
-                lux_after = smoothed
+            live_pct = int(round((light_st.attributes.get("brightness", 0) / 255.0) * 100))
+            if abs(live_pct - current_pct) > 5:
+                _LOGGER.debug("PassableSmartLighting [%s]: Light brightness altered during dwell; discarding preference.", room_id)
+                return
 
-            # Sun elevation
+            # 2. Get settled ambient lux (dwell time guarantees sensor lag has fully resolved)
+            lux_now = self.get_smoothed_lux(room_id, lux_sensor)
+            if lux_now <= 0:
+                _LOGGER.warning("PassableSmartLighting [%s]: Rejecting pref — lux reading is %.1f", room_id, lux_now)
+                return
+
             sun_state = self.hass.states.get("sun.sun")
             elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
+            azim = float(sun_state.attributes.get("azimuth", 0)) if sun_state and "azimuth" in sun_state.attributes else None
 
-            # Flare filter (M3)
-            curve = self.store.data.get("room_curves", {}).get(room_id, {})
-            seed_lux = float(p.get("target_lux", DEFAULT_TARGET_LUX))
-            default_lux_ratio = float(p.get("default_lux_ratio", DEFAULT_LUX_RATIO))
-            from_pct = float(p.get("trigger_from_brightness", 0))
-
-            ambient_est = max(0.0, lux_before - get_expected_lux(curve, from_pct, default_lux_ratio))
-            if ambient_est > seed_lux:
-                artificial_at_new = get_expected_lux(curve, current_pct, default_lux_ratio)
-                target_save_lux = artificial_at_new + seed_lux
-                _LOGGER.info(
-                    "PassableSmartLighting [%s]: Flare filter — ambient_est=%.1f exceeds seed=%.1f. Saving %.1f instead of %.1f",
-                    room_id,
-                    ambient_est,
-                    seed_lux,
-                    target_save_lux,
-                    lux_after,
-                )
-            else:
-                target_save_lux = lux_after
-
-            target_save_lux = max(1.0, min(target_save_lux, seed_lux * 2.0))
-
-            # Store in preferences
+            # 3. Store user preference
             prefs = self.store.data.setdefault("user_prefs", {}).setdefault(room_id, [])
-            prefs.append({"sun_elev": elev, "preferred_lux": target_save_lux})
+            pref_entry: Dict[str, Any] = {
+                "sun_elev": round(elev, 1),
+                "preferred_lux": round(lux_now, 1),
+            }
+            if azim is not None:
+                pref_entry["sun_azimuth"] = round(azim, 1)
+
+            prefs.append(pref_entry)
             if len(prefs) > 50:
                 prefs.pop(0)
 
-            # Update yield curve data point
-            curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
-            curves[str(current_pct)] = target_save_lux
+            # 4. Yield Curve Update with Daylight Protection:
+            # ONLY record yield curves during dark hours (sun elevation < -4°) where ambient daylight ~ 0.
+            # During daylight, total lux includes sunlight which would severely contaminate the bulb yield curve.
+            if elev < -4.0:
+                curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
+                curves[str(current_pct)] = round(lux_now, 1)
+                _LOGGER.info(
+                    "PassableSmartLighting [%s]: 🌙 Dark hours yield curve updated: %s%% = %.1f lx",
+                    room_id,
+                    current_pct,
+                    lux_now,
+                )
+            else:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Daylight present (elev=%.1f°). Preserved yield curve from daylight contamination.",
+                    room_id,
+                    elev,
+                )
 
-            await self.store.async_save()
+            # Schedule delayed atomic save to eliminate flash wear
+            self.store.schedule_save(delay=30.0)
             _LOGGER.info(
                 "PassableSmartLighting [%s]: 💾 Saved learned preference: Elev=%.1f°, Lux=%.1f at %s%%",
                 room_id,
                 elev,
-                target_save_lux,
+                lux_now,
                 current_pct,
             )
 
-        except asyncio.TimeoutError:
-            _LOGGER.warning("PassableSmartLighting [%s]: Lux sensor wait timed out. Discarding preference.", room_id)
         except asyncio.CancelledError:
             pass
         except Exception as err:
-            _LOGGER.error("PassableSmartLighting [%s]: Error during preference learning: %s", room_id, err)
+            _LOGGER.error("PassableSmartLighting [%s]: Error committing learned preference: %s", room_id, err)
         finally:
             self._stabilizing_tasks.pop(room_id, None)
 
@@ -830,7 +955,8 @@ class RoomController:
         self._unsub_listeners: List[CALLBACK_TYPE] = []
         self._is_enabled = True
         self._freeze_bypass_active = False
-        self._vacancy_task: Optional[asyncio.Task] = None
+        self._vacancy_cancel: Optional[CALLBACK_TYPE] = None
+        self._debounce_cancel: Optional[CALLBACK_TYPE] = None
         self.selected_reset_target: str = "all"
 
     @property
@@ -844,7 +970,7 @@ class RoomController:
         if not enabled:
             self.engine.clear_manual_override(self.room_id)
         else:
-            self.hass.async_create_task(self.async_evaluate("enabled_toggle"))
+            self.schedule_evaluation("enabled_toggle", delay_sec=0.0)
 
     @property
     def freeze_bypass_active(self) -> bool:
@@ -854,6 +980,24 @@ class RoomController:
     def set_freeze_bypass(self, active: bool) -> None:
         """Set dedicated freeze switch state."""
         self._freeze_bypass_active = active
+
+    def schedule_evaluation(
+        self, trigger_id: str, extra_params: Optional[Dict[str, Any]] = None, delay_sec: float = SENSOR_DEBOUNCE_SEC
+    ) -> None:
+        """Debounce room evaluations to coalesce bursts of sensor events and prevent mesh flooding."""
+        if self._debounce_cancel:
+            self._debounce_cancel()
+            self._debounce_cancel = None
+
+        @callback
+        def _execute(_now: Any) -> None:
+            self._debounce_cancel = None
+            self.hass.async_create_task(self.async_evaluate(trigger_id, extra_params))
+
+        if delay_sec <= 0:
+            _execute(None)
+        else:
+            self._debounce_cancel = async_call_later(self.hass, delay_sec, _execute)
 
     async def async_start(self) -> None:
         """Start tracking state changes for this room."""
@@ -880,48 +1024,62 @@ class RoomController:
             @callback
             def _on_presence_change(evt: Event) -> None:
                 new_st = evt.data.get("new_state")
-                old_st = evt.data.get("old_state")
                 if not new_st:
                     return
                 if new_st.state == "on":
-                    if self._vacancy_task and not self._vacancy_task.done():
-                        self._vacancy_task.cancel()
-                    self.hass.async_create_task(self.async_evaluate("presence_on"))
+                    if self._vacancy_cancel:
+                        self._vacancy_cancel()
+                        self._vacancy_cancel = None
+                    self.schedule_evaluation("presence_on", delay_sec=0.1)
                 elif new_st.state == "off":
                     if not self.engine.check_presence(presence_entities):
                         timeout_m = int(self.entry_data.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN))
-                        if self._vacancy_task and not self._vacancy_task.done():
-                            self._vacancy_task.cancel()
-                        self._vacancy_task = self.hass.async_create_task(self._async_schedule_vacancy_off(timeout_m))
+                        if self._vacancy_cancel:
+                            self._vacancy_cancel()
+                            self._vacancy_cancel = None
+
+                        @callback
+                        def _on_vacancy_timeout(_now: Any) -> None:
+                            self._vacancy_cancel = None
+                            if not self.engine.check_presence(presence_entities):
+                                self.schedule_evaluation("presence_off_timeout", delay_sec=0.0)
+
+                        self._vacancy_cancel = async_call_later(
+                            self.hass, timeout_m * 60, _on_vacancy_timeout
+                        )
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, presence_entities, _on_presence_change)
             )
 
-        # Track light changes
+        # Track light changes (with context forwarding)
         if light_entity:
             @callback
             def _on_light_change(evt: Event) -> None:
                 new_st = evt.data.get("new_state")
                 old_st = evt.data.get("old_state")
+                if not new_st:
+                    return
                 from_b = old_st.attributes.get("brightness", 0) if old_st else 0
                 from_s = old_st.state if old_st else "off"
                 params = {
                     "trigger_id": "light_change",
                     "trigger_from_state": from_s,
                     "trigger_from_brightness": from_b,
+                    "context": evt.context,
                 }
-                self.hass.async_create_task(self.async_evaluate("light_change", params))
+                # Minimal debounce to capture rapid multi-bulb Zigbee reports
+                self.schedule_evaluation("light_change", params, delay_sec=0.05)
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, [light_entity], _on_light_change)
             )
 
-        # Track lux changes
+        # Track lux changes (with sensor debounce)
         if lux_sensor:
             @callback
             def _on_lux_change(evt: Event) -> None:
-                self.hass.async_create_task(self.async_evaluate("lux_change"))
+                self.schedule_evaluation("lux_change", delay_sec=SENSOR_DEBOUNCE_SEC)
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, [lux_sensor], _on_lux_change)
@@ -931,7 +1089,7 @@ class RoomController:
         if media_entities:
             @callback
             def _on_media_change(evt: Event) -> None:
-                self.hass.async_create_task(self.async_evaluate("media_change"))
+                self.schedule_evaluation("media_change", delay_sec=SENSOR_DEBOUNCE_SEC)
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, media_entities, _on_media_change)
@@ -941,7 +1099,7 @@ class RoomController:
         if bypasses:
             @callback
             def _on_bypass_change(evt: Event) -> None:
-                self.hass.async_create_task(self.async_evaluate("bypass_change"))
+                self.schedule_evaluation("bypass_change", delay_sec=0.1)
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, bypasses, _on_bypass_change)
@@ -949,19 +1107,6 @@ class RoomController:
 
         # Initial evaluation
         await self.async_evaluate("startup")
-
-    async def _async_schedule_vacancy_off(self, timeout_minutes: int) -> None:
-        """Schedule a delayed check to turn off lights after vacancy timeout."""
-        presence_entities = self.entry_data.get(CONF_PRESENCE_ENTITIES, [])
-        if isinstance(presence_entities, str):
-            presence_entities = [presence_entities]
-
-        try:
-            await asyncio.sleep(timeout_minutes * 60)
-            if not self.engine.check_presence(presence_entities):
-                await self.async_evaluate("presence_off_timeout")
-        except asyncio.CancelledError:
-            pass
 
     async def async_evaluate(self, trigger_id: str, extra_params: Optional[Dict[str, Any]] = None) -> None:
         """Evaluate room state and dispatch to engine."""
@@ -975,15 +1120,18 @@ class RoomController:
 
         # Inject internal freeze bypass state if active
         if self._freeze_bypass_active:
-            freezes = list(params.get(CONF_BYPASS_FREEZE_ENTITIES, []))
             params["internal_freeze"] = True
 
         await self.engine.async_handle_engine_cycle(params)
 
     def stop(self) -> None:
-        """Unsubscribe all active listeners."""
-        if self._vacancy_task and not self._vacancy_task.done():
-            self._vacancy_task.cancel()
+        """Unsubscribe all active listeners and cancel pending timers."""
+        if self._vacancy_cancel:
+            self._vacancy_cancel()
+            self._vacancy_cancel = None
+        if self._debounce_cancel:
+            self._debounce_cancel()
+            self._debounce_cancel = None
         for unsub in self._unsub_listeners:
             try:
                 unsub()

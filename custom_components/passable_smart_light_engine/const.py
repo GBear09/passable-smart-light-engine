@@ -82,7 +82,19 @@ MIN_VISIBLE_PCT = 5
 ECHO_GUARD_WINDOW_SEC = 30.0
 ECHO_GUARD_TOLERANCE_PCT = 8.0
 
-ACTIVE_STATES = ["on", "playing", "true", "home", "paused", "idle", "standby", "buffering"]
+# Mesh, convergence, and arbitration timings
+DEFAULT_MESH_SETTLE_SEC = 12.0
+ECHO_CONVERGENCE_SETTLE_SEC = 2.5
+DWELL_TIME_SEC = 180.0
+SENSOR_DEBOUNCE_SEC = 0.5
+LUX_ADJUST_RATE_LIMIT_SEC = 25.0
+LUX_DEADBAND_PCT = 0.10
+MIN_LUX_DEADBAND = 5.0
+BRIGHTNESS_HYSTERESIS_PCT = 7
+OVERRIDE_FADE_TRANSITION_SEC = 7.0
+
+# Active states: idle and standby excluded to prevent media lockup
+ACTIVE_STATES = ["on", "playing", "true", "home", "paused", "buffering"]
 
 # Event names (for backward compatibility)
 EVENT_SMART_LIGHT_ENGINE = "smart_light_engine_event"

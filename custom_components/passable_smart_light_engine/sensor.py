@@ -121,7 +121,8 @@ class PassableLightingTargetLuxSensor(PassableLightingBaseSensor):
         user_prefs = self._engine.store.data.get("user_prefs", {}).get(self._room_id, [])
         sun_state = self.hass.states.get("sun.sun")
         elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
-        return round(calculate_learned_target_lux(seed_lux, user_prefs, elev), 1)
+        azim = float(sun_state.attributes.get("azimuth", 0)) if sun_state and "azimuth" in sun_state.attributes else None
+        return round(calculate_learned_target_lux(seed_lux, user_prefs, elev, azim), 1)
 
 
 class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
@@ -192,21 +193,10 @@ class PassableLightingEngineReadySensor(SensorEntity):
     async def async_added_to_hass(self) -> None:
         """Register storage update listener."""
         self._store.register_update_listener(self._on_store_updated)
-        self._sync_legacy_state()
 
     def _on_store_updated(self) -> None:
         """Update HA state when storage data changes."""
-        self._sync_legacy_state()
         self.async_write_ha_state()
-
-    def _sync_legacy_state(self) -> None:
-        """Mirror state attributes to pyscript.* entities for backward compatibility with popups."""
-        try:
-            attrs = self.extra_state_attributes
-            self.hass.states.async_set(f"pyscript.{DOMAIN}_ready", "on", attrs)
-            self.hass.states.async_set("pyscript.smart_light_engine_ready", "on", attrs)
-        except Exception:
-            pass
 
     @property
     def native_value(self) -> str:

@@ -116,8 +116,17 @@ class LearningDataStore:
 
         return False
 
+    def _data_to_save(self) -> Dict[str, Any]:
+        """Return data snapshot for storage persistence."""
+        return copy.deepcopy(self._data)
+
+    def schedule_save(self, delay: float = 30.0) -> None:
+        """Schedule atomic delayed persistence to eliminate flash write amplification."""
+        self._store.async_delay_save(self._data_to_save, delay=delay)
+        self._notify_listeners()
+
     async def async_save(self) -> None:
-        """Persist current in-memory learning data to HA storage atomically."""
+        """Persist current in-memory learning data to HA storage immediately."""
         try:
             snapshot = copy.deepcopy(self._data)
             await self._store.async_save(snapshot)
