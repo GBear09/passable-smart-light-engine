@@ -685,23 +685,56 @@ class PassableLightingEngine:
                 return
 
         # 4. Check if manual override is currently locked
+        if manual_override_entity and not self.is_manual_override_active(room_id):
+            helper_val = str(safe_get_state(self.hass, manual_override_entity, "off")).lower()
+            if helper_val in ("on", "true"):
+                self.set_manual_override(room_id, override_timeout_min)
+
         if self.is_manual_override_active(room_id):
             _LOGGER.debug("PassableSmartLighting [%s]: Manual override active. Skipping auto-adjustment.", room_id)
             return
 
         # 5. Presence & Vacancy Evaluation
-        is_occupied = self.check_presence(presence_entities)
+        is_occupied = self.check_presence(presence_entities) if presence_entities else True
 
         if not is_occupied:
             # Vacancy timeout handling
             if trigger_id == "presence_off_timeout" or (
                 trigger_id == "heartbeat" and not is_occupied and is_light_on
             ):
-                _LOGGER.info("PassableSmartLighting [%s]: Vacancy timeout elapsed. Turning lights OFF.", room_id)
-                await self.async_turn_off_light(room_id, light_entity)
+                if is_light_on:
+                    _LOGGER.info("PassableSmartLighting [%s]: Vacancy timeout elapsed. Turning lights OFF.", room_id)
+                    await self.async_turn_off_light(room_id, light_entity)
                 self.clear_manual_override(room_id)
                 self.cancel_pending_learning(room_id)
                 await self.async_sync_helper(manual_override_entity, False)
+                return
+
+            # Startup / Fail-Safe Vacancy Recovery:
+            # If lights are on in an unoccupied room and no timer is currently running
+            # (e.g. after Home Assistant reboot, reload, or missed event), recover countdown or turn off immediately.
+            if is_light_on:
+                ctrl = self._controllers.get(room_id)
+                if ctrl and ctrl.vacancy_cancel is None:
+                    timeout_sec = float(presence_timeout_min * 60)
+                    remaining_sec = ctrl.get_vacancy_remaining_sec(presence_entities, timeout_sec)
+                    if remaining_sec <= 0.0:
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Vacancy timeout elapsed while offline/reboot. Turning lights OFF immediately.",
+                            room_id,
+                        )
+                        await self.async_turn_off_light(room_id, light_entity)
+                        self.clear_manual_override(room_id)
+                        self.cancel_pending_learning(room_id)
+                        await self.async_sync_helper(manual_override_entity, False)
+                    else:
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Unoccupied room with lights on detected on %s. Resuming vacancy timer (%.1fs remaining).",
+                            room_id,
+                            trigger_id,
+                            remaining_sec,
+                        )
+                        ctrl.schedule_vacancy_timer(delay_sec=remaining_sec)
             return
 
         # 6. Mode & Target Calculation (Occupied Room)
@@ -968,9 +1001,76 @@ class RoomController:
         """Enable or disable automation for this room."""
         self._is_enabled = enabled
         if not enabled:
+            self.cancel_vacancy_timer()
             self.engine.clear_manual_override(self.room_id)
         else:
             self.schedule_evaluation("enabled_toggle", delay_sec=0.0)
+
+    @property
+    def vacancy_cancel(self) -> Optional[CALLBACK_TYPE]:
+        """Return active vacancy timer cancel handle."""
+        return self._vacancy_cancel
+
+    def schedule_vacancy_timer(self, delay_sec: Optional[float] = None) -> None:
+        """Arm or update the vacancy timeout countdown for this room."""
+        presence_entities = self.entry_data.get(CONF_PRESENCE_ENTITIES, [])
+        if isinstance(presence_entities, str):
+            presence_entities = [presence_entities] if presence_entities else []
+        elif presence_entities is None:
+            presence_entities = []
+
+        timeout_m = int(self.entry_data.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN))
+        default_delay = max(1.0, float(timeout_m * 60))
+
+        if delay_sec is None:
+            delay_sec = default_delay
+
+        if self._vacancy_cancel:
+            self._vacancy_cancel()
+            self._vacancy_cancel = None
+
+        @callback
+        def _on_vacancy_timeout(_now: Any) -> None:
+            self._vacancy_cancel = None
+            if not self.engine.check_presence(presence_entities):
+                self.schedule_evaluation("presence_off_timeout", delay_sec=0.0)
+
+        self._vacancy_cancel = async_call_later(self.hass, max(0.5, delay_sec), _on_vacancy_timeout)
+
+    def cancel_vacancy_timer(self) -> None:
+        """Cancel active vacancy timer."""
+        if self._vacancy_cancel:
+            self._vacancy_cancel()
+            self._vacancy_cancel = None
+
+    def get_vacancy_remaining_sec(self, presence_entities: List[str], timeout_sec: float) -> float:
+        """Calculate remaining vacancy countdown based on presence entity last_changed timestamps."""
+        if not presence_entities:
+            return 0.0
+
+        now = dt_util.utcnow()
+        most_recent_off_ts: Optional[datetime] = None
+
+        for ent in presence_entities:
+            st = self.hass.states.get(ent)
+            if not st:
+                continue
+            if st.state in ("on", "home", "true", "active"):
+                # Room is occupied
+                return timeout_sec
+            if st.last_changed:
+                lc = st.last_changed
+                if lc.tzinfo is None:
+                    lc = dt_util.as_utc(lc)
+                if most_recent_off_ts is None or lc > most_recent_off_ts:
+                    most_recent_off_ts = lc
+
+        if most_recent_off_ts is not None:
+            elapsed = (now - most_recent_off_ts).total_seconds()
+            remaining = timeout_sec - elapsed
+            return max(0.0, remaining)
+
+        return timeout_sec
 
     @property
     def freeze_bypass_active(self) -> bool:
@@ -1026,27 +1126,12 @@ class RoomController:
                 new_st = evt.data.get("new_state")
                 if not new_st:
                     return
-                if new_st.state == "on":
-                    if self._vacancy_cancel:
-                        self._vacancy_cancel()
-                        self._vacancy_cancel = None
+                if new_st.state in ("on", "home", "true", "active"):
+                    self.cancel_vacancy_timer()
                     self.schedule_evaluation("presence_on", delay_sec=0.1)
-                elif new_st.state == "off":
+                elif new_st.state in ("off", "not_home", "false"):
                     if not self.engine.check_presence(presence_entities):
-                        timeout_m = int(self.entry_data.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN))
-                        if self._vacancy_cancel:
-                            self._vacancy_cancel()
-                            self._vacancy_cancel = None
-
-                        @callback
-                        def _on_vacancy_timeout(_now: Any) -> None:
-                            self._vacancy_cancel = None
-                            if not self.engine.check_presence(presence_entities):
-                                self.schedule_evaluation("presence_off_timeout", delay_sec=0.0)
-
-                        self._vacancy_cancel = async_call_later(
-                            self.hass, timeout_m * 60, _on_vacancy_timeout
-                        )
+                        self.schedule_vacancy_timer()
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, presence_entities, _on_presence_change)
@@ -1126,9 +1211,7 @@ class RoomController:
 
     def stop(self) -> None:
         """Unsubscribe all active listeners and cancel pending timers."""
-        if self._vacancy_cancel:
-            self._vacancy_cancel()
-            self._vacancy_cancel = None
+        self.cancel_vacancy_timer()
         if self._debounce_cancel:
             self._debounce_cancel()
             self._debounce_cancel = None
