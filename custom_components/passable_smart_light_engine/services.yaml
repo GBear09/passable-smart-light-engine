@@ -1,0 +1,28 @@
+reset_learning_data:
+  name: Reset Learning Data
+  description: Resets AI yield curves, learned user sun preferences, media brightness levels, or late-night presets for a specific room or all rooms.
+  fields:
+    room_id:
+      name: Room ID
+      description: The room ID to reset (e.g. 'living_room'). If omitted, all rooms will be reset.
+      example: "living_room"
+      selector:
+        text:
+    reset_type:
+      name: Reset Type
+      description: The specific dataset category to clear.
+      default: all
+      required: false
+      selector:
+        select:
+          options:
+            - label: "All Datasets"
+              value: "all"
+            - label: "User Sun Preferences"
+              value: "user_prefs"
+            - label: "Room Lux Yield Curves"
+              value: "room_curves"
+            - label: "Media Player Presets"
+              value: "media_prefs"
+            - label: "Late Night Presets"
+              value: "late_night_prefs"

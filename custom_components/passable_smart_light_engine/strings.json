@@ -1,0 +1,80 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Passable AI Smart Lighting - Room Setup",
+        "description": "Configure the core hardware and lux targets for this room.",
+        "data": {
+          "room_id": "Room ID (Internal key, e.g. living_room)",
+          "light_entity": "Light Entity to Control",
+          "presence_entity": "Presence / Motion Sensors",
+          "lux_sensor": "Ambient Illuminance Sensor (Lux)",
+          "target_lux": "Target Ambient Lux (Seed)",
+          "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
+          "presence_timeout_min": "Vacancy Timeout (Minutes)",
+          "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)"
+        }
+      },
+      "advanced": {
+        "title": "Advanced Settings, Overrides & Bypasses",
+        "description": "Configure manual override tracking, bypasses, circadian rhythm, media player watching, and late night mode.",
+        "data": {
+          "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
+          "create_override_switch": "Create Dedicated Native Manual Override Switch",
+          "bypass_freeze_entities": "Freeze Bypasses (Hold current state)",
+          "create_freeze_switch": "Create Dedicated Native Freeze Switch",
+          "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
+          "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
+          "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
+          "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
+          "min_color_temp": "Warmest Temp (Kelvin)",
+          "max_color_temp": "Coolest Temp (Kelvin)",
+          "media_entities": "Media Player Entities",
+          "media_seed_pct": "Media Brightness % (Seed)",
+          "late_night_enabled": "Enable Late Night Mode",
+          "late_night_pct": "Late Night Brightness % (Seed)",
+          "late_night_condition_type": "Late Night Trigger Mode",
+          "late_night_entity": "Late Night Active Helper Entity / Group",
+          "late_night_start_time": "Late Night Start Time (Fixed)",
+          "late_night_start_entity": "Late Night Start Entity (input_datetime)",
+          "late_night_stop_time": "Late Night Stop Time (Fixed)",
+          "late_night_stop_entity": "Late Night Stop Entity (input_datetime)",
+          "power_grid_entity": "Power Grid Status Entity"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This room ID is already configured in Passable AI Smart Lighting Controller."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Smart Lighting Room Settings",
+        "description": "Adjust hardware, lux targets, circadian rhythm, or bypasses.",
+        "data": {
+          "light_entity": "Light Entity to Control",
+          "presence_entity": "Presence / Motion Sensors",
+          "lux_sensor": "Ambient Illuminance Sensor (Lux)",
+          "target_lux": "Target Ambient Lux (Seed)",
+          "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
+          "presence_timeout_min": "Vacancy Timeout (Minutes)",
+          "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)",
+          "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
+          "create_override_switch": "Create Dedicated Native Manual Override Switch",
+          "bypass_freeze_entities": "Freeze Bypasses (Hold current state)",
+          "create_freeze_switch": "Create Dedicated Native Freeze Switch",
+          "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
+          "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
+          "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
+          "min_color_temp": "Warmest Temp (Kelvin)",
+          "max_color_temp": "Coolest Temp (Kelvin)",
+          "media_entities": "Media Player Entities",
+          "media_seed_pct": "Media Brightness % (Seed)",
+          "late_night_enabled": "Enable Late Night Mode",
+          "late_night_pct": "Late Night Brightness % (Seed)"
+        }
+      }
+    }
+  }
+}
