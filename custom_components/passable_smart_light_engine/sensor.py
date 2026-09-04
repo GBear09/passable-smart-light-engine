@@ -79,7 +79,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.1.3",
+            sw_version="2.1.4",
         )
 
 
@@ -171,7 +171,8 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
 
         freezes = self._controller.entry_data.get("bypass_freeze_entities", [])
         offs = self._controller.entry_data.get("bypass_off_entities", [])
-        is_frozen, is_off = self._engine.check_bypasses(freezes, offs)
+        manual_override_entity = self._controller.entry_data.get("manual_override_entity")
+        is_frozen, is_off = self._engine.check_bypasses(freezes, offs, manual_override_entity)
         if self._controller.freeze_bypass_active:
             is_frozen = True
 

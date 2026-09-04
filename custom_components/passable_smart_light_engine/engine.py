@@ -22,6 +22,7 @@ from .const import (
     CONF_BYPASS_OFF_ENTITIES,
     CONF_LIGHT_ENTITY,
     CONF_LUX_SENSOR,
+    CONF_MANUAL_OVERRIDE_ENTITY,
     CONF_MEDIA_ENTITIES,
     CONF_PRESENCE_ENTITIES,
     CONF_PRESENCE_TIMEOUT_MIN,
@@ -343,6 +344,49 @@ class PassableLightingEngine:
         rem = int(override.get("expires_at", 0) - time.time())
         return max(0, rem)
 
+    def schedule_manual_override(
+        self,
+        room_id: str,
+        timeout_min: int,
+        manual_override_entity: Optional[str] = None,
+    ) -> None:
+        """Activate manual override for a room with thread-safe timer and helper synchronization."""
+        prev = self._override_timers.get(room_id)
+        if prev and prev.get("cancel_cb"):
+            try:
+                prev["cancel_cb"]()
+            except Exception:
+                pass
+
+        expires_at = time.time() + (timeout_min * 60)
+
+        @callback
+        def _on_override_expired(_now: Any) -> None:
+            _LOGGER.info(
+                "PassableSmartLighting [%s]: ⏰ Manual override lockout timer expired (%s min)",
+                room_id,
+                timeout_min,
+            )
+            self.clear_manual_override(room_id)
+            if manual_override_entity:
+                self.hass.async_create_task(self.async_sync_helper(manual_override_entity, False))
+            # Trigger a room re-evaluation with graceful cross-fade
+            ctrl = self._controllers.get(room_id)
+            if ctrl:
+                self.hass.async_create_task(
+                    ctrl.async_evaluate("override_expired", {"transition": OVERRIDE_FADE_TRANSITION_SEC})
+                )
+
+        cancel_listener = async_call_later(
+            self.hass, max(1.0, float(timeout_min * 60)), _on_override_expired
+        )
+        self._override_timers[room_id] = {
+            "expires_at": expires_at,
+            "cancel_cb": cancel_listener,
+            "helper_entity": manual_override_entity,
+        }
+        _LOGGER.info("PassableSmartLighting [%s]: 🔒 Manual override ACTIVE for %s min", room_id, timeout_min)
+
     def set_manual_override(
         self, room_id: str, timeout_min: int, cancel_cb: Optional[CALLBACK_TYPE] = None
     ) -> None:
@@ -488,18 +532,27 @@ class PassableLightingEngine:
         # Overnight wrapping
         return now_t >= start_t or now_t <= stop_t
 
-    def check_bypasses(self, freeze_entities: List[str], off_entities: List[str]) -> Tuple[bool, bool]:
+    def check_bypasses(
+        self,
+        freeze_entities: List[str],
+        off_entities: List[str],
+        manual_override_entity: Optional[str] = None,
+    ) -> Tuple[bool, bool]:
         """Check if any freeze or force-off bypasses are active. Returns (is_frozen, is_off)."""
         is_frozen = False
         is_off = False
 
         for ent in freeze_entities:
+            if manual_override_entity and ent == manual_override_entity:
+                continue
             val = str(safe_get_state(self.hass, ent, "off")).lower()
             if val in ACTIVE_STATES:
                 is_frozen = True
                 break
 
         for ent in off_entities:
+            if manual_override_entity and ent == manual_override_entity:
+                continue
             val = str(safe_get_state(self.hass, ent, "off")).lower()
             if val in ACTIVE_STATES:
                 is_off = True
@@ -597,7 +650,9 @@ class PassableLightingEngine:
                     return
 
         # 2. Bypass check
-        is_frozen, is_forced_off = self.check_bypasses(bypass_freeze_entities, bypass_off_entities)
+        is_frozen, is_forced_off = self.check_bypasses(
+            bypass_freeze_entities, bypass_off_entities, manual_override_entity
+        )
         if is_forced_off:
             if is_light_on:
                 _LOGGER.info("PassableSmartLighting [%s]: Force-off bypass active. Turning off lights.", room_id)
@@ -682,32 +737,30 @@ class PassableLightingEngine:
                 )
                 return
 
-            # Genuine manual action confirmed
+            # Genuine manual action detected
             is_manual_action = True
 
-            # Task full-brightness lock: when light is turned on to 100% from OFF by a physical switch or UI
-            if ignore_max_override and current_pct >= 95 and from_st == "off":
-                _LOGGER.info(
-                    "PassableSmartLighting [%s]: Light turned on to 100%% from off (Task full-brightness lock).", room_id
-                )
-                is_manual_action = True
+            # If turning on to 100% from OFF:
+            # Check the "Ignore Max Brightness Override" setting.
+            # When enabled (default: True), turning on to 100% from off is treated as a normal turn-on
+            # and MUST NOT engage manual override or lockout.
+            # When disabled (False), turning on to 100% from off locks manual override.
+            if current_pct >= 95 and from_st == "off":
+                if ignore_max_override:
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: Light turned on to 100%% from off; ignoring manual override as configured.",
+                        room_id,
+                    )
+                    is_manual_action = False
+                else:
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: Light turned on to 100%% from off (Task full-brightness lock).",
+                        room_id,
+                    )
+                    is_manual_action = True
 
             if is_manual_action and is_light_on:
-                @callback
-                def _on_override_expired() -> None:
-                    self.clear_manual_override(room_id)
-                    self.hass.async_create_task(self.async_sync_helper(manual_override_entity, False))
-                    # Trigger a room re-evaluation with graceful cross-fade
-                    c = self._controllers.get(room_id)
-                    if c:
-                        self.hass.async_create_task(
-                            c.async_evaluate("override_expired", {"transition": OVERRIDE_FADE_TRANSITION_SEC})
-                        )
-
-                cancel_listener = async_call_later(
-                    self.hass, override_timeout_min * 60, lambda _: _on_override_expired()
-                )
-                self.set_manual_override(room_id, override_timeout_min, cancel_listener)
+                self.schedule_manual_override(room_id, override_timeout_min, manual_override_entity)
                 await self.async_sync_helper(manual_override_entity, True)
 
                 # Trigger background learning from manual override with 180s dwell validation
@@ -721,13 +774,17 @@ class PassableLightingEngine:
                 await self.async_sync_helper(manual_override_entity, False)
                 return
 
-        # 4. Check if manual override is currently locked
+        # 4. Check if manual override is currently locked via helper entity
         if manual_override_entity:
             helper_val = str(safe_get_state(self.hass, manual_override_entity, "off")).lower()
-            if helper_val in ("on", "true") and not self.is_manual_override_active(room_id):
-                self.set_manual_override(room_id, override_timeout_min)
-            elif helper_val in ("off", "false") and self.is_manual_override_active(room_id):
-                self.clear_manual_override(room_id)
+            if helper_val in ("on", "true"):
+                if not self.is_manual_override_active(room_id):
+                    # Helper was turned ON externally (e.g. from dashboard)
+                    self.schedule_manual_override(room_id, override_timeout_min, manual_override_entity)
+            elif helper_val in ("off", "false"):
+                if self.is_manual_override_active(room_id):
+                    # Helper was turned OFF externally (e.g. from dashboard)
+                    self.clear_manual_override(room_id)
 
         if self.is_manual_override_active(room_id):
             _LOGGER.debug("PassableSmartLighting [%s]: Manual override active. Skipping auto-adjustment.", room_id)
@@ -1155,9 +1212,12 @@ class RoomController:
         elif media_entities is None:
             media_entities = []
 
+        manual_override_entity = self.entry_data.get(CONF_MANUAL_OVERRIDE_ENTITY)
         bypasses = list(self.entry_data.get(CONF_BYPASS_FREEZE_ENTITIES) or []) + list(
             self.entry_data.get(CONF_BYPASS_OFF_ENTITIES) or []
         )
+        if manual_override_entity and manual_override_entity not in bypasses:
+            bypasses.append(manual_override_entity)
 
         # Track presence changes
         if presence_entities:

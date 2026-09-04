@@ -141,12 +141,18 @@ class PassableLightingOverrideSwitch(PassableLightingBaseEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Lock manual override for the configured timeout."""
         timeout_m = int(self._controller.entry_data.get("override_timeout_min", 60))
-        self._engine.set_manual_override(self._room_id, timeout_m)
+        manual_override_entity = self._controller.entry_data.get("manual_override_entity")
+        self._engine.schedule_manual_override(self._room_id, timeout_m, manual_override_entity)
+        if manual_override_entity:
+            await self._engine.async_sync_helper(manual_override_entity, True)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Clear manual override."""
+        manual_override_entity = self._controller.entry_data.get("manual_override_entity")
         self._engine.clear_manual_override(self._room_id)
+        if manual_override_entity:
+            await self._engine.async_sync_helper(manual_override_entity, False)
         self.async_write_ha_state()
 
 
