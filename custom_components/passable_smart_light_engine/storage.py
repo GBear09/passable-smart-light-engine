@@ -1,4 +1,4 @@
-"""Storage manager for Passable AI Smart Lighting Controller learning data."""
+"""Storage manager for Passable Adaptive Smart Lighting Controller learning data."""
 
 import copy
 import json

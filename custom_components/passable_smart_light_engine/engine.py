@@ -1,4 +1,4 @@
-"""Core algorithmic lighting engine for Passable AI Smart Lighting Controller."""
+"""Core algorithmic lighting engine for Passable Adaptive Smart Lighting Controller."""
 
 import asyncio
 from datetime import datetime, time as dtime, timedelta
@@ -831,6 +831,7 @@ class RoomController:
         self._is_enabled = True
         self._freeze_bypass_active = False
         self._vacancy_task: Optional[asyncio.Task] = None
+        self.selected_reset_target: str = "all"
 
     @property
     def is_enabled(self) -> bool:

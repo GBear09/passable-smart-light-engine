@@ -1,4 +1,4 @@
-"""Number platform for Passable AI Smart Lighting Controller."""
+"""Number platform for Passable Adaptive Smart Lighting Controller."""
 
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
@@ -46,7 +46,7 @@ class PassableLightingTargetLuxNumber(NumberEntity):
         return DeviceInfo(
             identifiers={(DOMAIN, self._room_id)},
             name=f"Smart Lighting - {self._room_title}",
-            manufacturer="Passable AI",
+            manufacturer="Passable",
             model="Smart Lighting Engine v2",
             sw_version="2.0.0",
         )

@@ -1,4 +1,4 @@
-"""Passable AI Smart Lighting Controller integration setup."""
+"""Passable Adaptive Smart Lighting Controller integration setup."""
 
 import asyncio
 import logging
@@ -40,7 +40,7 @@ RESET_SERVICE_SCHEMA = vol.Schema(
 
 
 async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
-    """Set up the Passable AI Smart Lighting Controller integration."""
+    """Set up the Passable Adaptive Smart Lighting Controller integration."""
     hass.data.setdefault(DOMAIN, {})
 
     store = LearningDataStore(hass)
@@ -88,7 +88,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         DOMAIN, SERVICE_RESET_LEARNING_DATA, _async_handle_reset_service, schema=RESET_SERVICE_SCHEMA
     )
 
-    _LOGGER.info("Passable AI Smart Lighting Controller component initialized successfully.")
+    _LOGGER.info("Passable Adaptive Smart Lighting Controller component initialized successfully.")
     return True
 
 

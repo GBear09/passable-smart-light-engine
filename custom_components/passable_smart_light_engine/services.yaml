@@ -1,6 +1,6 @@
 reset_learning_data:
   name: Reset Learning Data
-  description: Resets AI yield curves, learned user sun preferences, media brightness levels, or late-night presets for a specific room or all rooms.
+  description: Resets room lux yield curves, learned user sun preferences, media brightness levels, or late-night presets for a specific room or all rooms.
   fields:
     room_id:
       name: Room ID

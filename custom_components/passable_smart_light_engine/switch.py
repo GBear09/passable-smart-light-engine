@@ -1,4 +1,4 @@
-"""Switch platform for Passable AI Smart Lighting Controller."""
+"""Switch platform for Passable Adaptive Smart Lighting Controller."""
 
 from typing import Any, Optional
 
@@ -58,7 +58,7 @@ class PassableLightingBaseEntity:
         return DeviceInfo(
             identifiers={(DOMAIN, self._room_id)},
             name=f"Smart Lighting - {self._room_title}",
-            manufacturer="Passable AI",
+            manufacturer="Passable",
             model="Smart Lighting Engine v2",
             sw_version="2.0.0",
         )

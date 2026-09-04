@@ -1,10 +1,10 @@
-# 🧠 Passable AI Smart Lighting Controller
+# 💡 Passable Adaptive Smart Lighting Controller
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/default)
 [![GitHub Release](https://img.shields.io/github/v/release/GBear09/passable-smart-light-engine)](https://github.com/GBear09/passable-smart-light-engine/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-An adaptive, machine-learning-inspired lighting automation system for Home Assistant. Runs natively on Home Assistant Core's asynchronous engine with full HACS 1-click install and update support.
+An adaptive, self-learning statistical lighting automation system for Home Assistant. Runs natively on Home Assistant Core's asynchronous engine with full HACS 1-click install and update support.
 
 Configure rooms seamlessly using the **Native UI Config Flow** (with zero automations required), or keep using your existing **Blueprint automations** with the built-in drop-in event bridge!
 
@@ -37,9 +37,9 @@ graph TD
     end
 
     subgraph Native Custom Component
-        B[Passable AI Smart Lighting Engine<br/>custom_components/passable_smart_light_engine]
+        B[Passable Adaptive Smart Lighting Engine<br/>custom_components/passable_smart_light_engine]
         C[HA Asynchronous Store<br/>.storage/passable_smart_light_engine_learning_data]
-        D[Native Devices & Entities<br/>Switch / Sensor / Binary Sensor / Number]
+        D[Native Devices & Entities<br/>Switch / Sensor / Binary Sensor / Number / Button / Select]
     end
 
     A1 -->|Direct State Tracking| B
@@ -62,7 +62,7 @@ graph TD
    https://github.com/GBear09/passable-smart-light-engine
    ```
 4. Select **Type:** `Integration`.
-5. Click **Add**, then find **Passable AI Smart Lighting Controller** and click **Download**.
+5. Click **Add**, then find **Passable Adaptive Smart Lighting Controller** and click **Download**.
 6. Restart Home Assistant.
 
 ---
@@ -72,7 +72,7 @@ graph TD
 ### Option A: Native UI Config Flow (Zero Automations)
 
 1. Go to **Settings → Devices & Services → Add Integration**.
-2. Search for **Passable AI Smart Lighting Controller**.
+2. Search for **Passable Adaptive Smart Lighting Controller**.
 3. **Step 1: Core Room Setup**
    * **Room ID:** Unique room identifier with no spaces (e.g. `living_room`).
    * **Light Entity:** The main light or light group to control.
@@ -118,6 +118,9 @@ When configured via the Native UI, the integration provisions a room Device with
 | `sensor.<room>_active_mode` | `sensor` | Operational mode (`occupied`, `vacant`, `late_night`, `media`, `manual_override`, `frozen`, `forced_off`). |
 | `binary_sensor.<room>_room_presence` | `binary_sensor` | Composite presence state of the room. |
 | `binary_sensor.<room>_manual_override_active` | `binary_sensor` | Shows whether manual override is active with remaining timeout seconds. |
+| `select.<room>_reset_dataset_target` | `select` | Dropdown selector to choose which dataset to reset (`all`, `user_prefs`, `room_curves`, `media_prefs`, `late_night_prefs`). |
+| `button.<room>_reset_selected_learning_data` | `button` | Action button to reset the selected dataset for this room. |
+| `button.<room>_reset_all_room_learning_data` | `button` | 1-click button to reset all learning datasets for this room. |
 
 ### System-Wide Entities:
 * `sensor.passable_smart_light_engine_ready`: Publishes `active_rooms`, `room_datasets`, and `available_reset_types` state attributes to power dynamic dashboard popups.

@@ -1,4 +1,4 @@
-"""Config flow and options flow for Passable AI Smart Lighting Controller."""
+"""Config flow and options flow for Passable Adaptive Smart Lighting Controller."""
 
 from typing import Any, Dict, Optional
 import voluptuous as vol
@@ -86,7 +86,7 @@ class OptionalTimeSelector(selector.TimeSelector):
 
 
 class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Passable AI Smart Lighting Controller."""
+    """Handle a config flow for Passable Adaptive Smart Lighting Controller."""
 
     VERSION = 1
 

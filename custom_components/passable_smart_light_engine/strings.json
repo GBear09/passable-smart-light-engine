@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "Passable AI Smart Lighting - Room Setup",
+        "title": "Passable Adaptive Smart Lighting - Room Setup",
         "description": "Configure the core hardware and lux targets for this room.",
         "data": {
           "room_id": "Room ID (Internal key, e.g. living_room)",
@@ -112,7 +112,7 @@
       }
     },
     "abort": {
-      "already_configured": "This room ID is already configured in Passable AI Smart Lighting Controller."
+      "already_configured": "This room ID is already configured in Passable Adaptive Smart Lighting Controller."
     }
   },
   "options": {
@@ -237,6 +237,28 @@
           "late_night_stop_entity": "Late Night Stop Entity (input_datetime)",
           "power_grid_entity": "Power Grid Status Entity"
         }
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "reset_dataset_target": {
+        "name": "Reset Dataset Target",
+        "state": {
+          "all": "All Datasets",
+          "user_prefs": "User Sun Preferences",
+          "room_curves": "Hardware Yield Curves",
+          "media_prefs": "Media Presets",
+          "late_night_prefs": "Late Night Presets"
+        }
+      }
+    },
+    "button": {
+      "reset_selected_data": {
+        "name": "Reset Selected Learning Data"
+      },
+      "reset_all_data": {
+        "name": "Reset All Room Learning Data"
       }
     }
   }

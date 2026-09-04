@@ -1,9 +1,9 @@
-"""Constants for the Passable AI Smart Lighting Controller integration."""
+"""Constants for the Passable Adaptive Smart Lighting Controller integration."""
 
 DOMAIN = "passable_smart_light_engine"
 LEGACY_DOMAIN = "smart_light_engine"
 
-PLATFORMS = ["switch", "sensor", "binary_sensor", "number"]
+PLATFORMS = ["switch", "sensor", "binary_sensor", "number", "button", "select"]
 
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_learning_data"
