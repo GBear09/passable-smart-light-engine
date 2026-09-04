@@ -48,6 +48,13 @@ CONF_LATE_NIGHT_STOP_ENTITY = "late_night_stop_entity"
 
 CONF_POWER_GRID_ENTITY = "power_grid_entity"
 
+# UI Section Identifiers
+SECTION_HARDWARE = "hardware_presence"
+SECTION_CIRCADIAN = "circadian"
+SECTION_LATE_NIGHT = "late_night"
+SECTION_MEDIA = "media"
+SECTION_BYPASSES = "bypasses"
+
 # Default values
 DEFAULT_TARGET_LUX = 40
 DEFAULT_LUX_RATIO = 1.0

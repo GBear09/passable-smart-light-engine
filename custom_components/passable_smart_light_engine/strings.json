@@ -17,7 +17,75 @@
       },
       "advanced": {
         "title": "Advanced Settings, Overrides & Bypasses",
-        "description": "Configure manual override tracking, bypasses, circadian rhythm, media player watching, and late night mode.",
+        "description": "Configure optional features: circadian rhythm, late night mode, media player watching, and bypasses.",
+        "sections": {
+          "circadian": {
+            "name": "☀️ Circadian Rhythm",
+            "description": "Dynamic sun-elevation-based color temperature adjustment.",
+            "data": {
+              "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
+              "min_color_temp": "Warmest Temp (Kelvin)",
+              "max_color_temp": "Coolest Temp (Kelvin)"
+            },
+            "data_description": {
+              "min_color_temp": "Active when Circadian Rhythm is enabled. Applied during night and sunrise/sunset.",
+              "max_color_temp": "Active when Circadian Rhythm is enabled. Applied during peak solar noon."
+            }
+          },
+          "late_night": {
+            "name": "🌙 Late Night Mode",
+            "description": "Dim nighttime preset triggered by schedule or bedtime helper.",
+            "data": {
+              "late_night_enabled": "Enable Late Night Mode",
+              "late_night_pct": "Late Night Brightness % (Seed)",
+              "late_night_condition_type": "Late Night Trigger Mode",
+              "late_night_entity": "Late Night Active Helper Entity / Group",
+              "late_night_start_time": "Late Night Start Time (Fixed)",
+              "late_night_start_entity": "Late Night Start Entity (input_datetime)",
+              "late_night_stop_time": "Late Night Stop Time (Fixed)",
+              "late_night_stop_entity": "Late Night Stop Entity (input_datetime)"
+            },
+            "data_description": {
+              "late_night_pct": "Active when Late Night Mode is enabled. Target brightness during late night window.",
+              "late_night_condition_type": "Choose between fixed clock time or an entity/group state helper.",
+              "late_night_entity": "Binary sensor or boolean switch that triggers Late Night when ON.",
+              "late_night_start_entity": "Optional input_datetime helper to override fixed start time.",
+              "late_night_stop_entity": "Optional input_datetime helper to override fixed stop time."
+            }
+          },
+          "media": {
+            "name": "📺 Media Control",
+            "description": "Dim room lights automatically when media players are active.",
+            "data": {
+              "media_entities": "Media Player Entities",
+              "media_seed_pct": "Media Brightness % (Seed)"
+            },
+            "data_description": {
+              "media_entities": "Select media players to watch. When playing, lights transition to media brightness.",
+              "media_seed_pct": "Baseline brightness percentage applied when media is playing."
+            }
+          },
+          "bypasses": {
+            "name": "🛑 Bypasses & Overrides",
+            "description": "Configure physical switch overrides, freeze holds, force-off bypasses, and power grid status.",
+            "data": {
+              "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
+              "create_override_switch": "Create Dedicated Native Manual Override Switch",
+              "bypass_freeze_entities": "Freeze Bypasses (Hold current state)",
+              "create_freeze_switch": "Create Dedicated Native Freeze Switch",
+              "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
+              "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
+              "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
+              "power_grid_entity": "Power Grid Status Entity"
+            },
+            "data_description": {
+              "bypass_freeze_entities": "Entities that pause automations and hold current light level when active.",
+              "bypass_off_entities": "Entities (e.g. Away Mode) that pause automations and force lights off.",
+              "override_timeout_min": "Minutes to keep manual override active before resuming automatic control.",
+              "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout."
+            }
+          }
+        },
         "data": {
           "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
           "create_override_switch": "Create Dedicated Native Manual Override Switch",
@@ -51,7 +119,94 @@
     "step": {
       "init": {
         "title": "Configure Smart Lighting Room Settings",
-        "description": "Adjust hardware, lux targets, circadian rhythm, or bypasses.",
+        "description": "Adjust hardware, lux targets, circadian rhythm, media control, or bypasses.",
+        "sections": {
+          "hardware_presence": {
+            "name": "⚙️ Hardware & Presence",
+            "description": "Core room light entity, motion sensors, and lux targets.",
+            "data": {
+              "light_entity": "Light Entity to Control",
+              "presence_entity": "Presence / Motion Sensors",
+              "lux_sensor": "Ambient Illuminance Sensor (Lux)",
+              "target_lux": "Target Ambient Lux (Seed)",
+              "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
+              "presence_timeout_min": "Vacancy Timeout (Minutes)",
+              "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)"
+            },
+            "data_description": {
+              "target_lux": "The baseline lux level the room maintains when occupied.",
+              "default_lux_ratio": "Lux produced per 1% brightness before learning completes (e.g. 1.0).",
+              "presence_timeout_min": "Minutes of no motion before turning lights off.",
+              "min_occupied_pct": "Minimum brightness floor while occupied, even on bright sunny days."
+            }
+          },
+          "circadian": {
+            "name": "☀️ Circadian Rhythm",
+            "description": "Dynamic sun-elevation-based color temperature adjustment.",
+            "data": {
+              "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
+              "min_color_temp": "Warmest Temp (Kelvin)",
+              "max_color_temp": "Coolest Temp (Kelvin)"
+            },
+            "data_description": {
+              "min_color_temp": "Active when Circadian Rhythm is enabled. Applied during night and sunrise/sunset.",
+              "max_color_temp": "Active when Circadian Rhythm is enabled. Applied during peak solar noon."
+            }
+          },
+          "late_night": {
+            "name": "🌙 Late Night Mode",
+            "description": "Dim nighttime preset triggered by schedule or bedtime helper.",
+            "data": {
+              "late_night_enabled": "Enable Late Night Mode",
+              "late_night_pct": "Late Night Brightness % (Seed)",
+              "late_night_condition_type": "Late Night Trigger Mode",
+              "late_night_entity": "Late Night Active Helper Entity / Group",
+              "late_night_start_time": "Late Night Start Time (Fixed)",
+              "late_night_start_entity": "Late Night Start Entity (input_datetime)",
+              "late_night_stop_time": "Late Night Stop Time (Fixed)",
+              "late_night_stop_entity": "Late Night Stop Entity (input_datetime)"
+            },
+            "data_description": {
+              "late_night_pct": "Active when Late Night Mode is enabled. Target brightness during late night window.",
+              "late_night_condition_type": "Choose between fixed clock time or an entity/group state helper.",
+              "late_night_entity": "Binary sensor or boolean switch that triggers Late Night when ON.",
+              "late_night_start_entity": "Optional input_datetime helper to override fixed start time.",
+              "late_night_stop_entity": "Optional input_datetime helper to override fixed stop time."
+            }
+          },
+          "media": {
+            "name": "📺 Media Control",
+            "description": "Dim room lights automatically when media players are active.",
+            "data": {
+              "media_entities": "Media Player Entities",
+              "media_seed_pct": "Media Brightness % (Seed)"
+            },
+            "data_description": {
+              "media_entities": "Select media players to watch. When playing, lights transition to media brightness.",
+              "media_seed_pct": "Baseline brightness percentage applied when media is playing."
+            }
+          },
+          "bypasses": {
+            "name": "🛑 Bypasses & Overrides",
+            "description": "Configure physical switch overrides, freeze holds, force-off bypasses, and power grid status.",
+            "data": {
+              "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
+              "create_override_switch": "Create Dedicated Native Manual Override Switch",
+              "bypass_freeze_entities": "Freeze Bypasses (Hold current state)",
+              "create_freeze_switch": "Create Dedicated Native Freeze Switch",
+              "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
+              "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
+              "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
+              "power_grid_entity": "Power Grid Status Entity"
+            },
+            "data_description": {
+              "bypass_freeze_entities": "Entities that pause automations and hold current light level when active.",
+              "bypass_off_entities": "Entities (e.g. Away Mode) that pause automations and force lights off.",
+              "override_timeout_min": "Minutes to keep manual override active before resuming automatic control.",
+              "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout."
+            }
+          }
+        },
         "data": {
           "light_entity": "Light Entity to Control",
           "presence_entity": "Presence / Motion Sensors",
@@ -66,13 +221,21 @@
           "create_freeze_switch": "Create Dedicated Native Freeze Switch",
           "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
           "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
+          "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
           "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
           "min_color_temp": "Warmest Temp (Kelvin)",
           "max_color_temp": "Coolest Temp (Kelvin)",
           "media_entities": "Media Player Entities",
           "media_seed_pct": "Media Brightness % (Seed)",
           "late_night_enabled": "Enable Late Night Mode",
-          "late_night_pct": "Late Night Brightness % (Seed)"
+          "late_night_pct": "Late Night Brightness % (Seed)",
+          "late_night_condition_type": "Late Night Trigger Mode",
+          "late_night_entity": "Late Night Active Helper Entity / Group",
+          "late_night_start_time": "Late Night Start Time (Fixed)",
+          "late_night_start_entity": "Late Night Start Entity (input_datetime)",
+          "late_night_stop_time": "Late Night Stop Time (Fixed)",
+          "late_night_stop_entity": "Late Night Stop Entity (input_datetime)",
+          "power_grid_entity": "Power Grid Status Entity"
         }
       }
     }
