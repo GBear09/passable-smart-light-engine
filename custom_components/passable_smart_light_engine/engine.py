@@ -54,6 +54,7 @@ from .const import (
     MIN_VISIBLE_PCT,
     OVERRIDE_FADE_TRANSITION_SEC,
     SENSOR_DEBOUNCE_SEC,
+    STARTUP_SETTLE_SEC,
 )
 from .storage import LearningDataStore
 
@@ -202,6 +203,8 @@ class PassableLightingEngine:
         self._override_timers: Dict[str, Dict[str, Any]] = {}
         self._pending_learning_handles: Dict[str, CALLBACK_TYPE] = {}
         self._last_ambient_adjust: Dict[str, float] = {}
+        self._last_engine_target: Dict[str, int] = {}
+        self._last_engine_command: Dict[str, float] = {}
         self._engine_contexts: Dict[str, float] = {}
         self._stabilizing_tasks: Dict[str, asyncio.Task] = {}
         self._controllers: Dict[str, "RoomController"] = {}
@@ -283,76 +286,44 @@ class PassableLightingEngine:
     def check_echo_guard(self, room_id: str, current_pct: int) -> bool:
         """Check if an incoming light state update is an echo of an automated change."""
         guard = self._echo_guards.get(room_id)
-        if not guard:
-            return False
-
         now = time.time()
-        if now > guard["expires_at"]:
-            self._echo_guards.pop(room_id, None)
-            return False
 
-        target_pct = guard["target_pct"]
-        start_pct = guard["start_pct"]
-        direction = guard["direction"]
-        tolerance = ECHO_GUARD_TOLERANCE_PCT
-
-        min_p = min(start_pct, target_pct) - tolerance
-        max_p = max(start_pct, target_pct) + tolerance
-
-        # 1. Bounds check: must fall within trajectory
-        if not (min_p <= current_pct <= max_p):
-            _LOGGER.debug(
-                "PassableSmartLighting [%s]: Incoming pct %s%% outside trajectory bounds [%.1f, %.1f]",
-                room_id,
-                current_pct,
-                min_p,
-                max_p,
-            )
-            self._echo_guards.pop(room_id, None)
-            return False
-
-        # 2. Directional check: does it progress toward target or reverse significantly?
-        last_pct = guard["last_reported_pct"]
-        if direction > 0 and current_pct < (last_pct - tolerance):
-            _LOGGER.debug(
-                "PassableSmartLighting [%s]: Divergent counter-dimming detected (%s%% < %s%%)",
-                room_id,
-                current_pct,
-                last_pct,
-            )
-            self._echo_guards.pop(room_id, None)
-            return False
-        elif direction < 0 and current_pct > (last_pct + tolerance):
-            _LOGGER.debug(
-                "PassableSmartLighting [%s]: Divergent counter-brightening detected (%s%% > %s%%)",
-                room_id,
-                current_pct,
-                last_pct,
-            )
-            self._echo_guards.pop(room_id, None)
-            return False
-
-        guard["last_reported_pct"] = current_pct
-
-        # 3. Early convergence termination:
-        # If hardware has reached target within ±3% and settled for ECHO_CONVERGENCE_SETTLE_SEC,
-        # close the guard early so user manual control is unblocked immediately!
-        if abs(current_pct - target_pct) <= 3:
-            if guard["settled_since"] is None:
-                guard["settled_since"] = now
-            elif (now - guard["settled_since"]) >= ECHO_CONVERGENCE_SETTLE_SEC:
-                _LOGGER.debug(
-                    "PassableSmartLighting [%s]: Hardware reached target %s%% and settled for %.1fs. Closing echo guard early.",
-                    room_id,
-                    target_pct,
-                    ECHO_CONVERGENCE_SETTLE_SEC,
-                )
+        if guard:
+            if now > guard["expires_at"]:
                 self._echo_guards.pop(room_id, None)
-                return True
-        else:
-            guard["settled_since"] = None
+            else:
+                target_pct = guard["target_pct"]
+                start_pct = guard["start_pct"]
+                tolerance = ECHO_GUARD_TOLERANCE_PCT
 
-        return True
+                min_p = min(start_pct, target_pct) - tolerance
+                max_p = max(start_pct, target_pct) + tolerance
+
+                # Check if current_pct falls within trajectory bounds
+                if min_p <= current_pct <= max_p:
+                    guard["last_reported_pct"] = current_pct
+                    if abs(current_pct - target_pct) <= 3:
+                        if guard["settled_since"] is None:
+                            guard["settled_since"] = now
+                        elif (now - guard["settled_since"]) >= ECHO_CONVERGENCE_SETTLE_SEC:
+                            _LOGGER.debug(
+                                "PassableSmartLighting [%s]: Hardware reached target %s%% and settled. Closing echo guard early.",
+                                room_id,
+                                target_pct,
+                            )
+                            self._echo_guards.pop(room_id, None)
+                    else:
+                        guard["settled_since"] = None
+                    return True
+
+        # Secondary check: If within mesh settle window of last command and close to target
+        last_target = self._last_engine_target.get(room_id)
+        last_cmd_time = self._last_engine_command.get(room_id, 0.0)
+        if last_target is not None and (now - last_cmd_time) <= DEFAULT_MESH_SETTLE_SEC:
+            if abs(current_pct - last_target) <= ECHO_GUARD_TOLERANCE_PCT:
+                return True
+
+        return False
 
     def is_manual_override_active(self, room_id: str) -> bool:
         """Check if manual override is currently active for a room."""
@@ -378,7 +349,10 @@ class PassableLightingEngine:
         """Activate manual override for a room."""
         prev = self._override_timers.get(room_id)
         if prev and prev.get("cancel_cb"):
-            prev["cancel_cb"]()
+            try:
+                prev["cancel_cb"]()
+            except Exception:
+                pass
 
         expires_at = time.time() + (timeout_min * 60)
         self._override_timers[room_id] = {
@@ -395,7 +369,8 @@ class PassableLightingEngine:
                 prev["cancel_cb"]()
             except Exception:
                 pass
-        _LOGGER.info("PassableSmartLighting [%s]: 🔓 Manual override CLEARED", room_id)
+        if prev:
+            _LOGGER.info("PassableSmartLighting [%s]: 🔓 Manual override CLEARED", room_id)
 
     async def async_turn_on_light(
         self,
@@ -413,9 +388,10 @@ class PassableLightingEngine:
         if current_state and current_state.state == "on":
             start_pct = int(round((current_state.attributes.get("brightness", 0) / 255.0) * 100))
 
+        clamped_pct = max(1, min(100, brightness_pct))
         service_data: Dict[str, Any] = {
             "entity_id": light_entity,
-            "brightness_pct": max(1, min(100, brightness_pct)),
+            "brightness_pct": clamped_pct,
             "transition": transition,
         }
 
@@ -423,12 +399,14 @@ class PassableLightingEngine:
             kelvin = get_circadian_temp(self.hass, min_temp, max_temp)
             service_data["color_temp_kelvin"] = kelvin
 
-        # Track HA Context
+        # Track HA Context and engine targets
         engine_context = Context()
         ttl = transition + DEFAULT_MESH_SETTLE_SEC + 5.0
         self.register_engine_context(engine_context.id, ttl)
+        self._last_engine_target[room_id] = clamped_pct
+        self._last_engine_command[room_id] = time.time()
 
-        self.set_echo_guard(room_id, brightness_pct, start_pct, transition)
+        self.set_echo_guard(room_id, clamped_pct, start_pct, transition)
         await self.hass.services.async_call("light", "turn_on", service_data, context=engine_context)
 
     async def async_turn_off_light(self, room_id: str, light_entity: str, transition: float = 2.0) -> None:
@@ -438,10 +416,12 @@ class PassableLightingEngine:
         if current_state and current_state.state == "on":
             start_pct = int(round((current_state.attributes.get("brightness", 0) / 255.0) * 100))
 
-        # Track HA Context
+        # Track HA Context and engine targets
         engine_context = Context()
         ttl = transition + DEFAULT_MESH_SETTLE_SEC + 5.0
         self.register_engine_context(engine_context.id, ttl)
+        self._last_engine_target[room_id] = 0
+        self._last_engine_command[room_id] = time.time()
 
         self.set_echo_guard(room_id, 0, start_pct, transition)
         await self.hass.services.async_call(
@@ -633,25 +613,82 @@ class PassableLightingEngine:
         # 3. Hardware Echo Guard & Manual Override Detection
         if trigger_id == "light_change":
             evt_context = p.get("context")
+
+            # A. Explicit Engine Context match
             if self.is_engine_context(evt_context):
                 _LOGGER.debug(
                     "PassableSmartLighting [%s]: Echo guard absorbed light change via Context ID", room_id
                 )
                 return
 
+            # B. Echo Guard Trajectory & Mesh Settle match
             if self.check_echo_guard(room_id, current_pct):
                 _LOGGER.debug(
-                    "PassableSmartLighting [%s]: Echo guard absorbed light change via Trajectory (%s%%)", room_id, current_pct
+                    "PassableSmartLighting [%s]: Echo guard absorbed light change via Trajectory/Settling (%s%%)",
+                    room_id,
+                    current_pct,
                 )
                 return
 
-            # Genuine manual action detected
+            # C. Commanded Target match (within tolerance)
+            last_target = self._last_engine_target.get(room_id)
+            if last_target is not None and abs(current_pct - last_target) <= ECHO_GUARD_TOLERANCE_PCT:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Absorbed report matching commanded target (%s%% ≈ %s%%)",
+                    room_id,
+                    current_pct,
+                    last_target,
+                )
+                return
+
+            # D. Startup Grace Period Filter (prevent false overrides during bridge/device reconnection)
+            ctrl = self._controllers.get(room_id)
+            if ctrl and (time.time() - ctrl.started_at) < STARTUP_SETTLE_SEC:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Ignoring light change during startup grace period (%s%%)",
+                    room_id,
+                    current_pct,
+                )
+                return
+
+            # E. Entity availability / restoration filter
+            from_st = str(p.get("trigger_from_state", "")).lower()
+            if from_st in ("unavailable", "unknown", "none"):
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Ignoring light change from uninitialized/restored state (%s)",
+                    room_id,
+                    from_st,
+                )
+                return
+
+            # F. Determine if this is a genuine user manual action
+            is_user_ui = evt_context and getattr(evt_context, "user_id", None) is not None
+            is_physical_turn_on = (from_st == "off" and is_light_on)
+            from_b = p.get("trigger_from_brightness", 0)
+            from_pct = int(round((from_b / 255.0) * 100)) if from_b else 0
+            is_physical_dim = (
+                from_st == "on"
+                and is_light_on
+                and abs(current_pct - from_pct) >= BRIGHTNESS_HYSTERESIS_PCT
+            )
+
+            # If not UI, not physical toggle from off, not physical dimmer adjustment, and not turned off: ignore
+            if not (is_user_ui or is_physical_turn_on or is_physical_dim or not is_light_on):
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Ignoring minor fluctuation or attribute report (pct=%s%%, from=%s%%)",
+                    room_id,
+                    current_pct,
+                    from_pct,
+                )
+                return
+
+            # Genuine manual action confirmed
             is_manual_action = True
 
-            # Max brightness rule: lock override so the engine doesn't fight full-brightness commands
-            if ignore_max_override and current_pct >= 95 and p.get("trigger_from_state") == "off":
+            # Task full-brightness lock: when light is turned on to 100% from OFF by a physical switch or UI
+            if ignore_max_override and current_pct >= 95 and from_st == "off":
                 _LOGGER.info(
-                    "PassableSmartLighting [%s]: Light turned on to 100%% (Task full-brightness lock).", room_id
+                    "PassableSmartLighting [%s]: Light turned on to 100%% from off (Task full-brightness lock).", room_id
                 )
                 is_manual_action = True
 
@@ -661,10 +698,10 @@ class PassableLightingEngine:
                     self.clear_manual_override(room_id)
                     self.hass.async_create_task(self.async_sync_helper(manual_override_entity, False))
                     # Trigger a room re-evaluation with graceful cross-fade
-                    ctrl = self._controllers.get(room_id)
-                    if ctrl:
+                    c = self._controllers.get(room_id)
+                    if c:
                         self.hass.async_create_task(
-                            ctrl.async_evaluate("override_expired", {"transition": OVERRIDE_FADE_TRANSITION_SEC})
+                            c.async_evaluate("override_expired", {"transition": OVERRIDE_FADE_TRANSITION_SEC})
                         )
 
                 cancel_listener = async_call_later(
@@ -685,10 +722,12 @@ class PassableLightingEngine:
                 return
 
         # 4. Check if manual override is currently locked
-        if manual_override_entity and not self.is_manual_override_active(room_id):
+        if manual_override_entity:
             helper_val = str(safe_get_state(self.hass, manual_override_entity, "off")).lower()
-            if helper_val in ("on", "true"):
+            if helper_val in ("on", "true") and not self.is_manual_override_active(room_id):
                 self.set_manual_override(room_id, override_timeout_min)
+            elif helper_val in ("off", "false") and self.is_manual_override_active(room_id):
+                self.clear_manual_override(room_id)
 
         if self.is_manual_override_active(room_id):
             _LOGGER.debug("PassableSmartLighting [%s]: Manual override active. Skipping auto-adjustment.", room_id)
@@ -991,6 +1030,7 @@ class RoomController:
         self._vacancy_cancel: Optional[CALLBACK_TYPE] = None
         self._debounce_cancel: Optional[CALLBACK_TYPE] = None
         self.selected_reset_target: str = "all"
+        self.started_at: float = time.time()
 
     @property
     def is_enabled(self) -> bool:
@@ -1143,14 +1183,23 @@ class RoomController:
             def _on_light_change(evt: Event) -> None:
                 new_st = evt.data.get("new_state")
                 old_st = evt.data.get("old_state")
-                if not new_st:
+                if not new_st or not old_st:
                     return
-                from_b = old_st.attributes.get("brightness", 0) if old_st else 0
-                from_s = old_st.state if old_st else "off"
+
+                # Ignore transitions when entity was or became unavailable/unknown (e.g. startup / reconnection)
+                if old_st.state in ("unavailable", "unknown") or new_st.state in ("unavailable", "unknown"):
+                    return
+
+                # Ignore duplicate / no-op events
+                old_b = old_st.attributes.get("brightness", 0) if old_st else 0
+                new_b = new_st.attributes.get("brightness", 0) if new_st else 0
+                if old_st.state == new_st.state and old_b == new_b:
+                    return
+
                 params = {
                     "trigger_id": "light_change",
-                    "trigger_from_state": from_s,
-                    "trigger_from_brightness": from_b,
+                    "trigger_from_state": old_st.state,
+                    "trigger_from_brightness": old_b,
                     "context": evt.context,
                 }
                 # Minimal debounce to capture rapid multi-bulb Zigbee reports
