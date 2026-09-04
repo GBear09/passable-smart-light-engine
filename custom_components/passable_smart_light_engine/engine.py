@@ -7,7 +7,7 @@ import math
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, State, callback
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
@@ -557,6 +557,7 @@ class PassableLightingEngine:
                 is_manual_action = False
 
             if is_manual_action and is_light_on:
+                @callback
                 def _on_override_expired() -> None:
                     self.clear_manual_override(room_id)
                     self.hass.async_create_task(self.async_sync_helper(manual_override_entity, False))
@@ -727,6 +728,7 @@ class PassableLightingEngine:
             # Wait for state change on lux sensor
             event_received = asyncio.Event()
 
+            @callback
             def _lux_listener(evt: Event) -> None:
                 new_st = evt.data.get("new_state")
                 if new_st and new_st.state != current_lux_str:
@@ -826,6 +828,7 @@ class RoomController:
         self._unsub_listeners: List[CALLBACK_TYPE] = []
         self._is_enabled = True
         self._freeze_bypass_active = False
+        self._vacancy_task: Optional[asyncio.Task] = None
 
     @property
     def is_enabled(self) -> bool:
@@ -867,18 +870,22 @@ class RoomController:
 
         # Track presence changes
         if presence_entities:
+            @callback
             def _on_presence_change(evt: Event) -> None:
                 new_st = evt.data.get("new_state")
                 old_st = evt.data.get("old_state")
                 if not new_st:
                     return
                 if new_st.state == "on":
+                    if self._vacancy_task and not self._vacancy_task.done():
+                        self._vacancy_task.cancel()
                     self.hass.async_create_task(self.async_evaluate("presence_on"))
                 elif new_st.state == "off":
-                    # Check if all presence sensors are off
                     if not self.engine.check_presence(presence_entities):
                         timeout_m = int(self.entry_data.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN))
-                        self.hass.async_create_task(self._async_schedule_vacancy_off(timeout_m))
+                        if self._vacancy_task and not self._vacancy_task.done():
+                            self._vacancy_task.cancel()
+                        self._vacancy_task = self.hass.async_create_task(self._async_schedule_vacancy_off(timeout_m))
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, presence_entities, _on_presence_change)
@@ -886,6 +893,7 @@ class RoomController:
 
         # Track light changes
         if light_entity:
+            @callback
             def _on_light_change(evt: Event) -> None:
                 new_st = evt.data.get("new_state")
                 old_st = evt.data.get("old_state")
@@ -904,6 +912,7 @@ class RoomController:
 
         # Track lux changes
         if lux_sensor:
+            @callback
             def _on_lux_change(evt: Event) -> None:
                 self.hass.async_create_task(self.async_evaluate("lux_change"))
 
@@ -913,6 +922,7 @@ class RoomController:
 
         # Track media changes
         if media_entities:
+            @callback
             def _on_media_change(evt: Event) -> None:
                 self.hass.async_create_task(self.async_evaluate("media_change"))
 
@@ -922,6 +932,7 @@ class RoomController:
 
         # Track bypasses
         if bypasses:
+            @callback
             def _on_bypass_change(evt: Event) -> None:
                 self.hass.async_create_task(self.async_evaluate("bypass_change"))
 
@@ -938,10 +949,12 @@ class RoomController:
         if isinstance(presence_entities, str):
             presence_entities = [presence_entities]
 
-        await asyncio.sleep(timeout_minutes * 60)
-        # Verify still vacant
-        if not self.engine.check_presence(presence_entities):
-            await self.async_evaluate("presence_off_timeout")
+        try:
+            await asyncio.sleep(timeout_minutes * 60)
+            if not self.engine.check_presence(presence_entities):
+                await self.async_evaluate("presence_off_timeout")
+        except asyncio.CancelledError:
+            pass
 
     async def async_evaluate(self, trigger_id: str, extra_params: Optional[Dict[str, Any]] = None) -> None:
         """Evaluate room state and dispatch to engine."""
@@ -956,13 +969,14 @@ class RoomController:
         # Inject internal freeze bypass state if active
         if self._freeze_bypass_active:
             freezes = list(params.get(CONF_BYPASS_FREEZE_ENTITIES, []))
-            # Mark freeze active by adding a sentinel dummy or handling in check
             params["internal_freeze"] = True
 
         await self.engine.async_handle_engine_cycle(params)
 
     def stop(self) -> None:
         """Unsubscribe all active listeners."""
+        if self._vacancy_task and not self._vacancy_task.done():
+            self._vacancy_task.cancel()
         for unsub in self._unsub_listeners:
             try:
                 unsub()

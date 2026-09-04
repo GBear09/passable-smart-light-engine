@@ -88,12 +88,6 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         DOMAIN, SERVICE_RESET_LEARNING_DATA, _async_handle_reset_service, schema=RESET_SERVICE_SCHEMA
     )
 
-    # Register legacy domain alias for existing dashboards/scripts
-    if not hass.services.has_service(LEGACY_DOMAIN, SERVICE_RESET_LEARNING_DATA):
-        hass.services.async_register(
-            LEGACY_DOMAIN, SERVICE_RESET_LEARNING_DATA, _async_handle_reset_service, schema=RESET_SERVICE_SCHEMA
-        )
-
     _LOGGER.info("Passable AI Smart Lighting Controller component initialized successfully.")
     return True
 
