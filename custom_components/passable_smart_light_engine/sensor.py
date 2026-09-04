@@ -17,7 +17,9 @@ from .const import (
     CONF_DEFAULT_LUX_RATIO,
     CONF_ROOM_ID,
     CONF_TARGET_LUX,
+    DEFAULT_LATE_NIGHT_PCT,
     DEFAULT_LUX_RATIO,
+    DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_TARGET_LUX,
     DOMAIN,
     RESET_TYPES,
@@ -55,7 +57,7 @@ async def async_setup_entry(
 
 
 class PassableLightingBaseSensor(SensorEntity):
-    """Base class providing device info for room sensors."""
+    """Base class providing device info and live storage listeners for room sensors."""
 
     def __init__(self, entry: ConfigEntry, controller: RoomController, engine: PassableLightingEngine) -> None:
         """Initialize base sensor."""
@@ -65,6 +67,10 @@ class PassableLightingBaseSensor(SensorEntity):
         self._room_id = entry.data[CONF_ROOM_ID]
         self._room_title = self._room_id.replace("_", " ").title()
 
+    async def async_added_to_hass(self) -> None:
+        """Register storage update listener so attributes refresh live when learning data updates."""
+        self._engine.store.register_update_listener(self.async_write_ha_state)
+
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info linking this entity to the room device."""
@@ -73,7 +79,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.0.0",
+            sw_version="2.1.1",
         )
 
 
@@ -100,6 +106,15 @@ class PassableLightingLuxYieldSensor(PassableLightingBaseSensor):
         yield_50 = get_expected_lux(curves, 50, default_ratio)
         return round(yield_50 / 50.0, 2)
 
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose learned room curve yield points."""
+        curves = self._engine.store.data.get("room_curves", {}).get(self._room_id, {})
+        return {
+            "room_curves": curves,
+            "curve_points_count": len(curves),
+        }
+
 
 class PassableLightingTargetLuxSensor(PassableLightingBaseSensor):
     """Diagnostic sensor reporting current blended target lux."""
@@ -123,6 +138,16 @@ class PassableLightingTargetLuxSensor(PassableLightingBaseSensor):
         elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
         azim = float(sun_state.attributes.get("azimuth", 0)) if sun_state and "azimuth" in sun_state.attributes else None
         return round(calculate_learned_target_lux(seed_lux, user_prefs, elev, azim), 1)
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose learned user preferences and sample count."""
+        prefs = self._engine.store.data.get("user_prefs", {}).get(self._room_id, [])
+        return {
+            "user_preferences": prefs,
+            "sample_count": len(prefs),
+            "seed_lux": float(self._controller.entry_data.get(CONF_TARGET_LUX, DEFAULT_TARGET_LUX)),
+        }
 
 
 class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
@@ -176,6 +201,25 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
             return "occupied"
 
         return "vacant"
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose media and late night preferences and target percentages."""
+        learning_data = self._engine.store.data
+        media_prefs = learning_data.get("media_prefs", {}).get(self._room_id, [])
+        late_night_prefs = learning_data.get("late_night_prefs", {}).get(self._room_id, [])
+        media_seed = int(self._controller.entry_data.get("media_seed_pct", DEFAULT_MEDIA_SEED_PCT))
+        late_night_seed = int(self._controller.entry_data.get("late_night_pct", DEFAULT_LATE_NIGHT_PCT))
+
+        media_target = int(sum(media_prefs) / len(media_prefs)) if media_prefs else media_seed
+        late_night_target = int(sum(late_night_prefs) / len(late_night_prefs)) if late_night_prefs else late_night_seed
+
+        return {
+            "media_preferences": media_prefs,
+            "media_target_pct": media_target,
+            "late_night_preferences": late_night_prefs,
+            "late_night_target_pct": late_night_target,
+        }
 
 
 class PassableLightingEngineReadySensor(SensorEntity):
