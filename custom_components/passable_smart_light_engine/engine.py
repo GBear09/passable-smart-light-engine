@@ -515,12 +515,14 @@ class PassableLightingEngine:
         )
 
         # 1. Power grid restoration protection
-        grid_entity = str(p.get("power_grid_entity", DEFAULT_POWER_GRID_ENTITY)).strip()
+        grid_entity = p.get("power_grid_entity")
         if grid_entity:
-            grid_state = safe_get_state(self.hass, grid_entity, "on")
-            if str(grid_state).lower() in ("off", "unavailable", "unknown"):
-                _LOGGER.debug("PassableSmartLighting [%s]: Power grid offline. Halting cycle.", room_id)
-                return
+            grid_entity_str = str(grid_entity).strip()
+            if grid_entity_str and grid_entity_str.lower() != "none":
+                grid_state = safe_get_state(self.hass, grid_entity_str, "on")
+                if str(grid_state).lower() in ("off", "unavailable", "unknown"):
+                    _LOGGER.debug("PassableSmartLighting [%s]: Power grid offline. Halting cycle.", room_id)
+                    return
 
         # 2. Bypass check
         is_frozen, is_forced_off = self.check_bypasses(bypass_freeze_entities, bypass_off_entities)
@@ -859,13 +861,17 @@ class RoomController:
         presence_entities = self.entry_data.get(CONF_PRESENCE_ENTITIES, [])
         if isinstance(presence_entities, str):
             presence_entities = [presence_entities]
+        elif presence_entities is None:
+            presence_entities = []
 
         media_entities = self.entry_data.get(CONF_MEDIA_ENTITIES, [])
         if isinstance(media_entities, str):
             media_entities = [media_entities]
+        elif media_entities is None:
+            media_entities = []
 
-        bypasses = list(self.entry_data.get(CONF_BYPASS_FREEZE_ENTITIES, [])) + list(
-            self.entry_data.get(CONF_BYPASS_OFF_ENTITIES, [])
+        bypasses = list(self.entry_data.get(CONF_BYPASS_FREEZE_ENTITIES) or []) + list(
+            self.entry_data.get(CONF_BYPASS_OFF_ENTITIES) or []
         )
 
         # Track presence changes

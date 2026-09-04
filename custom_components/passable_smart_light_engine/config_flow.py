@@ -62,6 +62,29 @@ from .const import (
 )
 
 
+class OptionalEntitySelector(selector.EntitySelector):
+    """EntitySelector that safely accepts None or empty string when optional."""
+
+    def __call__(self, data: Any) -> Any:
+        """Validate input or allow None when empty."""
+        if data is None or data == "":
+            return [] if self.config.get("multiple") else None
+        if self.config.get("multiple") and isinstance(data, list):
+            cleaned = [x for x in data if x]
+            return cleaned
+        return super().__call__(data)
+
+
+class OptionalTimeSelector(selector.TimeSelector):
+    """TimeSelector that safely accepts None or empty string when optional."""
+
+    def __call__(self, data: Any) -> Any:
+        """Validate input or allow None when empty."""
+        if data is None or data == "":
+            return None
+        return super().__call__(data)
+
+
 class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Passable AI Smart Lighting Controller."""
 
@@ -159,13 +182,13 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                     ]
                                 )
                             ),
-                            vol.Optional(CONF_LATE_NIGHT_ENTITY): selector.EntitySelector(),
-                            vol.Optional(CONF_LATE_NIGHT_START_TIME, default=DEFAULT_LATE_NIGHT_START_TIME): selector.TimeSelector(),
-                            vol.Optional(CONF_LATE_NIGHT_START_ENTITY): selector.EntitySelector(
+                            vol.Optional(CONF_LATE_NIGHT_ENTITY): OptionalEntitySelector(),
+                            vol.Optional(CONF_LATE_NIGHT_START_TIME, default=DEFAULT_LATE_NIGHT_START_TIME): OptionalTimeSelector(),
+                            vol.Optional(CONF_LATE_NIGHT_START_ENTITY): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="input_datetime")
                             ),
-                            vol.Optional(CONF_LATE_NIGHT_STOP_TIME, default=DEFAULT_LATE_NIGHT_STOP_TIME): selector.TimeSelector(),
-                            vol.Optional(CONF_LATE_NIGHT_STOP_ENTITY): selector.EntitySelector(
+                            vol.Optional(CONF_LATE_NIGHT_STOP_TIME, default=DEFAULT_LATE_NIGHT_STOP_TIME): OptionalTimeSelector(),
+                            vol.Optional(CONF_LATE_NIGHT_STOP_ENTITY): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="input_datetime")
                             ),
                         }
@@ -175,7 +198,7 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(SECTION_MEDIA): data_entry_flow.section(
                     vol.Schema(
                         {
-                            vol.Optional(CONF_MEDIA_ENTITIES, default=[]): selector.EntitySelector(
+                            vol.Optional(CONF_MEDIA_ENTITIES, default=[]): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="media_player", multiple=True)
                             ),
                             vol.Optional(CONF_MEDIA_SEED_PCT, default=DEFAULT_MEDIA_SEED_PCT): selector.NumberSelector(
@@ -188,22 +211,22 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(SECTION_BYPASSES): data_entry_flow.section(
                     vol.Schema(
                         {
-                            vol.Optional(CONF_MANUAL_OVERRIDE_ENTITY): selector.EntitySelector(
+                            vol.Optional(CONF_MANUAL_OVERRIDE_ENTITY): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain=["input_boolean", "switch"])
                             ),
                             vol.Optional(CONF_CREATE_OVERRIDE_SWITCH, default=False): selector.BooleanSelector(),
-                            vol.Optional(CONF_BYPASS_FREEZE_ENTITIES, default=[]): selector.EntitySelector(
+                            vol.Optional(CONF_BYPASS_FREEZE_ENTITIES, default=[]): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(multiple=True)
                             ),
                             vol.Optional(CONF_CREATE_FREEZE_SWITCH, default=False): selector.BooleanSelector(),
-                            vol.Optional(CONF_BYPASS_OFF_ENTITIES, default=[]): selector.EntitySelector(
+                            vol.Optional(CONF_BYPASS_OFF_ENTITIES, default=[]): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(multiple=True)
                             ),
                             vol.Optional(CONF_OVERRIDE_TIMEOUT_MIN, default=DEFAULT_OVERRIDE_TIMEOUT_MIN): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=5, max=240, step=5, mode=selector.NumberSelectorMode.BOX)
                             ),
                             vol.Optional(CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE, default=DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE): selector.BooleanSelector(),
-                            vol.Optional(CONF_POWER_GRID_ENTITY, default=DEFAULT_POWER_GRID_ENTITY): selector.EntitySelector(
+                            vol.Optional(CONF_POWER_GRID_ENTITY): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain=["binary_sensor", "sensor"])
                             ),
                         }
@@ -253,7 +276,7 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                             vol.Required(CONF_LIGHT_ENTITY, default=d.get(CONF_LIGHT_ENTITY)): selector.EntitySelector(
                                 selector.EntitySelectorConfig(domain="light")
                             ),
-                            vol.Required(CONF_PRESENCE_ENTITIES, default=d.get(CONF_PRESENCE_ENTITIES, [])): selector.EntitySelector(
+                            vol.Required(CONF_PRESENCE_ENTITIES, default=d.get(CONF_PRESENCE_ENTITIES, [])): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
                             ),
                             vol.Required(CONF_LUX_SENSOR, default=d.get(CONF_LUX_SENSOR)): selector.EntitySelector(
@@ -304,13 +327,13 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                                     ]
                                 )
                             ),
-                            vol.Optional(CONF_LATE_NIGHT_ENTITY, default=d.get(CONF_LATE_NIGHT_ENTITY)): selector.EntitySelector(),
-                            vol.Optional(CONF_LATE_NIGHT_START_TIME, default=d.get(CONF_LATE_NIGHT_START_TIME, DEFAULT_LATE_NIGHT_START_TIME)): selector.TimeSelector(),
-                            vol.Optional(CONF_LATE_NIGHT_START_ENTITY, default=d.get(CONF_LATE_NIGHT_START_ENTITY)): selector.EntitySelector(
+                            vol.Optional(CONF_LATE_NIGHT_ENTITY, description={"suggested_value": d.get(CONF_LATE_NIGHT_ENTITY)}): OptionalEntitySelector(),
+                            vol.Optional(CONF_LATE_NIGHT_START_TIME, description={"suggested_value": d.get(CONF_LATE_NIGHT_START_TIME, DEFAULT_LATE_NIGHT_START_TIME)}): OptionalTimeSelector(),
+                            vol.Optional(CONF_LATE_NIGHT_START_ENTITY, description={"suggested_value": d.get(CONF_LATE_NIGHT_START_ENTITY)}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="input_datetime")
                             ),
-                            vol.Optional(CONF_LATE_NIGHT_STOP_TIME, default=d.get(CONF_LATE_NIGHT_STOP_TIME, DEFAULT_LATE_NIGHT_STOP_TIME)): selector.TimeSelector(),
-                            vol.Optional(CONF_LATE_NIGHT_STOP_ENTITY, default=d.get(CONF_LATE_NIGHT_STOP_ENTITY)): selector.EntitySelector(
+                            vol.Optional(CONF_LATE_NIGHT_STOP_TIME, description={"suggested_value": d.get(CONF_LATE_NIGHT_STOP_TIME, DEFAULT_LATE_NIGHT_STOP_TIME)}): OptionalTimeSelector(),
+                            vol.Optional(CONF_LATE_NIGHT_STOP_ENTITY, description={"suggested_value": d.get(CONF_LATE_NIGHT_STOP_ENTITY)}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="input_datetime")
                             ),
                         }
@@ -320,7 +343,7 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(SECTION_MEDIA): data_entry_flow.section(
                     vol.Schema(
                         {
-                            vol.Optional(CONF_MEDIA_ENTITIES, default=d.get(CONF_MEDIA_ENTITIES, [])): selector.EntitySelector(
+                            vol.Optional(CONF_MEDIA_ENTITIES, description={"suggested_value": d.get(CONF_MEDIA_ENTITIES, [])}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="media_player", multiple=True)
                             ),
                             vol.Optional(CONF_MEDIA_SEED_PCT, default=d.get(CONF_MEDIA_SEED_PCT, DEFAULT_MEDIA_SEED_PCT)): selector.NumberSelector(
@@ -333,22 +356,22 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(SECTION_BYPASSES): data_entry_flow.section(
                     vol.Schema(
                         {
-                            vol.Optional(CONF_MANUAL_OVERRIDE_ENTITY, default=d.get(CONF_MANUAL_OVERRIDE_ENTITY)): selector.EntitySelector(
+                            vol.Optional(CONF_MANUAL_OVERRIDE_ENTITY, description={"suggested_value": d.get(CONF_MANUAL_OVERRIDE_ENTITY)}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain=["input_boolean", "switch"])
                             ),
                             vol.Optional(CONF_CREATE_OVERRIDE_SWITCH, default=d.get(CONF_CREATE_OVERRIDE_SWITCH, False)): selector.BooleanSelector(),
-                            vol.Optional(CONF_BYPASS_FREEZE_ENTITIES, default=d.get(CONF_BYPASS_FREEZE_ENTITIES, [])): selector.EntitySelector(
+                            vol.Optional(CONF_BYPASS_FREEZE_ENTITIES, description={"suggested_value": d.get(CONF_BYPASS_FREEZE_ENTITIES, [])}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(multiple=True)
                             ),
                             vol.Optional(CONF_CREATE_FREEZE_SWITCH, default=d.get(CONF_CREATE_FREEZE_SWITCH, False)): selector.BooleanSelector(),
-                            vol.Optional(CONF_BYPASS_OFF_ENTITIES, default=d.get(CONF_BYPASS_OFF_ENTITIES, [])): selector.EntitySelector(
+                            vol.Optional(CONF_BYPASS_OFF_ENTITIES, description={"suggested_value": d.get(CONF_BYPASS_OFF_ENTITIES, [])}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(multiple=True)
                             ),
                             vol.Optional(CONF_OVERRIDE_TIMEOUT_MIN, default=d.get(CONF_OVERRIDE_TIMEOUT_MIN, DEFAULT_OVERRIDE_TIMEOUT_MIN)): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=5, max=240, step=5, mode=selector.NumberSelectorMode.BOX)
                             ),
                             vol.Optional(CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE, default=d.get(CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE, DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE)): selector.BooleanSelector(),
-                            vol.Optional(CONF_POWER_GRID_ENTITY, default=d.get(CONF_POWER_GRID_ENTITY, DEFAULT_POWER_GRID_ENTITY)): selector.EntitySelector(
+                            vol.Optional(CONF_POWER_GRID_ENTITY, description={"suggested_value": d.get(CONF_POWER_GRID_ENTITY)}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain=["binary_sensor", "sensor"])
                             ),
                         }
