@@ -258,6 +258,9 @@
       }
     },
     "button": {
+      "calibrate_room_curve": {
+        "name": "Calibrate Room Lux Curve"
+      },
       "reset_selected_data": {
         "name": "Reset Selected Learning Data"
       },

@@ -24,6 +24,7 @@ async def async_setup_entry(
     controller: RoomController = controllers[entry.entry_id]
 
     entities = [
+        PassableLightingCalibrateCurveButton(entry, controller, engine),
         PassableLightingResetSelectedButton(entry, controller, engine),
         PassableLightingResetAllButton(entry, controller, engine),
     ]
@@ -96,3 +97,23 @@ class PassableLightingResetAllButton(PassableLightingBaseButton):
             "PassableAdaptiveLighting [%s]: Reset ALL learning datasets via UI button press.",
             self._room_id,
         )
+
+
+class PassableLightingCalibrateCurveButton(PassableLightingBaseButton):
+    """Button entity to trigger automated yield calibration routine for this room."""
+
+    _attr_translation_key = "calibrate_room_curve"
+    _attr_icon = "mdi:tune-vertical"
+
+    def __init__(self, entry: ConfigEntry, controller: RoomController, engine: PassableLightingEngine) -> None:
+        """Initialize calibrate room curve button."""
+        super().__init__(entry, controller, engine)
+        self._attr_unique_id = f"{self._room_id}_calibrate_room_curve"
+
+    async def async_press(self) -> None:
+        """Execute automated yield calibration for this room."""
+        _LOGGER.info(
+            "PassableAdaptiveLighting [%s]: Calibrate room curve triggered via UI button press.",
+            self._room_id,
+        )
+        self.hass.async_create_task(self._engine.async_calibrate_room_curve(self._room_id))
