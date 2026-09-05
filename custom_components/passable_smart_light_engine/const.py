@@ -47,6 +47,7 @@ CONF_LATE_NIGHT_STOP_TIME = "late_night_stop_time"
 CONF_LATE_NIGHT_STOP_ENTITY = "late_night_stop_entity"
 
 CONF_POWER_GRID_ENTITY = "power_grid_entity"
+CONF_SETTLING_COOLDOWN_SEC = "settling_cooldown_sec"
 
 # UI Section Identifiers
 SECTION_HARDWARE = "hardware_presence"
@@ -57,9 +58,12 @@ SECTION_BYPASSES = "bypasses"
 
 # Default values
 DEFAULT_TARGET_LUX = 40
-DEFAULT_LUX_RATIO = 1.0
+DEFAULT_LUX_RATIO = 0.20
 DEFAULT_PRESENCE_TIMEOUT_MIN = 5
 DEFAULT_MIN_OCCUPIED_PCT = 0
+DEFAULT_SETTLING_COOLDOWN_SEC = 45.0
+MAX_CLOSED_LOOP_TRIM_PCT = 15
+SEVERE_LUX_DEFICIT_THRESHOLD = 15.0
 
 DEFAULT_CIRCADIAN_ENABLED = True
 DEFAULT_MIN_COLOR_TEMP = 2700
@@ -106,3 +110,7 @@ SERVICE_RESET_LEARNING_DATA = "reset_learning_data"
 ATTR_RESET_ROOM_ID = "room_id"
 ATTR_RESET_TYPE = "reset_type"
 RESET_TYPES = ["all", "user_prefs", "room_curves", "media_prefs", "late_night_prefs"]
+
+SERVICE_CALIBRATE_ROOM_CURVE = "calibrate_room_curve"
+ATTR_CALIBRATE_ROOM_ID = "room_id"
+ATTR_CALIBRATE_FORCE = "force"

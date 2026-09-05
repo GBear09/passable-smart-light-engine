@@ -36,6 +36,7 @@ from .const import (
     CONF_PRESENCE_ENTITIES,
     CONF_PRESENCE_TIMEOUT_MIN,
     CONF_ROOM_ID,
+    CONF_SETTLING_COOLDOWN_SEC,
     CONF_TARGET_LUX,
     DEFAULT_CIRCADIAN_ENABLED,
     DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
@@ -52,6 +53,7 @@ from .const import (
     DEFAULT_OVERRIDE_TIMEOUT_MIN,
     DEFAULT_POWER_GRID_ENTITY,
     DEFAULT_PRESENCE_TIMEOUT_MIN,
+    DEFAULT_SETTLING_COOLDOWN_SEC,
     DEFAULT_TARGET_LUX,
     DOMAIN,
     SECTION_BYPASSES,
@@ -123,7 +125,7 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     selector.NumberSelectorConfig(min=0, max=1000, step=5, mode=selector.NumberSelectorMode.BOX)
                 ),
                 vol.Required(CONF_DEFAULT_LUX_RATIO, default=DEFAULT_LUX_RATIO): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=0.1, max=20.0, step=0.1, mode=selector.NumberSelectorMode.BOX)
+                    selector.NumberSelectorConfig(min=0.01, max=20.0, step=0.05, mode=selector.NumberSelectorMode.BOX)
                 ),
                 vol.Required(CONF_PRESENCE_TIMEOUT_MIN, default=DEFAULT_PRESENCE_TIMEOUT_MIN): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=120, step=1, mode=selector.NumberSelectorMode.BOX)
@@ -229,6 +231,9 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Optional(CONF_POWER_GRID_ENTITY): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain=["binary_sensor", "sensor"])
                             ),
+                            vol.Optional(CONF_SETTLING_COOLDOWN_SEC, default=DEFAULT_SETTLING_COOLDOWN_SEC): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=5, max=180, step=5, mode=selector.NumberSelectorMode.BOX)
+                            ),
                         }
                     ),
                     {"collapsed": True},
@@ -286,7 +291,7 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                                 selector.NumberSelectorConfig(min=0, max=1000, step=5, mode=selector.NumberSelectorMode.BOX)
                             ),
                             vol.Required(CONF_DEFAULT_LUX_RATIO, default=d.get(CONF_DEFAULT_LUX_RATIO, DEFAULT_LUX_RATIO)): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=0.1, max=20.0, step=0.1, mode=selector.NumberSelectorMode.BOX)
+                                selector.NumberSelectorConfig(min=0.01, max=20.0, step=0.05, mode=selector.NumberSelectorMode.BOX)
                             ),
                             vol.Required(CONF_PRESENCE_TIMEOUT_MIN, default=d.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN)): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=1, max=120, step=1, mode=selector.NumberSelectorMode.BOX)
@@ -373,6 +378,9 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                             vol.Optional(CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE, default=d.get(CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE, DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE)): selector.BooleanSelector(),
                             vol.Optional(CONF_POWER_GRID_ENTITY, description={"suggested_value": d.get(CONF_POWER_GRID_ENTITY)}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain=["binary_sensor", "sensor"])
+                            ),
+                            vol.Optional(CONF_SETTLING_COOLDOWN_SEC, default=d.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC)): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=5, max=180, step=5, mode=selector.NumberSelectorMode.BOX)
                             ),
                         }
                     ),

@@ -26,3 +26,22 @@ reset_learning_data:
               value: "media_prefs"
             - label: "Late Night Presets"
               value: "late_night_prefs"
+
+calibrate_room_curve:
+  name: Calibrate Room Curve
+  description: Executes an automated yield calibration test across test brightness levels (25%, 50%, 75%, 100%) and records the room lux yield curve into storage. Calibration requires dark conditions (sun elevation < -4.0°) unless 'force' is enabled.
+  fields:
+    room_id:
+      name: Room ID
+      description: The room ID to calibrate (e.g. 'kitchen').
+      example: "kitchen"
+      required: true
+      selector:
+        text:
+    force:
+      name: Force Execution in Daylight
+      description: Bypass daylight check if blackout shades are closed or the room has no windows.
+      default: false
+      required: false
+      selector:
+        boolean:

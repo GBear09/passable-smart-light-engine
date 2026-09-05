@@ -14,6 +14,8 @@ from homeassistant.core import Event, HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 
 from .const import (
+    ATTR_CALIBRATE_FORCE,
+    ATTR_CALIBRATE_ROOM_ID,
     ATTR_RESET_ROOM_ID,
     ATTR_RESET_TYPE,
     DOMAIN,
@@ -22,6 +24,7 @@ from .const import (
     LEGACY_DOMAIN,
     PLATFORMS,
     RESET_TYPES,
+    SERVICE_CALIBRATE_ROOM_CURVE,
     SERVICE_RESET_LEARNING_DATA,
 )
 from .engine import PassableLightingEngine, RoomController
@@ -35,6 +38,13 @@ RESET_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_RESET_ROOM_ID): cv.string,
         vol.Optional(ATTR_RESET_TYPE, default="all"): vol.In(RESET_TYPES),
+    }
+)
+
+CALIBRATE_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_CALIBRATE_ROOM_ID): cv.string,
+        vol.Optional(ATTR_CALIBRATE_FORCE, default=False): cv.boolean,
     }
 )
 
@@ -76,7 +86,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
     hass.bus.async_listen(EVENT_PASSABLE_SMART_LIGHT_ENGINE, _async_handle_blueprint_event)
 
     # ==============================================================
-    # 2. DATA RESET SERVICES
+    # 2. DATA RESET & CALIBRATION SERVICES
     # ==============================================================
     async def _async_handle_reset_service(call: ServiceCall) -> None:
         """Reset learned lighting curves and user preferences."""
@@ -86,6 +96,16 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
 
     hass.services.async_register(
         DOMAIN, SERVICE_RESET_LEARNING_DATA, _async_handle_reset_service, schema=RESET_SERVICE_SCHEMA
+    )
+
+    async def _async_handle_calibrate_service(call: ServiceCall) -> None:
+        """Calibrate yield curve for a room across test brightness levels."""
+        room_id = call.data[ATTR_CALIBRATE_ROOM_ID]
+        force = call.data.get(ATTR_CALIBRATE_FORCE, False)
+        hass.async_create_task(engine.async_calibrate_room_curve(room_id, force=force))
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_CALIBRATE_ROOM_CURVE, _async_handle_calibrate_service, schema=CALIBRATE_SERVICE_SCHEMA
     )
 
     _LOGGER.info("Passable Adaptive Smart Lighting Controller component initialized successfully.")

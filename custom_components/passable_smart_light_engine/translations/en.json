@@ -76,13 +76,15 @@
               "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
               "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
               "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
-              "power_grid_entity": "Power Grid Status Entity"
+              "power_grid_entity": "Power Grid Status Entity",
+              "settling_cooldown_sec": "Sensor Settling Cooldown (Seconds)"
             },
             "data_description": {
               "bypass_freeze_entities": "Entities that pause automations and hold current light level when active.",
               "bypass_off_entities": "Entities (e.g. Away Mode) that pause automations and force lights off.",
               "override_timeout_min": "Minutes to keep manual override active before resuming automatic control.",
-              "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout."
+              "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout.",
+              "settling_cooldown_sec": "Time to wait for slow illuminance sensors (e.g. Aqara Matter, battery Zigbee) to report before making another closed-loop brightness adjustment."
             }
           }
         },
@@ -197,13 +199,15 @@
               "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
               "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
               "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
-              "power_grid_entity": "Power Grid Status Entity"
+              "power_grid_entity": "Power Grid Status Entity",
+              "settling_cooldown_sec": "Sensor Settling Cooldown (Seconds)"
             },
             "data_description": {
               "bypass_freeze_entities": "Entities that pause automations and hold current light level when active.",
               "bypass_off_entities": "Entities (e.g. Away Mode) that pause automations and force lights off.",
               "override_timeout_min": "Minutes to keep manual override active before resuming automatic control.",
-              "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout."
+              "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout.",
+              "settling_cooldown_sec": "Time to wait for slow illuminance sensors (e.g. Aqara Matter, battery Zigbee) to report before making another closed-loop brightness adjustment."
             }
           }
         },

@@ -24,9 +24,11 @@ from .const import (
     CONF_LUX_SENSOR,
     CONF_MANUAL_OVERRIDE_ENTITY,
     CONF_MEDIA_ENTITIES,
+    CONF_POWER_GRID_ENTITY,
     CONF_PRESENCE_ENTITIES,
     CONF_PRESENCE_TIMEOUT_MIN,
     CONF_ROOM_ID,
+    CONF_SETTLING_COOLDOWN_SEC,
     DEFAULT_CIRCADIAN_ENABLED,
     DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
     DEFAULT_LATE_NIGHT_CONDITION_TYPE,
@@ -43,6 +45,7 @@ from .const import (
     DEFAULT_OVERRIDE_TIMEOUT_MIN,
     DEFAULT_POWER_GRID_ENTITY,
     DEFAULT_PRESENCE_TIMEOUT_MIN,
+    DEFAULT_SETTLING_COOLDOWN_SEC,
     DEFAULT_TARGET_LUX,
     DOMAIN,
     DWELL_TIME_SEC,
@@ -51,10 +54,12 @@ from .const import (
     ECHO_GUARD_WINDOW_SEC,
     LUX_ADJUST_RATE_LIMIT_SEC,
     LUX_DEADBAND_PCT,
+    MAX_CLOSED_LOOP_TRIM_PCT,
     MIN_LUX_DEADBAND,
     MIN_VISIBLE_PCT,
     OVERRIDE_FADE_TRANSITION_SEC,
     SENSOR_DEBOUNCE_SEC,
+    SEVERE_LUX_DEFICIT_THRESHOLD,
     STARTUP_SETTLE_SEC,
 )
 from .storage import LearningDataStore
@@ -136,9 +141,18 @@ def calculate_required_pct(
     curve: Dict[str, Any],
     default_lux_ratio: float = DEFAULT_LUX_RATIO,
     min_pct: int = 0,
+    active_pct: int = 0,
 ) -> int:
-    """Calculate the light brightness % needed to reach target ambient lux."""
-    lux_needed = target_lux - current_lux
+    """Calculate the light brightness % needed to reach target ambient lux with bulb separation."""
+    # When the light is currently on at active_pct, separate the bulb's expected output
+    # from the sensor reading to determine the natural daylight baseline.
+    if active_pct > 0:
+        current_bulb_lux = get_expected_lux(curve, float(active_pct), default_lux_ratio)
+        natural_ambient = max(0.0, current_lux - current_bulb_lux)
+    else:
+        natural_ambient = max(0.0, current_lux)
+
+    lux_needed = target_lux - natural_ambient
     if lux_needed <= 0:
         return 0
 
@@ -199,10 +213,12 @@ class PassableLightingEngine:
         self.hass = hass
         self.store = store
         self._lux_history: Dict[str, List[float]] = {}
+        self._lux_last_updated: Dict[str, float] = {}
         self._room_locks: Dict[str, asyncio.Lock] = {}
         self._echo_guards: Dict[str, Dict[str, Any]] = {}
         self._override_timers: Dict[str, Dict[str, Any]] = {}
         self._pending_learning_handles: Dict[str, CALLBACK_TYPE] = {}
+        self._automated_learning_handles: Dict[str, CALLBACK_TYPE] = {}
         self._last_ambient_adjust: Dict[str, float] = {}
         self._last_engine_target: Dict[str, int] = {}
         self._last_engine_command: Dict[str, float] = {}
@@ -256,10 +272,17 @@ class PassableLightingEngine:
         if room_id not in self._lux_history:
             self._lux_history[room_id] = []
 
+        # Only append when sensor actually updated to prevent buffer duplication during loops
+        sensor_st = self.hass.states.get(lux_sensor)
+        st_updated = dt_util.as_utc(sensor_st.last_updated).timestamp() if sensor_st and sensor_st.last_updated else 0.0
+        last_recorded_ts = self._lux_last_updated.get(room_id, 0.0)
+
         history = self._lux_history[room_id]
-        history.append(current_lux)
-        if len(history) > max_readings:
-            history.pop(0)
+        if not history or st_updated > last_recorded_ts:
+            history.append(current_lux)
+            self._lux_last_updated[room_id] = st_updated
+            if len(history) > max_readings:
+                history.pop(0)
 
         if len(history) >= 3:
             sorted_readings = sorted(history)
@@ -894,7 +917,7 @@ class PassableLightingEngine:
         current_lux = self.get_smoothed_lux(room_id, lux_sensor)
 
         needed_pct = calculate_required_pct(
-            target_lux, current_lux, room_curves, default_lux_ratio, min_occupied_pct
+            target_lux, current_lux, room_curves, default_lux_ratio, min_occupied_pct, active_pct=current_pct
         )
 
         # Check hysteresis and deadbands
@@ -918,6 +941,9 @@ class PassableLightingEngine:
             await self.async_turn_on_light(
                 room_id, light_entity, needed_pct, circadian_enabled, min_color_temp, max_color_temp
             )
+            # Schedule automated yield calibration if dark outside (sun elev < -4°)
+            if elev < -4.0:
+                self._schedule_automated_yield_learning(room_id, lux_sensor, needed_pct, current_lux, p)
         elif is_light_on:
             if needed_pct == 0 and min_occupied_pct == 0:
                 _LOGGER.info(
@@ -928,44 +954,91 @@ class PassableLightingEngine:
                 )
                 self._last_ambient_adjust[room_id] = now_ts
                 await self.async_turn_off_light(room_id, light_entity)
-            elif pct_diff >= BRIGHTNESS_HYSTERESIS_PCT and lux_diff > lux_deadband:
-                # Rate limit to prevent control hunting during passing clouds
-                if time_since_last_adj < LUX_ADJUST_RATE_LIMIT_SEC and trigger_id == "lux_change":
+            else:
+                # 1. Staleness & Settling Cooldown Check for slow sensors (e.g. Matter/Zigbee)
+                cooldown_sec = float(p.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC))
+                last_cmd_ts = self._last_engine_command.get(room_id, 0.0)
+                time_since_last_cmd = now_ts - last_cmd_ts
+
+                sensor_st = self.hass.states.get(lux_sensor)
+                is_sensor_stale = False
+                if sensor_st and sensor_st.last_updated:
+                    sensor_ts = dt_util.as_utc(sensor_st.last_updated).timestamp()
+                    if sensor_ts <= (last_cmd_ts + ECHO_CONVERGENCE_SETTLE_SEC):
+                        is_sensor_stale = True
+
+                if (is_sensor_stale or time_since_last_cmd < cooldown_sec) and trigger_id in ("lux_change", "heartbeat", "time_pattern"):
                     _LOGGER.debug(
-                        "PassableSmartLighting [%s]: Ambient adjustment rate-limited (%.1fs < %.1fs).",
+                        "PassableSmartLighting [%s]: Skipping closed-loop trim — sensor settling/stale (stale=%s, elapsed=%.1fs < %.1fs cooldown).",
                         room_id,
-                        time_since_last_adj,
-                        LUX_ADJUST_RATE_LIMIT_SEC,
+                        is_sensor_stale,
+                        time_since_last_cmd,
+                        cooldown_sec,
                     )
                     return
 
-                transition = float(p.get("transition", 1.0))
-                _LOGGER.info(
-                    "PassableSmartLighting [%s]: Adjusting brightness from %s%% to %s%% (Target: %.1f, Lux: %.1f, Trans: %.1fs)",
-                    room_id,
-                    current_pct,
-                    needed_pct,
-                    target_lux,
-                    current_lux,
-                    transition,
-                )
-                self._last_ambient_adjust[room_id] = now_ts
-                await self.async_turn_on_light(
-                    room_id,
-                    light_entity,
-                    needed_pct,
-                    circadian_enabled,
-                    min_color_temp,
-                    max_color_temp,
-                    transition=transition,
+                # 2. Severe lux deficit & hysteresis evaluation
+                is_severe_deficit = (current_lux < (target_lux - SEVERE_LUX_DEFICIT_THRESHOLD))
+                should_adjust = (pct_diff >= BRIGHTNESS_HYSTERESIS_PCT and lux_diff > lux_deadband) or (
+                    is_severe_deficit and lux_diff > lux_deadband
                 )
 
+                if should_adjust:
+                    # Rate limit to prevent hunting during rapid outdoor fluctuations
+                    if time_since_last_adj < LUX_ADJUST_RATE_LIMIT_SEC and trigger_id == "lux_change" and not is_severe_deficit:
+                        _LOGGER.debug(
+                            "PassableSmartLighting [%s]: Ambient adjustment rate-limited (%.1fs < %.1fs).",
+                            room_id,
+                            time_since_last_adj,
+                            LUX_ADJUST_RATE_LIMIT_SEC,
+                        )
+                        return
+
+                    # 3. Bounded gentle step trimming
+                    effective_floor = max(MIN_VISIBLE_PCT, int(min_occupied_pct or 0))
+                    if needed_pct > current_pct:
+                        step = min(MAX_CLOSED_LOOP_TRIM_PCT, needed_pct - current_pct)
+                        target_trim_pct = min(100, current_pct + max(5, step))
+                    else:
+                        step = min(MAX_CLOSED_LOOP_TRIM_PCT, current_pct - needed_pct)
+                        target_trim_pct = max(effective_floor, current_pct - max(5, step))
+
+                    transition = float(p.get("transition", 1.0))
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: Adjusting brightness from %s%% to %s%% (Target Lux: %.1f, Current: %.1f, Needed: %s%%, Trans: %.1fs)",
+                        room_id,
+                        current_pct,
+                        target_trim_pct,
+                        target_lux,
+                        current_lux,
+                        needed_pct,
+                        transition,
+                    )
+                    self._last_ambient_adjust[room_id] = now_ts
+                    await self.async_turn_on_light(
+                        room_id,
+                        light_entity,
+                        target_trim_pct,
+                        circadian_enabled,
+                        min_color_temp,
+                        max_color_temp,
+                        transition=transition,
+                    )
+                    if elev < -4.0:
+                        self._schedule_automated_yield_learning(room_id, lux_sensor, target_trim_pct, current_lux, p)
+
     def cancel_pending_learning(self, room_id: str) -> None:
-        """Cancel any scheduled preference learning for a room."""
+        """Cancel any scheduled preference or automated learning for a room."""
         handle = self._pending_learning_handles.pop(room_id, None)
         if handle:
             try:
                 handle()
+            except Exception:
+                pass
+        auto_handle = self._automated_learning_handles.pop(room_id, None)
+        if auto_handle:
+            try:
+                auto_handle()
             except Exception:
                 pass
         task = self._stabilizing_tasks.pop(room_id, None)
@@ -1070,6 +1143,189 @@ class PassableLightingEngine:
             _LOGGER.error("PassableSmartLighting [%s]: Error committing learned preference: %s", room_id, err)
         finally:
             self._stabilizing_tasks.pop(room_id, None)
+
+    def _schedule_automated_yield_learning(
+        self, room_id: str, lux_sensor: str, target_pct: int, baseline_lux: float, p: Dict[str, Any]
+    ) -> None:
+        """Schedule automated dark-hours yield learning with 180s dwell validation."""
+        prev = self._automated_learning_handles.pop(room_id, None)
+        if prev:
+            try:
+                prev()
+            except Exception:
+                pass
+
+        @callback
+        def _on_automated_dwell_completed(_now: Any) -> None:
+            self._automated_learning_handles.pop(room_id, None)
+            task = self.hass.async_create_task(
+                self._async_commit_automated_yield(room_id, lux_sensor, target_pct, baseline_lux, p)
+            )
+            self._stabilizing_tasks[room_id] = task
+
+        _LOGGER.debug(
+            "PassableSmartLighting [%s]: Scheduled automated dark-hours yield calibration at %s%% (%.0fs dwell)",
+            room_id,
+            target_pct,
+            DWELL_TIME_SEC,
+        )
+        self._automated_learning_handles[room_id] = async_call_later(
+            self.hass, DWELL_TIME_SEC, _on_automated_dwell_completed
+        )
+
+    async def _async_commit_automated_yield(
+        self, room_id: str, lux_sensor: str, target_pct: int, baseline_lux: float, p: Dict[str, Any]
+    ) -> None:
+        """Commit automatically learned yield curve point during dark hours."""
+        try:
+            # 1. Verify light is still on and close to target_pct
+            light_entity = p.get("light_entity")
+            light_st = self.hass.states.get(light_entity) if light_entity else None
+            if not light_st or light_st.state != "on":
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Light turned off during automated dwell; discarding yield point.",
+                    room_id,
+                )
+                return
+
+            live_pct = int(round((light_st.attributes.get("brightness", 0) / 255.0) * 100))
+            if abs(live_pct - target_pct) > 5:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Brightness altered during automated dwell; discarding yield point.",
+                    room_id,
+                )
+                return
+
+            # 2. Verify still dark outside
+            sun_state = self.hass.states.get("sun.sun")
+            elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
+            if elev >= -4.0:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Daylight present (elev=%.1f°); discarding automated yield point.",
+                    room_id,
+                    elev,
+                )
+                return
+
+            # 3. Verify room is still occupied
+            presence_entities = p.get("presence_entity", [])
+            if isinstance(presence_entities, str):
+                presence_entities = [presence_entities] if presence_entities else []
+            if presence_entities and not self.check_presence(presence_entities):
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Room vacant at dwell completion; discarding automated yield point.",
+                    room_id,
+                )
+                return
+
+            # 4. Read settled lux (180s dwell guarantees even slow Matter sensors have fully updated)
+            settled_lux = self.get_smoothed_lux(room_id, lux_sensor)
+            if settled_lux <= 0:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Settled lux <= 0 (%.1f); skipping yield point.",
+                    room_id,
+                    settled_lux,
+                )
+                return
+
+            net_yield_lux = max(0.5, round(settled_lux, 1))
+            curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
+            curves[str(target_pct)] = net_yield_lux
+
+            self.store.schedule_save(delay=30.0)
+            _LOGGER.info(
+                "PassableSmartLighting [%s]: 🌙 Automated dark-hours yield curve calibrated: %s%% = %.1f lx (baseline was %.1f lx)",
+                room_id,
+                target_pct,
+                net_yield_lux,
+                baseline_lux,
+            )
+
+            ready_sensor = self.hass.data.get(DOMAIN, {}).get("ready_sensor")
+            if ready_sensor:
+                ready_sensor.async_write_ha_state()
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as err:
+            _LOGGER.error("PassableSmartLighting [%s]: Error committing automated yield: %s", room_id, err)
+        finally:
+            self._stabilizing_tasks.pop(room_id, None)
+
+    async def async_calibrate_room_curve(self, room_id: str, force: bool = False) -> None:
+        """Run automated one-shot calibration routine for a room across test brightness levels."""
+        ctrl = self._controllers.get(room_id)
+        if not ctrl:
+            _LOGGER.warning("PassableSmartLighting [%s]: Cannot calibrate — room controller not found.", room_id)
+            return
+
+        p = ctrl.entry_data
+        light_entity = p.get(CONF_LIGHT_ENTITY)
+        lux_sensor = p.get(CONF_LUX_SENSOR)
+        if not light_entity or not lux_sensor:
+            _LOGGER.warning("PassableSmartLighting [%s]: Missing light_entity or lux_sensor for calibration.", room_id)
+            return
+
+        # Daylight protection: Yield curves must measure pure bulb lumen output.
+        # If the sun is up (elevation >= -4.0°), reject execution unless force is specified.
+        sun_state = self.hass.states.get("sun.sun")
+        elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
+        if elev >= -4.0 and not force:
+            _LOGGER.warning(
+                "PassableSmartLighting [%s]: Calibration rejected — ambient daylight detected (sun elevation is %.1f° >= -4.0°). "
+                "Calibration requires dark conditions to avoid light contamination. Run after sunset or pass force=True.",
+                room_id,
+                elev,
+            )
+            try:
+                await self.hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "notification_id": f"passable_lighting_calibrate_{room_id}",
+                        "title": f"Calibration Blocked: {room_id.replace('_', ' ').title()}",
+                        "message": (
+                            f"Automated yield calibration for **{room_id}** was cancelled because the sun is still up "
+                            f"(elevation: **{elev:.1f}°**).\n\n"
+                            "Calibration requires dark conditions (sun elevation < -4.0°) so the illuminance sensor measures "
+                            "pure bulb lumen output without window daylight contamination.\n\n"
+                            "**Next steps:**\n"
+                            "- Trigger this calibration after sunset / when dark outside, or\n"
+                            "- Re-run with `force: true` if blackout shades are fully closed or the room has no windows."
+                        ),
+                    },
+                )
+            except Exception as notify_err:
+                _LOGGER.debug("Could not create persistent notification: %s", notify_err)
+            return
+
+        async with self.get_lock(room_id):
+            _LOGGER.info("PassableSmartLighting [%s]: 🚀 Starting automated yield calibration routine...", room_id)
+            test_levels = [25, 50, 75, 100]
+            cooldown = float(p.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC))
+            curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
+
+            for lvl in test_levels:
+                _LOGGER.info(
+                    "PassableSmartLighting [%s]: Calibrating at %s%% (waiting %.1fs for sensor settling)...",
+                    room_id,
+                    lvl,
+                    cooldown,
+                )
+                await self.async_turn_on_light(
+                    room_id, light_entity, lvl, False, DEFAULT_MIN_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP, transition=1.0
+                )
+                await asyncio.sleep(cooldown)
+                lux_val = self.get_smoothed_lux(room_id, lux_sensor)
+                curves[str(lvl)] = round(max(0.1, lux_val), 1)
+                _LOGGER.info("PassableSmartLighting [%s]: Recorded yield: %s%% = %.1f lx", room_id, lvl, curves[str(lvl)])
+
+            await self.async_turn_off_light(room_id, light_entity, transition=2.0)
+            await self.store.async_save()
+            _LOGGER.info("PassableSmartLighting [%s]: ✅ Automated yield calibration complete! Saved curve: %s", room_id, curves)
+            ready_sensor = self.hass.data.get(DOMAIN, {}).get("ready_sensor")
+            if ready_sensor:
+                ready_sensor.async_write_ha_state()
 
 
 class RoomController:
