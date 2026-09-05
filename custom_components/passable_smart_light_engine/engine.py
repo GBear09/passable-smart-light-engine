@@ -829,31 +829,46 @@ class PassableLightingEngine:
                 await self.async_sync_helper(manual_override_entity, False)
                 return
 
-            # Startup / Fail-Safe Vacancy Recovery:
-            # If lights are on in an unoccupied room and no timer is currently running
-            # (e.g. after Home Assistant reboot, reload, or missed event), recover countdown or turn off immediately.
+            # Live Turn-On while Vacant vs Startup/Fail-Safe Vacancy Recovery:
+            # If lights are on in an unoccupied room and no timer is currently running:
             if is_light_on:
                 ctrl = self._controllers.get(room_id)
                 if ctrl and ctrl.vacancy_cancel is None:
                     timeout_sec = float(presence_timeout_min * 60)
-                    remaining_sec = ctrl.get_vacancy_remaining_sec(presence_entities, timeout_sec)
-                    if remaining_sec <= 0.0:
+
+                    # Check if this is a live switch action (e.g. someone turned on lights from off,
+                    # or adjusted brightness before entering the room).
+                    # Grant a fresh entry vacancy countdown forward in time (Approach A) so occupants
+                    # entering a dark room are not plunged into darkness before crossing the doorway.
+                    if trigger_id in ("light_change", "manual_turn_on"):
                         _LOGGER.info(
-                            "PassableSmartLighting [%s]: Vacancy timeout elapsed while offline/reboot. Turning lights OFF immediately.",
-                            room_id,
-                        )
-                        await self.async_turn_off_light(room_id, light_entity)
-                        self.clear_manual_override(room_id)
-                        self.cancel_pending_learning(room_id)
-                        await self.async_sync_helper(manual_override_entity, False)
-                    else:
-                        _LOGGER.info(
-                            "PassableSmartLighting [%s]: Unoccupied room with lights on detected on %s. Resuming vacancy timer (%.1fs remaining).",
+                            "PassableSmartLighting [%s]: Light turned on in unoccupied room via %s. Arming %s min entry vacancy countdown.",
                             room_id,
                             trigger_id,
-                            remaining_sec,
+                            presence_timeout_min,
                         )
-                        ctrl.schedule_vacancy_timer(delay_sec=remaining_sec)
+                        ctrl.schedule_vacancy_timer(delay_sec=timeout_sec)
+                    else:
+                        # Startup / Offline / Periodic Recovery (e.g. startup, reload, heartbeat):
+                        # Use historical presence timestamps to check if timeout already elapsed while offline.
+                        remaining_sec = ctrl.get_vacancy_remaining_sec(presence_entities, timeout_sec)
+                        if remaining_sec <= 0.0:
+                            _LOGGER.info(
+                                "PassableSmartLighting [%s]: Vacancy timeout elapsed while offline/reboot. Turning lights OFF immediately.",
+                                room_id,
+                            )
+                            await self.async_turn_off_light(room_id, light_entity)
+                            self.clear_manual_override(room_id)
+                            self.cancel_pending_learning(room_id)
+                            await self.async_sync_helper(manual_override_entity, False)
+                        else:
+                            _LOGGER.info(
+                                "PassableSmartLighting [%s]: Unoccupied room with lights on detected on %s. Resuming vacancy timer (%.1fs remaining).",
+                                room_id,
+                                trigger_id,
+                                remaining_sec,
+                            )
+                            ctrl.schedule_vacancy_timer(delay_sec=remaining_sec)
             return
 
         # 6. Mode & Target Calculation (Occupied Room)
