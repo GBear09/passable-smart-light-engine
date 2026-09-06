@@ -1,5 +1,7 @@
 """Constants for the Passable Adaptive Smart Lighting Controller integration."""
 
+from typing import List
+
 DOMAIN = "passable_smart_light_engine"
 LEGACY_DOMAIN = "smart_light_engine"
 
@@ -15,6 +17,8 @@ LEGACY_DATA_PATHS = [
 # Configuration keys
 CONF_ROOM_ID = "room_id"
 CONF_LIGHT_ENTITY = "light_entity"
+CONF_SECONDARY_LIGHTS = "secondary_lights"
+CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON = "suppress_main_when_secondary_on"
 CONF_PRESENCE_ENTITIES = "presence_entity"
 CONF_LUX_SENSOR = "lux_sensor"
 CONF_TARGET_LUX = "target_lux"
@@ -62,6 +66,8 @@ DEFAULT_LUX_RATIO = 0.20
 DEFAULT_PRESENCE_TIMEOUT_MIN = 5
 DEFAULT_MIN_OCCUPIED_PCT = 0
 DEFAULT_SETTLING_COOLDOWN_SEC = 45.0
+DEFAULT_SECONDARY_LIGHTS: List[str] = []
+DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON = False
 MAX_CLOSED_LOOP_TRIM_PCT = 15
 SEVERE_LUX_DEFICIT_THRESHOLD = 15.0
 

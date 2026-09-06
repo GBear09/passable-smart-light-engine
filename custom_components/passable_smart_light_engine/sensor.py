@@ -16,10 +16,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     CONF_DEFAULT_LUX_RATIO,
     CONF_ROOM_ID,
+    CONF_SECONDARY_LIGHTS,
+    CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
     DEFAULT_LATE_NIGHT_PCT,
     DEFAULT_LUX_RATIO,
     DEFAULT_MEDIA_SEED_PCT,
+    DEFAULT_SECONDARY_LIGHTS,
+    DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
     DOMAIN,
     RESET_TYPES,
@@ -29,6 +33,7 @@ from .engine import (
     RoomController,
     calculate_learned_target_lux,
     get_expected_lux,
+    safe_get_state,
 )
 from .storage import LearningDataStore
 
@@ -79,7 +84,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.1.4",
+            sw_version="2.1.9",
         )
 
 
@@ -198,7 +203,20 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
             return "late_night"
 
         presence = self._controller.entry_data.get("presence_entity", [])
-        if self._engine.check_presence(presence):
+        is_occupied = self._engine.check_presence(presence)
+
+        sec_lights = self._controller.entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
+        if isinstance(sec_lights, str):
+            sec_lights = [sec_lights] if sec_lights else []
+        any_sec_on = any(safe_get_state(self.hass, s, "off") == "on" for s in (sec_lights or []))
+        suppress_main = bool(
+            self._controller.entry_data.get(CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON)
+        )
+
+        if suppress_main and any_sec_on and is_occupied:
+            return "secondary_active"
+
+        if is_occupied:
             return "occupied"
 
         return "vacant"
@@ -215,11 +233,23 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
         media_target = int(sum(media_prefs) / len(media_prefs)) if media_prefs else media_seed
         late_night_target = int(sum(late_night_prefs) / len(late_night_prefs)) if late_night_prefs else late_night_seed
 
+        sec_lights = self._controller.entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
+        if isinstance(sec_lights, str):
+            sec_lights = [sec_lights] if sec_lights else []
+        active_sec = [s for s in (sec_lights or []) if safe_get_state(self.hass, s, "off") == "on"]
+        suppress_main = bool(
+            self._controller.entry_data.get(CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON)
+        )
+
         return {
             "media_preferences": media_prefs,
             "media_target_pct": media_target,
             "late_night_preferences": late_night_prefs,
             "late_night_target_pct": late_night_target,
+            "secondary_lights": sec_lights or [],
+            "active_secondary_lights": active_sec,
+            "secondary_lights_active": len(active_sec) > 0,
+            "suppress_main_when_secondary_on": suppress_main,
         }
 
 

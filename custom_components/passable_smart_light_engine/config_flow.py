@@ -36,7 +36,9 @@ from .const import (
     CONF_PRESENCE_ENTITIES,
     CONF_PRESENCE_TIMEOUT_MIN,
     CONF_ROOM_ID,
+    CONF_SECONDARY_LIGHTS,
     CONF_SETTLING_COOLDOWN_SEC,
+    CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
     DEFAULT_CIRCADIAN_ENABLED,
     DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
@@ -53,7 +55,9 @@ from .const import (
     DEFAULT_OVERRIDE_TIMEOUT_MIN,
     DEFAULT_POWER_GRID_ENTITY,
     DEFAULT_PRESENCE_TIMEOUT_MIN,
+    DEFAULT_SECONDARY_LIGHTS,
     DEFAULT_SETTLING_COOLDOWN_SEC,
+    DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
     DOMAIN,
     SECTION_BYPASSES,
@@ -115,6 +119,10 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_LIGHT_ENTITY): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="light")
                 ),
+                vol.Optional(CONF_SECONDARY_LIGHTS, default=DEFAULT_SECONDARY_LIGHTS): OptionalEntitySelector(
+                    selector.EntitySelectorConfig(domain="light", multiple=True)
+                ),
+                vol.Optional(CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, default=DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON): selector.BooleanSelector(),
                 vol.Required(CONF_PRESENCE_ENTITIES): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
                 ),
@@ -281,6 +289,10 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                             vol.Required(CONF_LIGHT_ENTITY, default=d.get(CONF_LIGHT_ENTITY)): selector.EntitySelector(
                                 selector.EntitySelectorConfig(domain="light")
                             ),
+                            vol.Optional(CONF_SECONDARY_LIGHTS, default=d.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)): OptionalEntitySelector(
+                                selector.EntitySelectorConfig(domain="light", multiple=True)
+                            ),
+                            vol.Optional(CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, default=d.get(CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON)): selector.BooleanSelector(),
                             vol.Required(CONF_PRESENCE_ENTITIES, default=d.get(CONF_PRESENCE_ENTITIES, [])): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
                             ),

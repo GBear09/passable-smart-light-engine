@@ -28,7 +28,9 @@ from .const import (
     CONF_PRESENCE_ENTITIES,
     CONF_PRESENCE_TIMEOUT_MIN,
     CONF_ROOM_ID,
+    CONF_SECONDARY_LIGHTS,
     CONF_SETTLING_COOLDOWN_SEC,
+    CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_CIRCADIAN_ENABLED,
     DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
     DEFAULT_LATE_NIGHT_CONDITION_TYPE,
@@ -45,7 +47,9 @@ from .const import (
     DEFAULT_OVERRIDE_TIMEOUT_MIN,
     DEFAULT_POWER_GRID_ENTITY,
     DEFAULT_PRESENCE_TIMEOUT_MIN,
+    DEFAULT_SECONDARY_LIGHTS,
     DEFAULT_SETTLING_COOLDOWN_SEC,
+    DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
     DOMAIN,
     DWELL_TIME_SEC,
@@ -632,6 +636,16 @@ class PassableLightingEngine:
         if isinstance(bypass_off_entities, str):
             bypass_off_entities = [bypass_off_entities] if bypass_off_entities else []
 
+        secondary_lights = p.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
+        if isinstance(secondary_lights, str):
+            secondary_lights = [secondary_lights] if secondary_lights else []
+        elif secondary_lights is None:
+            secondary_lights = []
+
+        suppress_main_when_secondary_on = bool(
+            p.get(CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON)
+        )
+
         target_lux_seed = float(p.get("target_lux", DEFAULT_TARGET_LUX))
         default_lux_ratio = float(p.get("default_lux_ratio", DEFAULT_LUX_RATIO))
         presence_timeout_min = int(p.get("presence_timeout_min", DEFAULT_PRESENCE_TIMEOUT_MIN))
@@ -662,6 +676,13 @@ class PassableLightingEngine:
             else 0
         )
 
+        active_secondary_lights: List[str] = []
+        for sec_ent in secondary_lights:
+            sec_st = self.hass.states.get(sec_ent)
+            if sec_st and sec_st.state == "on":
+                active_secondary_lights.append(sec_ent)
+        any_secondary_on = len(active_secondary_lights) > 0
+
         # 1. Power grid restoration protection
         grid_entity = p.get("power_grid_entity")
         if grid_entity:
@@ -680,6 +701,13 @@ class PassableLightingEngine:
             if is_light_on:
                 _LOGGER.info("PassableSmartLighting [%s]: Force-off bypass active. Turning off lights.", room_id)
                 await self.async_turn_off_light(room_id, light_entity)
+            for sec_ent in active_secondary_lights:
+                _LOGGER.info(
+                    "PassableSmartLighting [%s]: Force-off bypass active. Turning off secondary light %s.",
+                    room_id,
+                    sec_ent,
+                )
+                await self.async_turn_off_light(room_id, sec_ent)
             self.clear_manual_override(room_id)
             await self.async_sync_helper(manual_override_entity, False)
             return
@@ -819,11 +847,19 @@ class PassableLightingEngine:
         if not is_occupied:
             # Vacancy timeout handling
             if trigger_id == "presence_off_timeout" or (
-                trigger_id == "heartbeat" and not is_occupied and is_light_on
+                trigger_id == "heartbeat" and not is_occupied and (is_light_on or any_secondary_on)
             ):
                 if is_light_on:
                     _LOGGER.info("PassableSmartLighting [%s]: Vacancy timeout elapsed. Turning lights OFF.", room_id)
                     await self.async_turn_off_light(room_id, light_entity)
+                if not is_frozen:
+                    for sec_ent in active_secondary_lights:
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Vacancy timeout elapsed. Turning secondary light %s OFF.",
+                            room_id,
+                            sec_ent,
+                        )
+                        await self.async_turn_off_light(room_id, sec_ent)
                 self.clear_manual_override(room_id)
                 self.cancel_pending_learning(room_id)
                 await self.async_sync_helper(manual_override_entity, False)
@@ -831,7 +867,7 @@ class PassableLightingEngine:
 
             # Live Turn-On while Vacant vs Startup/Fail-Safe Vacancy Recovery:
             # If lights are on in an unoccupied room and no timer is currently running:
-            if is_light_on:
+            if is_light_on or any_secondary_on:
                 ctrl = self._controllers.get(room_id)
                 if ctrl and ctrl.vacancy_cancel is None:
                     timeout_sec = float(presence_timeout_min * 60)
@@ -840,7 +876,7 @@ class PassableLightingEngine:
                     # or adjusted brightness before entering the room).
                     # Grant a fresh entry vacancy countdown forward in time (Approach A) so occupants
                     # entering a dark room are not plunged into darkness before crossing the doorway.
-                    if trigger_id in ("light_change", "manual_turn_on"):
+                    if trigger_id in ("light_change", "manual_turn_on", "secondary_light_change"):
                         _LOGGER.info(
                             "PassableSmartLighting [%s]: Light turned on in unoccupied room via %s. Arming %s min entry vacancy countdown.",
                             room_id,
@@ -857,7 +893,11 @@ class PassableLightingEngine:
                                 "PassableSmartLighting [%s]: Vacancy timeout elapsed while offline/reboot. Turning lights OFF immediately.",
                                 room_id,
                             )
-                            await self.async_turn_off_light(room_id, light_entity)
+                            if is_light_on:
+                                await self.async_turn_off_light(room_id, light_entity)
+                            if not is_frozen:
+                                for sec_ent in active_secondary_lights:
+                                    await self.async_turn_off_light(room_id, sec_ent)
                             self.clear_manual_override(room_id)
                             self.cancel_pending_learning(room_id)
                             await self.async_sync_helper(manual_override_entity, False)
@@ -869,6 +909,21 @@ class PassableLightingEngine:
                                 remaining_sec,
                             )
                             ctrl.schedule_vacancy_timer(delay_sec=remaining_sec)
+            return
+
+        # Main Ceiling Light Suppression when secondary lights are active in occupied room
+        if suppress_main_when_secondary_on and any_secondary_on:
+            if is_light_on:
+                _LOGGER.info(
+                    "PassableSmartLighting [%s]: Secondary light(s) %s active with main suppression enabled. Turning main lights OFF.",
+                    room_id,
+                    active_secondary_lights,
+                )
+                await self.async_turn_off_light(room_id, light_entity)
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Room occupied with secondary light(s) active. Suppressing main lights.",
+                room_id,
+            )
             return
 
         # 6. Mode & Target Calculation (Occupied Room)
@@ -956,8 +1011,8 @@ class PassableLightingEngine:
             await self.async_turn_on_light(
                 room_id, light_entity, needed_pct, circadian_enabled, min_color_temp, max_color_temp
             )
-            # Schedule automated yield calibration if dark outside (sun elev < -4°)
-            if elev < -4.0:
+            # Schedule automated yield calibration if dark outside (sun elev < -4°) and no secondary lights on
+            if elev < -4.0 and not any_secondary_on:
                 self._schedule_automated_yield_learning(room_id, lux_sensor, needed_pct, current_lux, p)
         elif is_light_on:
             if needed_pct == 0 and min_occupied_pct == 0:
@@ -1039,7 +1094,7 @@ class PassableLightingEngine:
                         max_color_temp,
                         transition=transition,
                     )
-                    if elev < -4.0:
+                    if elev < -4.0 and not any_secondary_on:
                         self._schedule_automated_yield_learning(room_id, lux_sensor, target_trim_pct, current_lux, p)
 
     def cancel_pending_learning(self, room_id: str) -> None:
@@ -1169,18 +1224,29 @@ class PassableLightingEngine:
             if len(prefs) > 50:
                 prefs.pop(0)
 
-            # 4. Yield Curve Update with Daylight Protection:
-            # ONLY record yield curves during dark hours (sun elevation < -4°) where ambient daylight ~ 0.
-            # During daylight, total lux includes sunlight which would severely contaminate the bulb yield curve.
+            # 4. Yield Curve Update with Daylight & Secondary Light Protection:
+            # ONLY record yield curves during dark hours (sun elevation < -4°) where ambient daylight ~ 0,
+            # AND when no secondary/auxiliary lights are active (to prevent lumen contamination).
+            sec_lights = p.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
+            if isinstance(sec_lights, str):
+                sec_lights = [sec_lights] if sec_lights else []
+            any_sec_on = any(safe_get_state(self.hass, s, "off") == "on" for s in (sec_lights or []))
+
             if elev < -4.0:
-                curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
-                curves[str(current_pct)] = round(lux_now, 1)
-                _LOGGER.info(
-                    "PassableSmartLighting [%s]: 🌙 Dark hours yield curve updated: %s%% = %.1f lx",
-                    room_id,
-                    current_pct,
-                    lux_now,
-                )
+                if any_sec_on:
+                    _LOGGER.debug(
+                        "PassableSmartLighting [%s]: Secondary light(s) active. Preserved yield curve from contamination.",
+                        room_id,
+                    )
+                else:
+                    curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
+                    curves[str(current_pct)] = round(lux_now, 1)
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: 🌙 Dark hours yield curve updated: %s%% = %.1f lx",
+                        room_id,
+                        current_pct,
+                        lux_now,
+                    )
             else:
                 _LOGGER.debug(
                     "PassableSmartLighting [%s]: Daylight present (elev=%.1f°). Preserved yield curve from daylight contamination.",
@@ -1279,7 +1345,18 @@ class PassableLightingEngine:
                 )
                 return
 
-            # 4. Read settled lux (180s dwell guarantees even slow Matter sensors have fully updated)
+            # 4. Verify no secondary lights are active (prevent lux contamination)
+            secondary_lights = p.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
+            if isinstance(secondary_lights, str):
+                secondary_lights = [secondary_lights] if secondary_lights else []
+            if any(safe_get_state(self.hass, s, "off") == "on" for s in (secondary_lights or [])):
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Secondary light active at dwell completion; discarding automated yield point.",
+                    room_id,
+                )
+                return
+
+            # 5. Read settled lux (180s dwell guarantees even slow Matter sensors have fully updated)
             settled_lux = self.get_smoothed_lux(room_id, lux_sensor)
             if settled_lux <= 0:
                 _LOGGER.debug(
@@ -1353,6 +1430,36 @@ class PassableLightingEngine:
                             "**Next steps:**\n"
                             "- Trigger this calibration after sunset / when dark outside, or\n"
                             "- Re-run with `force: true` if blackout shades are fully closed or the room has no windows."
+                        ),
+                    },
+                )
+            except Exception as notify_err:
+                _LOGGER.debug("Could not create persistent notification: %s", notify_err)
+            return
+
+        # Secondary light protection: Yield curves must measure pure primary fixture lumen output.
+        sec_lights = p.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
+        if isinstance(sec_lights, str):
+            sec_lights = [sec_lights] if sec_lights else []
+        active_sec = [s for s in (sec_lights or []) if safe_get_state(self.hass, s, "off") == "on"]
+        if active_sec and not force:
+            _LOGGER.warning(
+                "PassableSmartLighting [%s]: Calibration rejected — secondary light(s) %s active.",
+                room_id,
+                active_sec,
+            )
+            try:
+                await self.hass.services.async_call(
+                    "persistent_notification",
+                    "create",
+                    {
+                        "notification_id": f"passable_lighting_calibrate_{room_id}",
+                        "title": f"Calibration Blocked: {room_id.replace('_', ' ').title()}",
+                        "message": (
+                            f"Automated yield calibration for **{room_id}** was cancelled because secondary light(s) "
+                            f"(**{', '.join(active_sec)}**) are currently on.\n\n"
+                            "Calibration requires only the primary light to be on so the sensor measures accurate fixture lumens.\n\n"
+                            "Turn off secondary lamps and retry, or pass `force: true` to override."
                         ),
                     },
                 )
@@ -1690,6 +1797,39 @@ class RoomController:
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, [light_entity], _on_light_change)
+            )
+
+        # Track secondary lights
+        secondary_lights = self.entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
+        if isinstance(secondary_lights, str):
+            secondary_lights = [secondary_lights] if secondary_lights else []
+        elif secondary_lights is None:
+            secondary_lights = []
+
+        if secondary_lights:
+            @callback
+            def _on_secondary_light_change(evt: Event) -> None:
+                new_st = evt.data.get("new_state")
+                old_st = evt.data.get("old_state")
+                if not new_st or not old_st:
+                    return
+
+                if old_st.state in ("unavailable", "unknown") or new_st.state in ("unavailable", "unknown"):
+                    return
+
+                if old_st.state == new_st.state:
+                    return
+
+                params = {
+                    "trigger_id": "secondary_light_change",
+                    "trigger_entity_id": evt.data.get("entity_id"),
+                    "trigger_from_state": old_st.state,
+                    "trigger_to_state": new_st.state,
+                }
+                self.schedule_evaluation("secondary_light_change", params, delay_sec=0.05)
+
+            self._unsub_listeners.append(
+                async_track_state_change_event(self.hass, secondary_lights, _on_secondary_light_change)
             )
 
         # Track lux changes (with sensor debounce)
