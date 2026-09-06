@@ -1066,17 +1066,33 @@ class PassableLightingEngine:
         """Schedule preference learning with 180s dwell validation to filter transient adjustments."""
         self.cancel_pending_learning(room_id)
 
+        # Tag operating context at adjustment time
+        is_media = self.check_media(p.get("media_entities", []))
+        is_late_night = self.is_late_night_active(
+            bool(p.get("late_night_enabled", False)),
+            str(p.get("late_night_condition_type", "time")),
+            p.get("late_night_entity"),
+            str(p.get("late_night_start_time", "22:00:00")),
+            str(p.get("late_night_stop_time", "06:00:00")),
+            p.get("late_night_start_entity"),
+            p.get("late_night_stop_entity"),
+        )
+        mode_tag = "media" if is_media else ("late_night" if is_late_night else "general")
+
         @callback
         def _on_dwell_completed(_now: Any) -> None:
             self._pending_learning_handles.pop(room_id, None)
             task = self.hass.async_create_task(
-                self._async_commit_learned_preference(room_id, lux_sensor, current_pct, p)
+                self._async_commit_learned_preference(
+                    room_id, lux_sensor, current_pct, p, mode_tag=mode_tag
+                )
             )
             self._stabilizing_tasks[room_id] = task
 
         _LOGGER.debug(
-            "PassableSmartLighting [%s]: Scheduled preference learning with %.0fs dwell validation",
+            "PassableSmartLighting [%s]: Scheduled preference learning (%s mode) with %.0fs dwell validation",
             room_id,
+            mode_tag,
             DWELL_TIME_SEC,
         )
         self._pending_learning_handles[room_id] = async_call_later(
@@ -1084,7 +1100,7 @@ class PassableLightingEngine:
         )
 
     async def _async_commit_learned_preference(
-        self, room_id: str, lux_sensor: str, current_pct: int, p: Dict[str, Any]
+        self, room_id: str, lux_sensor: str, current_pct: int, p: Dict[str, Any], mode_tag: str = "general"
     ) -> None:
         """Commit learned user preference and update yield curves with daylight protection."""
         try:
@@ -1100,6 +1116,36 @@ class PassableLightingEngine:
                 _LOGGER.debug("PassableSmartLighting [%s]: Light brightness altered during dwell; discarding preference.", room_id)
                 return
 
+            # Context-Aware Preference Commit Branching
+            if mode_tag == "media":
+                m_prefs = self.store.data.setdefault("media_prefs", {}).setdefault(room_id, [])
+                m_prefs.append(current_pct)
+                if len(m_prefs) > 20:
+                    del m_prefs[:-20]
+                self.store.schedule_save(delay=30.0)
+                _LOGGER.info(
+                    "PassableSmartLighting [%s]: 📺 Committed media brightness preference: %s%% (history: %s)",
+                    room_id,
+                    current_pct,
+                    m_prefs,
+                )
+                return
+
+            if mode_tag == "late_night":
+                ln_prefs = self.store.data.setdefault("late_night_prefs", {}).setdefault(room_id, [])
+                ln_prefs.append(current_pct)
+                if len(ln_prefs) > 20:
+                    del ln_prefs[:-20]
+                self.store.schedule_save(delay=30.0)
+                _LOGGER.info(
+                    "PassableSmartLighting [%s]: 🌙 Committed late night brightness preference: %s%% (history: %s)",
+                    room_id,
+                    current_pct,
+                    ln_prefs,
+                )
+                return
+
+            # General mode (ambient daylight & dark-hours yield curves)
             # 2. Get settled ambient lux (dwell time guarantees sensor lag has fully resolved)
             lux_now = self.get_smoothed_lux(room_id, lux_sensor)
             if lux_now <= 0:
@@ -1318,23 +1364,129 @@ class PassableLightingEngine:
             _LOGGER.info("PassableSmartLighting [%s]: 🚀 Starting automated yield calibration routine...", room_id)
             test_levels = [25, 50, 75, 100]
             cooldown = float(p.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC))
-            curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
+            max_wait_sec = max(cooldown, 90.0)
+            calibrated_points: Dict[str, float] = {}
+
+            # Ensure light starts from off so 25% represents a clean step change
+            light_st = self.hass.states.get(light_entity)
+            if light_st and light_st.state == "on":
+                await self.async_turn_off_light(room_id, light_entity, transition=1.0)
+                await asyncio.sleep(2.0)
 
             for lvl in test_levels:
                 _LOGGER.info(
-                    "PassableSmartLighting [%s]: Calibrating at %s%% (waiting %.1fs for sensor settling)...",
+                    "PassableSmartLighting [%s]: Calibrating at %s%% (waiting for fresh sensor update, max %.0fs)...",
                     room_id,
                     lvl,
-                    cooldown,
+                    max_wait_sec,
                 )
-                await self.async_turn_on_light(
-                    room_id, light_entity, lvl, False, DEFAULT_MIN_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP, transition=1.0
-                )
-                await asyncio.sleep(cooldown)
-                lux_val = self.get_smoothed_lux(room_id, lux_sensor)
-                curves[str(lvl)] = round(max(0.1, lux_val), 1)
-                _LOGGER.info("PassableSmartLighting [%s]: Recorded yield: %s%% = %.1f lx", room_id, lvl, curves[str(lvl)])
+                cmd_ts = time.time()
+                fresh_event = asyncio.Event()
 
+                @callback
+                def _on_sensor_update(evt: Event) -> None:
+                    new_st = evt.data.get("new_state")
+                    if not new_st:
+                        return
+                    ts = getattr(new_st, "last_updated_timestamp", None)
+                    if ts is None:
+                        dt = getattr(new_st, "last_updated", None)
+                        ts = dt.timestamp() if dt else 0.0
+                    if ts >= cmd_ts:
+                        try:
+                            val = float(new_st.state)
+                            if val >= 0:
+                                fresh_event.set()
+                        except (ValueError, TypeError):
+                            pass
+
+                unsub = async_track_state_change_event(self.hass, [lux_sensor], _on_sensor_update)
+                try:
+                    cmd_ts = time.time()
+                    await self.async_turn_on_light(
+                        room_id, light_entity, lvl, False, DEFAULT_MIN_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP, transition=1.0
+                    )
+                    # Check if sensor already updated right after command
+                    cur_st = self.hass.states.get(lux_sensor)
+                    if cur_st:
+                        cur_ts = getattr(cur_st, "last_updated_timestamp", None)
+                        if cur_ts is None and getattr(cur_st, "last_updated", None):
+                            cur_ts = cur_st.last_updated.timestamp()
+                        if cur_ts and cur_ts >= cmd_ts:
+                            try:
+                                if float(cur_st.state) >= 0:
+                                    fresh_event.set()
+                            except (ValueError, TypeError):
+                                pass
+
+                    await asyncio.wait_for(fresh_event.wait(), timeout=max_wait_sec)
+                    await asyncio.sleep(2.0)  # Settling buffer
+                except asyncio.TimeoutError:
+                    _LOGGER.warning(
+                        "PassableSmartLighting [%s]: Lux sensor %s failed to report fresh reading within %.0fs at %s%% brightness. Aborting calibration to prevent saving stale data.",
+                        room_id,
+                        lux_sensor,
+                        max_wait_sec,
+                        lvl,
+                    )
+                    await self.async_turn_off_light(room_id, light_entity, transition=1.0)
+                    try:
+                        await self.hass.services.async_call(
+                            "persistent_notification",
+                            "create",
+                            {
+                                "notification_id": f"passable_lighting_calibrate_{room_id}",
+                                "title": f"Calibration Incomplete: {room_id.replace('_', ' ').title()}",
+                                "message": (
+                                    f"Automated yield calibration for **{room_id.replace('_', ' ').title()}** was aborted at **{lvl}%** brightness.\n\n"
+                                    f"The illuminance sensor (`{lux_sensor}`) did not report a new reading within {int(max_wait_sec)} seconds.\n\n"
+                                    "**Why did this happen?**\n"
+                                    "Many battery-powered sensors (such as Aqara Matter-over-Thread) enter deep sleep to save power and only report illuminance changes when motion is detected or after extended reporting intervals.\n\n"
+                                    "**Recommendations:**\n"
+                                    "- Wave your hand or walk past the sensor during calibration to wake it up, or\n"
+                                    "- Increase the settling cooldown in the room settings."
+                                ),
+                            },
+                        )
+                    except Exception as notify_err:
+                        _LOGGER.debug("Could not create persistent notification: %s", notify_err)
+                    return
+                finally:
+                    unsub()
+
+                lux_val = self.get_smoothed_lux(room_id, lux_sensor)
+                calibrated_points[str(lvl)] = round(max(0.1, lux_val), 1)
+                _LOGGER.info("PassableSmartLighting [%s]: Recorded yield: %s%% = %.1f lx", room_id, lvl, calibrated_points[str(lvl)])
+
+            # Monotonicity & validity check across all points
+            vals = [calibrated_points[str(l)] for l in test_levels]
+            if vals[-1] <= vals[0] or len(set(vals)) == 1:
+                _LOGGER.warning(
+                    "PassableSmartLighting [%s]: Calibration curve failed validity check (non-increasing or flat: %s). Aborting save to protect curve integrity.",
+                    room_id,
+                    calibrated_points,
+                )
+                await self.async_turn_off_light(room_id, light_entity, transition=2.0)
+                try:
+                    await self.hass.services.async_call(
+                        "persistent_notification",
+                        "create",
+                        {
+                            "notification_id": f"passable_lighting_calibrate_{room_id}",
+                            "title": f"Calibration Invalid: {room_id.replace('_', ' ').title()}",
+                            "message": (
+                                f"Automated yield calibration for **{room_id.replace('_', ' ').title()}** produced flat or non-increasing readings: `{calibrated_points}`.\n\n"
+                                f"The illuminance sensor (`{lux_sensor}`) did not detect a distinct increase in light level from 25% to 100%.\n\n"
+                                "Calibration data was discarded to protect room curve integrity."
+                            ),
+                        },
+                    )
+                except Exception as notify_err:
+                    _LOGGER.debug("Could not create persistent notification: %s", notify_err)
+                return
+
+            curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
+            curves.update(calibrated_points)
             await self.async_turn_off_light(room_id, light_entity, transition=2.0)
             await self.store.async_save()
             _LOGGER.info("PassableSmartLighting [%s]: ✅ Automated yield calibration complete! Saved curve: %s", room_id, curves)
