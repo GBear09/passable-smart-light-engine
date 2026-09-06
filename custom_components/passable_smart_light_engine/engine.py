@@ -216,7 +216,7 @@ class PassableLightingEngine:
         """Initialize the lighting engine."""
         self.hass = hass
         self.store = store
-        self._lux_history: Dict[str, List[float]] = {}
+        self._lux_history: Dict[str, List[Tuple[float, float]]] = {}
         self._lux_last_updated: Dict[str, float] = {}
         self._room_locks: Dict[str, asyncio.Lock] = {}
         self._echo_guards: Dict[str, Dict[str, Any]] = {}
@@ -265,34 +265,55 @@ class PassableLightingEngine:
         """Unregister an active native room controller."""
         self._controllers.pop(room_id, None)
 
-    def get_smoothed_lux(self, room_id: str, lux_sensor: str, max_readings: int = 5) -> float:
-        """Compute spike-smoothed ambient lux reading."""
+    def clear_lux_history(self, room_id: str) -> None:
+        """Clear smoothed lux history buffer and last update timestamp for a room."""
+        self._lux_history.pop(room_id, None)
+        self._lux_last_updated.pop(room_id, None)
+
+    def get_smoothed_lux(
+        self, room_id: str, lux_sensor: str, max_readings: int = 5, ttl_sec: float = 180.0
+    ) -> float:
+        """Compute spike-smoothed ambient lux reading with TTL sample aging."""
         raw_val = safe_get_state(self.hass, lux_sensor, 0.0)
         try:
             current_lux = float(raw_val)
         except (ValueError, TypeError):
             current_lux = 0.0
 
-        if room_id not in self._lux_history:
-            self._lux_history[room_id] = []
+        now = time.time()
+
+        # Prune expired samples older than ttl_sec (default: 180s)
+        history = [
+            (ts, val)
+            for ts, val in self._lux_history.get(room_id, [])
+            if (now - ts) <= ttl_sec
+        ]
 
         # Only append when sensor actually updated to prevent buffer duplication during loops
         sensor_st = self.hass.states.get(lux_sensor)
-        st_updated = dt_util.as_utc(sensor_st.last_updated).timestamp() if sensor_st and sensor_st.last_updated else 0.0
+        st_updated = (
+            dt_util.as_utc(sensor_st.last_updated).timestamp()
+            if sensor_st and sensor_st.last_updated
+            else 0.0
+        )
         last_recorded_ts = self._lux_last_updated.get(room_id, 0.0)
 
-        history = self._lux_history[room_id]
         if not history or st_updated > last_recorded_ts:
-            history.append(current_lux)
+            history.append((now, current_lux))
             self._lux_last_updated[room_id] = st_updated
             if len(history) > max_readings:
                 history.pop(0)
 
-        if len(history) >= 3:
-            sorted_readings = sorted(history)
+        self._lux_history[room_id] = history
+
+        values = [val for _, val in history]
+        if len(values) >= 3:
+            sorted_readings = sorted(values)
             trimmed = sorted_readings[1:-1]
             return sum(trimmed) / len(trimmed)
-        return sum(history) / len(history)
+        if values:
+            return sum(values) / len(values)
+        return current_lux
 
     def set_echo_guard(
         self, room_id: str, target_pct: int, start_pct: int, transition_sec: float = 1.0
@@ -862,6 +883,7 @@ class PassableLightingEngine:
                         await self.async_turn_off_light(room_id, sec_ent)
                 self.clear_manual_override(room_id)
                 self.cancel_pending_learning(room_id)
+                self.clear_lux_history(room_id)
                 await self.async_sync_helper(manual_override_entity, False)
                 return
 
@@ -900,6 +922,7 @@ class PassableLightingEngine:
                                     await self.async_turn_off_light(room_id, sec_ent)
                             self.clear_manual_override(room_id)
                             self.cancel_pending_learning(room_id)
+                            self.clear_lux_history(room_id)
                             await self.async_sync_helper(manual_override_entity, False)
                         else:
                             _LOGGER.info(
@@ -1015,7 +1038,8 @@ class PassableLightingEngine:
             if elev < -4.0 and not any_secondary_on:
                 self._schedule_automated_yield_learning(room_id, lux_sensor, needed_pct, current_lux, p)
         elif is_light_on:
-            if needed_pct == 0 and min_occupied_pct == 0:
+            # Ambient shut-off should ONLY occur during gradual ambient changes, NEVER immediately following a manual turn-on action
+            if needed_pct == 0 and min_occupied_pct == 0 and trigger_id in ("lux_change", "heartbeat", "time_pattern"):
                 _LOGGER.info(
                     "PassableSmartLighting [%s]: Ambient lux sufficient (%.1f >= %.1f). Turning lights OFF.",
                     room_id,
@@ -1024,6 +1048,24 @@ class PassableLightingEngine:
                 )
                 self._last_ambient_adjust[room_id] = now_ts
                 await self.async_turn_off_light(room_id, light_entity)
+            elif needed_pct == 0 and trigger_id in ("light_change", "manual_turn_on"):
+                # User just turned on the switch; maintain comfortable floor rather than plunging room into darkness
+                effective_floor = max(MIN_VISIBLE_PCT, int(min_occupied_pct or 0))
+                if abs(current_pct - effective_floor) >= 5:
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: Light turned on while ambient lux sufficient; holding minimum floor (%s%%) instead of turning off.",
+                        room_id,
+                        effective_floor,
+                    )
+                    self._last_ambient_adjust[room_id] = now_ts
+                    await self.async_turn_on_light(
+                        room_id,
+                        light_entity,
+                        effective_floor,
+                        circadian_enabled,
+                        min_color_temp,
+                        max_color_temp,
+                    )
             else:
                 # 1. Staleness & Settling Cooldown Check for slow sensors (e.g. Matter/Zigbee)
                 cooldown_sec = float(p.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC))
@@ -1758,6 +1800,7 @@ class RoomController:
                     return
                 if new_st.state in ("on", "home", "true", "active"):
                     self.cancel_vacancy_timer()
+                    self.engine.clear_lux_history(self.room_id)
                     self.schedule_evaluation("presence_on", delay_sec=0.1)
                 elif new_st.state in ("off", "not_home", "false"):
                     if not self.engine.check_presence(presence_entities):

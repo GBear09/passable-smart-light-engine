@@ -84,7 +84,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.1.9",
+            sw_version="2.1.10",
         )
 
 
