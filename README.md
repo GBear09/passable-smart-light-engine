@@ -28,29 +28,105 @@ Configure rooms seamlessly using the **Native UI Config Flow** (with zero automa
 
 ---
 
-## 📂 Architecture: Dual-Mode Operation
+## 📂 System Architecture
 
 ```mermaid
-graph TD
-    subgraph Frontend Choices
-        A1[Native UI Config Flow<br/>Settings -> Devices & Services]
-        A2[Existing Blueprint Automations<br/>passable_smart_light_engine_event]
+flowchart TD
+    subgraph Inputs ["1. Inputs, Context & Telemetry"]
+        direction TB
+        UI_CFG["Native UI Config Flow<br/>(Rooms & Simulation Options)"]
+        BP_EVT["Blueprint Automations<br/>(passable_smart_light_engine_event)"]
+        SENS_PRES["Room Presence Sensors<br/>(PIR, mmWave, Multi-sensor)"]
+        SENS_LUX["Ambient Lux Sensors<br/>(Illuminance Telemetry)"]
+        ENV_ASTRO["Environmental & State Context<br/>(sun.sun, Media Players, Bypasses)"]
+        LBL_SIM["HA Entity Registry<br/>(Label: lights_presence_simulation)"]
+        REC_HIST["Home Assistant Recorder<br/>(Past Occupied History Database)"]
     end
 
-    subgraph Native Custom Component
-        B[Passable Adaptive Smart Lighting Engine<br/>custom_components/passable_smart_light_engine]
-        C[HA Asynchronous Store<br/>.storage/passable_smart_light_engine_learning_data]
-        D[Native Devices & Entities<br/>Switch / Sensor / Binary Sensor / Number / Button / Select]
+    subgraph Core ["2. Passable Smart Lighting Engine Core"]
+        direction TB
+
+        subgraph RoomControllers ["Autonomous Room Controllers (RoomController)"]
+            direction TB
+            PRES_MGR["Presence & Vacancy Tracker<br/>- Multi-sensor entry grace & dwell<br/>- Post-vacancy off timers"]
+            LUX_MGR["Lux Smoothing & Lag Compensation<br/>- 180s TTL sample aging<br/>- Sensor latency compensation"]
+            TGT_MGR["Target Lux Blender<br/>- Sun elevation curve blending<br/>- Late-night & Media overrides"]
+            CIRC_MGR["Circadian Rhythm Engine<br/>- Warm/cool Kelvin sun calculation"]
+            STAT_DIM["Statistical Dimmer & Lux Yield Engine<br/>- Real-time lx/% curve calculation<br/>- Closed-loop brightness solver"]
+            ECHO_MGR["Trajectory-Bounded Echo Guard<br/>- Hardware latency tolerance<br/>- Manual override discrimination"]
+            ML_MGR["Machine Learning & Preferences<br/>- Sun elevation vs brightness curves<br/>- Automatic preference adaptation"]
+        end
+
+        subgraph PresenceSimulation ["Native Presence Simulation Engine"]
+            direction TB
+            SIM_COORD["Simulation Orchestrator<br/>(switch.simulate_presence_away_mode)"]
+            REPLAY_MGR["Smart Historical Replay<br/>(Vacation-skipping occupied window)"]
+            SYNTH_MGR["Synthetic Evening Routine Generator<br/>- Living/Kitchen evening dwell<br/>- Transitional & bedtime wind-down"]
+            JITTER_MGR["Humanized Jitter Engine<br/>(±15 min randomization)"]
+            HANDOVER_MGR["Night Arrival Handover<br/>- Graceful vacancy handover<br/>- Morning/vacation clean sweep"]
+        end
+
+        ARBITRATION["Engine Arbitration & Context Manager<br/>- Suppresses is_forced_off bypasses during simulation<br/>- Prevents false manual overrides & shields ML yield data"]
     end
 
-    A1 -->|Direct State Tracking| B
-    A2 -->|Event Bus Bridge| B
-    B <--> C
-    B --> D
+    subgraph Storage ["3. Persistent Storage Layer (.storage/)"]
+        JSON_STORE["HA Native Asynchronous Storage<br/>- Dynamic Room Yield Curves (lx/%)<br/>- User Sun Preferences<br/>- Media & Late-Night Learned Offsets"]
+        PYSCRIPT_MIG["Legacy Pyscript Migration<br/>(Auto-imported on first startup)"]
+    end
+
+    subgraph Outputs ["4. Actuation, Entities & UI Controls"]
+        direction TB
+        ROOM_ENT["Per-Room Native Entities<br/>- switch.smart_lighting_<room><br/>- switch.<room>_circadian_rhythm<br/>- number.<room>_target_lux_setting<br/>- sensor.<room>_active_mode<br/>- sensor.<room>_lux_yield & target_lux<br/>- binary_sensor.<room>_room_presence<br/>- Dataset reset controls"]
+        SYS_ENT["System-Wide Entities & Diagnostics<br/>- switch.simulate_presence_away_mode<br/>- sensor.presence_simulation_status<br/>- sensor.passable_smart_light_engine_ready"]
+        LIGHTS["Physical Lights & Light Groups<br/>(Target brightness, Kelvin & smooth transitions)"]
+    end
+
+    %% Wiring
+    UI_CFG -->|"Configure Rooms & Simulation"| Core
+    BP_EVT -->|"Event Bus Bridge"| RoomControllers
+
+    SENS_PRES --> PRES_MGR
+    SENS_LUX --> LUX_MGR
+    ENV_ASTRO --> TGT_MGR
+    ENV_ASTRO --> CIRC_MGR
+    ENV_ASTRO --> ARBITRATION
+
+    LBL_SIM --> SIM_COORD
+    REC_HIST --> REPLAY_MGR
+
+    REPLAY_MGR --> SIM_COORD
+    SYNTH_MGR --> SIM_COORD
+    JITTER_MGR --> SIM_COORD
+    SIM_COORD --> HANDOVER_MGR
+    HANDOVER_MGR --> ARBITRATION
+
+    PRES_MGR --> STAT_DIM
+    LUX_MGR --> STAT_DIM
+    TGT_MGR --> STAT_DIM
+    CIRC_MGR --> STAT_DIM
+    ECHO_MGR --> ML_MGR
+
+    STAT_DIM <--> ARBITRATION
+    ARBITRATION <--> RoomControllers
+
+    ML_MGR <--> JSON_STORE
+    STAT_DIM <--> JSON_STORE
+    PYSCRIPT_MIG --> JSON_STORE
+
+    RoomControllers --> ROOM_ENT
+    PresenceSimulation --> SYS_ENT
+    ARBITRATION --> LIGHTS
 ```
 
-1. **Native UI Setup (Recommended):** Add rooms directly in **Settings → Devices & Services**. The integration manages presence, illuminance, and light levels in pure Python with zero automations needed.
-2. **Blueprint Bridge (100% Backward Compatible):** If you already have automations created from the blueprint, the integration listens to the Home Assistant event bus (`smart_light_engine_event` and `passable_smart_light_engine_event`) and acts as a direct, drop-in replacement for the old Pyscript backend.
+### Architectural Highlights
+
+1. **Dual Configuration & Ingestion Paths:**
+   - **Native UI Setup (Recommended):** Add and configure rooms via **Settings → Devices & Services**. The integration manages presence, illuminance, and lighting levels entirely in Python without requiring any Home Assistant automations or YAML.
+   - **Blueprint Bridge (100% Backward Compatible):** Seamlessly bridges legacy Home Assistant Blueprint automations via `passable_smart_light_engine_event` and `smart_light_engine_event` on the internal event bus.
+2. **Autonomous Room Controllers:** Each room executes an independent control loop combining multi-sensor presence fusion, TTL-aged lux smoothing (180s sample aging), sun-elevation circadian Kelvin shifting, and task floor constraints.
+3. **Statistical Dimmer & Adaptive Yield Learning:** Continually calculates real-time room yield curves ($lx/\%$). When users adjust brightness, the engine learns user preferences relative to sun elevation, automatically applying guardrails to prevent data distortion.
+4. **Native Hybrid Presence Simulation:** Replays genuine occupied history from the Home Assistant recorder past empty vacation periods, automatically falling back to synthetic evening routines with humanized $\pm 15$m jitter, dynamic entity registry label resolution (`lights_presence_simulation`), and seamless night arrival room handover.
+5. **Central Engine Arbitration & Coordination:** Harmonizes simulation events with room controllers, suppresses force-off bypasses during simulation, absorbs power-spike turn-ons, and shields machine learning models from non-user actions.
 
 ---
 
