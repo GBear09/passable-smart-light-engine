@@ -45,3 +45,11 @@ calibrate_room_curve:
       required: false
       selector:
         boolean:
+
+start_presence_simulation:
+  name: Start Presence Simulation
+  description: Activates presence simulation across all lights tagged with the configured label (default 'lights_presence_simulation'), replaying history and synthetic evening routines.
+
+stop_presence_simulation:
+  name: Stop Presence Simulation
+  description: Deactivates presence simulation. If stopping at night with Home mode active, performs graceful handover to room controllers; otherwise sweeps off all simulated lights.

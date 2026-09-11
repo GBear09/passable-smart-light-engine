@@ -24,6 +24,7 @@ Configure rooms seamlessly using the **Native UI Config Flow** (with zero automa
 - **⚡ Power Grid Outage Protection:** Absorbs light turn-on spikes when power is restored to prevent accidental manual override locks.
 - **🎛️ Interactive Dashboard Controls:** Exposes native sliders, switches, and diagnostic sensors directly to your Home Assistant dashboard.
 - **🧹 Dynamic Active Rooms State Sync:** Publishes `active_rooms` and `available_reset_types` state attributes to `sensor.passable_smart_light_engine_ready`, allowing zero-helper dynamic dashboard cards & popup actions to auto-populate learning data reset options.
+- **🏡 Native Hybrid Presence Simulation:** Replaces external replay integrations with a built-in, vacation-immune hybrid presence simulator. Automatically replays genuine occupied history with humanized time jitter (±15m) and falls back to realistic synthetic evening routines (living/kitchen early evening, bedroom bedtime transitions, nighttime quieting). Features dynamic label targeting (`lights_presence_simulation`), drop-in switch compatibility (`switch.simulate_presence_away_mode`), and graceful night arrival handovers.
 
 ---
 
@@ -124,6 +125,32 @@ When configured via the Native UI, the integration provisions a room Device with
 
 ### System-Wide Entities:
 * `sensor.passable_smart_light_engine_ready`: Publishes `active_rooms`, `room_datasets`, and `available_reset_types` state attributes to power dynamic dashboard popups.
+* `switch.simulate_presence_away_mode`: Master presence simulation toggle. Drop-in compatible with existing automations. Exposes live attributes including `status`, `active_simulated_lights`, and `next_event`.
+* `sensor.presence_simulation_status`: Real-time operational diagnostics (`idle`, `planning`, `simulating`, `handover`).
+
+---
+
+## 🏡 Native Presence Simulation (Away Mode)
+
+The integration includes a built-in, vacation-immune **Presence Simulation Engine** that replaces third-party replay components:
+
+### Setup & Configuration
+- **Zero Disruption / Out-of-the-Box:** Works immediately upon upgrade. The engine auto-discovers lights labeled `lights_presence_simulation` and automatically provisions `switch.simulate_presence_away_mode`. Your existing room configurations are completely untouched—no rooms need to be deleted, re-added, or reconfigured.
+- **Optional Dedicated Entry:** If you want to customize simulation parameters (e.g. lookback days, jitter minutes, night arrival grace period, or custom label), go to **Settings > Devices & Services > Add Integration > Passable Adaptive Smart Lighting Controller** and choose **Configure Presence Simulation**. This creates an independent entry alongside your existing rooms.
+
+### Key Highlights
+- **🎭 Hybrid Simulation Strategy:**
+  - **Smart History Replay:** Queries Home Assistant's recorder for your last genuine `Home` period (looking back past empty vacation days, eliminating the "week 2 vacation blackout" bug).
+  - **Realistic Synthetic Routine Fallback:** If recorder history is purged or unavailable, automatically generates natural human evening routines:
+    - *Living / Kitchen / Dining:* Active in early evening (sunset to ~10:30 PM) with natural 25–60 minute dwell times.
+    - *Transitional (Stairs / Hallway / Foyer):* Brief 4–12 minute periodic visits.
+    - *Bedrooms:* Wind-down and bedtime routines (~9:45 PM to 11:15 PM) before shutting down for the night.
+- **🏷️ Dynamic Label Targeting:** Tag any light in Home Assistant with the label `lights_presence_simulation` (or custom label). The engine resolves target entities dynamically on every cycle—no configuration reloads needed.
+- **🎲 Humanized Jitter:** Adds randomized ±15-minute time jitter to all transitions so the house never turns on lights at the exact same minute.
+- **🛡️ Full Engine Arbitration:** When a room is actively simulating presence, the engine suppresses force-off bypasses, prevents false manual override locks, and protects learned lux yield curves from data pollution.
+- **🚪 Graceful Night Arrival Handover:**
+  - **At Sunrise or While Still Away:** Sweeps off all active simulated lights.
+  - **Arriving Home at Night (`sun < 0` and `home_mode == Home`):** Does **not** cause an abrupt blackout. Active lights are gracefully handed over to room controllers, starting a 5-minute vacancy grace period for vacant rooms and keeping occupied rooms warmly illuminated.
 
 ---
 
@@ -138,6 +165,12 @@ data:
   room_id: "living_room" # Optional: omit to reset all rooms
   reset_type: "all"      # Options: all, user_prefs, room_curves, media_prefs, late_night_prefs
 ```
+
+### `passable_smart_light_engine.start_presence_simulation`
+Manually starts presence simulation across all lights with label `lights_presence_simulation`.
+
+### `passable_smart_light_engine.stop_presence_simulation`
+Manually stops presence simulation. If stopping at night while home, performs graceful room handover; otherwise sweeps off simulated lights.
 
 ---
 

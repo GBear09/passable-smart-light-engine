@@ -14,6 +14,8 @@ from .const import (
     CONF_CREATE_OVERRIDE_SWITCH,
     CONF_ROOM_ID,
     DOMAIN,
+    PRESENCE_SIMULATION_SWITCH_ENTITY_ID,
+    PRESENCE_SIMULATION_SWITCH_UNIQUE_ID,
 )
 from .engine import PassableLightingEngine, RoomController
 
@@ -21,9 +23,16 @@ from .engine import PassableLightingEngine, RoomController
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up switch entities for a room config entry."""
+    """Set up switch entities for a room or presence simulation config entry."""
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
+
+    if entry.data.get("entry_type") == "presence_simulation":
+        if not data.get("system_switch_registered"):
+            async_add_entities([PassablePresenceSimulationSwitch(hass, engine)])
+            data["system_switch_registered"] = True
+        return
+
     controllers = data["controllers"]
     controller: RoomController = controllers[entry.entry_id]
     room_id = entry.data[CONF_ROOM_ID]
@@ -38,6 +47,10 @@ async def async_setup_entry(
 
     if entry.data.get(CONF_CREATE_FREEZE_SWITCH):
         entities.append(PassableLightingFreezeSwitch(entry, controller))
+
+    if not data.get("system_switch_registered"):
+        entities.append(PassablePresenceSimulationSwitch(hass, engine))
+        data["system_switch_registered"] = True
 
     async_add_entities(entities)
 
@@ -180,3 +193,66 @@ class PassableLightingFreezeSwitch(PassableLightingBaseEntity, SwitchEntity):
         """Deactivate freeze bypass."""
         self._controller.set_freeze_bypass(False)
         self.async_write_ha_state()
+
+
+class PassablePresenceSimulationSwitch(SwitchEntity):
+    """Presence simulation master switch with drop-in compatibility."""
+
+    def __init__(self, hass: HomeAssistant, engine: PassableLightingEngine) -> None:
+        """Initialize presence simulation switch."""
+        self.hass = hass
+        self._engine = engine
+        self._coordinator = engine.presence_simulation
+        if self._coordinator:
+            self._coordinator.register_switch(self)
+        self._attr_unique_id = PRESENCE_SIMULATION_SWITCH_UNIQUE_ID
+        self._attr_name = "Simulate Presence (Away Mode)"
+        self.entity_id = PRESENCE_SIMULATION_SWITCH_ENTITY_ID
+        self._attr_icon = "mdi:home-clock"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return system device info."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "presence_simulation")},
+            name="Passable Smart Light Engine - Presence Simulation",
+            manufacturer="Passable",
+            model="Presence Simulation v1",
+            sw_version="2.0.0",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if simulation is active."""
+        if not self._coordinator:
+            return False
+        return self._coordinator.is_on
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn on presence simulation."""
+        if self._coordinator:
+            await self._coordinator.async_start()
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off presence simulation."""
+        if self._coordinator:
+            await self._coordinator.async_stop()
+        self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose simulation attributes."""
+        if not self._coordinator:
+            return {}
+        return {
+            "status": self._coordinator.status,
+            "simulation_mode": self._coordinator.mode,
+            "target_label": self._coordinator.label,
+            "active_simulated_lights": self._coordinator.active_simulated_lights,
+            "active_lights_count": len(self._coordinator.active_simulated_lights),
+            "next_event": self._coordinator.next_event,
+            "lookback_days": self._coordinator.lookback_days,
+            "jitter_minutes": self._coordinator.jitter_min,
+            "arrival_grace_minutes": self._coordinator.arrival_grace_min,
+        }

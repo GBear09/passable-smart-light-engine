@@ -38,6 +38,12 @@ from .const import (
     CONF_ROOM_ID,
     CONF_SECONDARY_LIGHTS,
     CONF_SETTLING_COOLDOWN_SEC,
+    CONF_SIMULATION_ARRIVAL_GRACE_MIN,
+    CONF_SIMULATION_JITTER_MIN,
+    CONF_SIMULATION_LABEL,
+    CONF_SIMULATION_LOOKBACK_DAYS,
+    CONF_SIMULATION_MAX_BRIGHTNESS_PCT,
+    CONF_SIMULATION_MODE,
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
     DEFAULT_CIRCADIAN_ENABLED,
@@ -57,6 +63,12 @@ from .const import (
     DEFAULT_PRESENCE_TIMEOUT_MIN,
     DEFAULT_SECONDARY_LIGHTS,
     DEFAULT_SETTLING_COOLDOWN_SEC,
+    DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN,
+    DEFAULT_SIMULATION_JITTER_MIN,
+    DEFAULT_SIMULATION_LABEL,
+    DEFAULT_SIMULATION_LOOKBACK_DAYS,
+    DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT,
+    DEFAULT_SIMULATION_MODE,
     DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
     DOMAIN,
@@ -101,6 +113,13 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._step1_data: Dict[str, Any] = {}
 
     async def async_step_user(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
+        """Choose between setting up a room or configuring presence simulation."""
+        return self.async_show_menu(
+            step_id="user",
+            menu_options=["room", "presence_simulation"],
+        )
+
+    async def async_step_room(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
         """Handle Step 1: Core room requirements and hardware."""
         errors: Dict[str, str] = {}
 
@@ -144,7 +163,44 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
 
-        return self.async_show_form(step_id="user", data_schema=step1_schema, errors=errors)
+        return self.async_show_form(step_id="room", data_schema=step1_schema, errors=errors)
+
+    async def async_step_presence_simulation(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
+        """Configure presence simulation settings."""
+        await self.async_set_unique_id(f"{DOMAIN}_presence_simulation")
+        self._abort_if_unique_id_configured()
+
+        if user_input is not None:
+            data = {"entry_type": "presence_simulation", **user_input}
+            return self.async_create_entry(title="Presence Simulation", data=data)
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_SIMULATION_LABEL, default=DEFAULT_SIMULATION_LABEL): selector.TextSelector(),
+                vol.Required(CONF_SIMULATION_MODE, default=DEFAULT_SIMULATION_MODE): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="hybrid", label="Hybrid (Smart History Replay with Synthetic Fallback)"),
+                            selector.SelectOptionDict(value="history_replay", label="Smart History Replay Only"),
+                            selector.SelectOptionDict(value="synthetic_routine", label="Synthetic Realistic Evening Routine Only"),
+                        ]
+                    )
+                ),
+                vol.Required(CONF_SIMULATION_LOOKBACK_DAYS, default=DEFAULT_SIMULATION_LOOKBACK_DAYS): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Required(CONF_SIMULATION_JITTER_MIN, default=DEFAULT_SIMULATION_JITTER_MIN): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=60, step=5, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Required(CONF_SIMULATION_ARRIVAL_GRACE_MIN, default=DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Required(CONF_SIMULATION_MAX_BRIGHTNESS_PCT, default=DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=10, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
+                ),
+            }
+        )
+        return self.async_show_form(step_id="presence_simulation", data_schema=schema)
 
     async def async_step_advanced(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
         """Handle Step 2: Advanced settings, overrides, and bypasses."""
@@ -266,7 +322,45 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
         self._entry = config_entry
 
     async def async_step_init(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
-        """Manage room options."""
+        """Manage room or presence simulation options."""
+        if self._entry.data.get("entry_type") == "presence_simulation":
+            if user_input is not None:
+                new_data = {**self._entry.data, **user_input}
+                self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+                coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator")
+                if coordinator:
+                    coordinator.update_options(new_data)
+                return self.async_create_entry(title="", data={})
+
+            d = self._entry.data
+            schema = vol.Schema(
+                {
+                    vol.Required(CONF_SIMULATION_LABEL, default=d.get(CONF_SIMULATION_LABEL, DEFAULT_SIMULATION_LABEL)): selector.TextSelector(),
+                    vol.Required(CONF_SIMULATION_MODE, default=d.get(CONF_SIMULATION_MODE, DEFAULT_SIMULATION_MODE)): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(value="hybrid", label="Hybrid (Smart History Replay with Synthetic Fallback)"),
+                                selector.SelectOptionDict(value="history_replay", label="Smart History Replay Only"),
+                                selector.SelectOptionDict(value="synthetic_routine", label="Synthetic Realistic Evening Routine Only"),
+                            ]
+                        )
+                    ),
+                    vol.Required(CONF_SIMULATION_LOOKBACK_DAYS, default=d.get(CONF_SIMULATION_LOOKBACK_DAYS, DEFAULT_SIMULATION_LOOKBACK_DAYS)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
+                    ),
+                    vol.Required(CONF_SIMULATION_JITTER_MIN, default=d.get(CONF_SIMULATION_JITTER_MIN, DEFAULT_SIMULATION_JITTER_MIN)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=0, max=60, step=5, mode=selector.NumberSelectorMode.BOX)
+                    ),
+                    vol.Required(CONF_SIMULATION_ARRIVAL_GRACE_MIN, default=d.get(CONF_SIMULATION_ARRIVAL_GRACE_MIN, DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
+                    ),
+                    vol.Required(CONF_SIMULATION_MAX_BRIGHTNESS_PCT, default=d.get(CONF_SIMULATION_MAX_BRIGHTNESS_PCT, DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT)): selector.NumberSelector(
+                        selector.NumberSelectorConfig(min=10, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
+                    ),
+                }
+            )
+            return self.async_show_form(step_id="init", data_schema=schema)
+
         if user_input is not None:
             # Unpack section dictionaries and update entry data
             flat_input: Dict[str, Any] = {}

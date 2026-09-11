@@ -2,6 +2,14 @@
   "config": {
     "step": {
       "user": {
+        "title": "Passable Adaptive Smart Lighting",
+        "description": "Choose setup type:",
+        "menu_options": {
+          "room": "Add Smart Lighting Room",
+          "presence_simulation": "Configure Presence Simulation"
+        }
+      },
+      "room": {
         "title": "Passable Adaptive Smart Lighting - Room Setup",
         "description": "Configure the core hardware and lux targets for this room.",
         "data": {
@@ -15,6 +23,18 @@
           "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
           "presence_timeout_min": "Vacancy Timeout (Minutes)",
           "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)"
+        }
+      },
+      "presence_simulation": {
+        "title": "Presence Simulation Configuration",
+        "description": "Configure house-wide presence simulation.",
+        "data": {
+          "simulation_label": "Target Light Label",
+          "simulation_mode": "Simulation Strategy",
+          "simulation_lookback_days": "History Lookback Days",
+          "simulation_jitter_min": "Time Jitter Window (Minutes +/-)",
+          "simulation_arrival_grace_min": "Night Arrival Grace Period (Minutes)",
+          "simulation_max_brightness_pct": "Max Simulated Brightness %"
         }
       },
       "advanced": {
@@ -273,6 +293,26 @@
       "reset_all_data": {
         "name": "Reset All Room Learning Data"
       }
+    },
+    "switch": {
+      "simulate_presence_away_mode": {
+        "name": "Simulate Presence (Away Mode)"
+      }
+    },
+    "sensor": {
+      "presence_simulation_status": {
+        "name": "Presence Simulation Status"
+      }
+    }
+  },
+  "services": {
+    "start_presence_simulation": {
+      "name": "Start Presence Simulation",
+      "description": "Activates presence simulation across all lights tagged with the configured label (default 'lights_presence_simulation')."
+    },
+    "stop_presence_simulation": {
+      "name": "Stop Presence Simulation",
+      "description": "Deactivates presence simulation. If stopping at night with Home mode active, performs graceful handover to room controllers; otherwise sweeps off all simulated lights."
     }
   }
 }

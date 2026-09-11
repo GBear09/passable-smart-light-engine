@@ -229,6 +229,28 @@ class PassableLightingEngine:
         self._engine_contexts: Dict[str, float] = {}
         self._stabilizing_tasks: Dict[str, asyncio.Task] = {}
         self._controllers: Dict[str, "RoomController"] = {}
+        self._presence_simulation: Optional[Any] = None
+
+    @property
+    def controllers(self) -> Dict[str, "RoomController"]:
+        """Return registered room controllers."""
+        return self._controllers
+
+    @property
+    def presence_simulation(self) -> Optional[Any]:
+        """Return presence simulation coordinator."""
+        return self._presence_simulation
+
+    @presence_simulation.setter
+    def presence_simulation(self, coordinator: Any) -> None:
+        """Set presence simulation coordinator."""
+        self._presence_simulation = coordinator
+
+    def is_simulating_presence(self, entity_id: Optional[str]) -> bool:
+        """Check if an entity is currently actively simulating presence."""
+        if not entity_id or not self._presence_simulation:
+            return False
+        return self._presence_simulation.is_light_simulating(entity_id)
 
     def _cleanup_contexts(self) -> None:
         """Prune expired engine context IDs."""
@@ -718,6 +740,9 @@ class PassableLightingEngine:
         is_frozen, is_forced_off = self.check_bypasses(
             bypass_freeze_entities, bypass_off_entities, manual_override_entity
         )
+        if self.is_simulating_presence(light_entity):
+            is_forced_off = False
+
         if is_forced_off:
             if is_light_on:
                 _LOGGER.info("PassableSmartLighting [%s]: Force-off bypass active. Turning off lights.", room_id)
@@ -740,6 +765,14 @@ class PassableLightingEngine:
         # 3. Hardware Echo Guard & Manual Override Detection
         if trigger_id == "light_change":
             evt_context = p.get("context")
+
+            # A0. Active presence simulation match
+            if self.is_simulating_presence(light_entity):
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Light change event absorbed by active presence simulation.",
+                    room_id,
+                )
+                return
 
             # A. Explicit Engine Context match
             if self.is_engine_context(evt_context):
@@ -1745,6 +1778,12 @@ class RoomController:
     def freeze_bypass_active(self) -> bool:
         """Return dedicated freeze switch state."""
         return self._freeze_bypass_active
+
+    @property
+    def is_simulating_presence(self) -> bool:
+        """Check if this room's light is actively simulating presence."""
+        light_entity = self.entry_data.get(CONF_LIGHT_ENTITY)
+        return self.engine.is_simulating_presence(light_entity)
 
     def set_freeze_bypass(self, active: bool) -> None:
         """Set dedicated freeze switch state."""

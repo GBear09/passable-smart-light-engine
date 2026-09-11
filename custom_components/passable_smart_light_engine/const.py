@@ -120,3 +120,35 @@ RESET_TYPES = ["all", "user_prefs", "room_curves", "media_prefs", "late_night_pr
 SERVICE_CALIBRATE_ROOM_CURVE = "calibrate_room_curve"
 ATTR_CALIBRATE_ROOM_ID = "room_id"
 ATTR_CALIBRATE_FORCE = "force"
+
+# Presence Simulation configuration keys
+CONF_SIMULATION_LABEL = "simulation_label"
+CONF_SIMULATION_MODE = "simulation_mode"
+CONF_SIMULATION_LOOKBACK_DAYS = "simulation_lookback_days"
+CONF_SIMULATION_JITTER_MIN = "simulation_jitter_min"
+CONF_SIMULATION_MAX_BRIGHTNESS_PCT = "simulation_max_brightness_pct"
+CONF_SIMULATION_ARRIVAL_GRACE_MIN = "simulation_arrival_grace_min"
+
+# Presence Simulation modes
+SIMULATION_MODE_HYBRID = "hybrid"
+SIMULATION_MODE_HISTORY = "history_replay"
+SIMULATION_MODE_SYNTHETIC = "synthetic_routine"
+SIMULATION_MODES = [SIMULATION_MODE_HYBRID, SIMULATION_MODE_HISTORY, SIMULATION_MODE_SYNTHETIC]
+
+# Presence Simulation defaults
+DEFAULT_SIMULATION_LABEL = "lights_presence_simulation"
+DEFAULT_SIMULATION_MODE = SIMULATION_MODE_HYBRID
+DEFAULT_SIMULATION_LOOKBACK_DAYS = 7
+DEFAULT_SIMULATION_JITTER_MIN = 15
+DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT = 40
+DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN = 5
+
+MODE_PRESENCE_SIMULATION = "presence_simulation"
+
+# Presence Simulation services
+SERVICE_START_PRESENCE_SIMULATION = "start_presence_simulation"
+SERVICE_STOP_PRESENCE_SIMULATION = "stop_presence_simulation"
+
+# Entity IDs & unique IDs for drop-in compatibility
+PRESENCE_SIMULATION_SWITCH_ENTITY_ID = "switch.simulate_presence_away_mode"
+PRESENCE_SIMULATION_SWITCH_UNIQUE_ID = "switch.simulate_presence__away_mode_"

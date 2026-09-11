@@ -26,6 +26,7 @@ from .const import (
     DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
     DOMAIN,
+    MODE_PRESENCE_SIMULATION,
     RESET_TYPES,
 )
 from .engine import (
@@ -41,9 +42,16 @@ from .storage import LearningDataStore
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up sensor entities for a room config entry."""
+    """Set up sensor entities for a room or presence simulation config entry."""
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
+
+    if entry.data.get("entry_type") == "presence_simulation":
+        if not data.get("system_simulation_sensor_registered"):
+            async_add_entities([PassablePresenceSimulationStatusSensor(hass, engine)])
+            data["system_simulation_sensor_registered"] = True
+        return
+
     controllers = data["controllers"]
     controller: RoomController = controllers[entry.entry_id]
 
@@ -53,9 +61,10 @@ async def async_setup_entry(
         PassableLightingActiveModeSensor(entry, controller, engine),
     ]
 
-    # Add the system-wide ready sensor once if not already added
+    # Add the system-wide ready and simulation status sensors once if not already added
     if not data.get("system_sensor_registered"):
         entities.append(PassableLightingEngineReadySensor(hass, engine.store))
+        entities.append(PassablePresenceSimulationStatusSensor(hass, engine))
         data["system_sensor_registered"] = True
 
     async_add_entities(entities)
@@ -174,6 +183,9 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
         if self._engine.is_manual_override_active(self._room_id):
             return "manual_override"
 
+        if self._controller.is_simulating_presence:
+            return MODE_PRESENCE_SIMULATION
+
         freezes = self._controller.entry_data.get("bypass_freeze_entities", [])
         offs = self._controller.entry_data.get("bypass_off_entities", [])
         manual_override_entity = self._controller.entry_data.get("manual_override_entity")
@@ -286,4 +298,51 @@ class PassableLightingEngineReadySensor(SensorEntity):
             "active_rooms": self._store.get_active_rooms(),
             "room_datasets": self._store.get_room_datasets(),
             "available_reset_types": RESET_TYPES,
+        }
+
+
+class PassablePresenceSimulationStatusSensor(SensorEntity):
+    """Sensor reporting presence simulation status and active lights."""
+
+    def __init__(self, hass: HomeAssistant, engine: PassableLightingEngine) -> None:
+        """Initialize simulation status sensor."""
+        self.hass = hass
+        self._engine = engine
+        self._attr_unique_id = f"{DOMAIN}_presence_simulation_status"
+        self._attr_name = "Presence Simulation Status"
+        self._attr_icon = "mdi:shield-home"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return system device info."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "presence_simulation")},
+            name="Passable Smart Light Engine - Presence Simulation",
+            manufacturer="Passable",
+            model="Presence Simulation v1",
+            sw_version="2.0.0",
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return current simulation status."""
+        coord = self._engine.presence_simulation
+        return coord.status if coord else "idle"
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Return simulation diagnostics."""
+        coord = self._engine.presence_simulation
+        if not coord:
+            return {}
+        return {
+            "is_active": coord.is_on,
+            "active_simulated_lights": coord.active_simulated_lights,
+            "active_count": len(coord.active_simulated_lights),
+            "next_event": coord.next_event,
+            "label": coord.label,
+            "mode": coord.mode,
+            "lookback_days": coord.lookback_days,
+            "jitter_minutes": coord.jitter_min,
+            "arrival_grace_minutes": coord.arrival_grace_min,
         }

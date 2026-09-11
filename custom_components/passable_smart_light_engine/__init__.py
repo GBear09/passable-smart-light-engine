@@ -26,8 +26,11 @@ from .const import (
     RESET_TYPES,
     SERVICE_CALIBRATE_ROOM_CURVE,
     SERVICE_RESET_LEARNING_DATA,
+    SERVICE_START_PRESENCE_SIMULATION,
+    SERVICE_STOP_PRESENCE_SIMULATION,
 )
 from .engine import PassableLightingEngine, RoomController
+from .presence_simulation import PresenceSimulationCoordinator
 from .storage import LearningDataStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,12 +60,16 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
     await store.async_load()
 
     engine = PassableLightingEngine(hass, store)
+    coordinator = PresenceSimulationCoordinator(hass, engine)
+    engine.presence_simulation = coordinator
 
     hass.data[DOMAIN] = {
         "store": store,
         "engine": engine,
+        "coordinator": coordinator,
         "controllers": {},
         "system_sensor_registered": False,
+        "system_switch_registered": False,
     }
 
     # ==============================================================
@@ -108,14 +115,35 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         DOMAIN, SERVICE_CALIBRATE_ROOM_CURVE, _async_handle_calibrate_service, schema=CALIBRATE_SERVICE_SCHEMA
     )
 
+    async def _async_handle_start_simulation(call: ServiceCall) -> None:
+        """Start presence simulation."""
+        await coordinator.async_start()
+
+    hass.services.async_register(DOMAIN, SERVICE_START_PRESENCE_SIMULATION, _async_handle_start_simulation)
+
+    async def _async_handle_stop_simulation(call: ServiceCall) -> None:
+        """Stop presence simulation."""
+        await coordinator.async_stop()
+
+    hass.services.async_register(DOMAIN, SERVICE_STOP_PRESENCE_SIMULATION, _async_handle_stop_simulation)
+
     _LOGGER.info("Passable Adaptive Smart Lighting Controller component initialized successfully.")
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up a room from a config entry."""
+    """Set up a room or presence simulation from a config entry."""
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
+
+    if entry.data.get("entry_type") == "presence_simulation":
+        coordinator = data.get("coordinator")
+        if coordinator:
+            coordinator.update_options(dict(entry.data))
+        await hass.config_entries.async_forward_entry_setups(entry, ["switch", "sensor"])
+        entry.async_on_unload(entry.add_update_listener(async_update_options_listener))
+        _LOGGER.info("PassableSmartLighting: Set up Presence Simulation entry successfully.")
+        return True
 
     controller = RoomController(hass, engine, dict(entry.data))
     data["controllers"][entry.entry_id] = controller
@@ -131,8 +159,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a room config entry."""
+    """Unload a room or presence simulation config entry."""
     data = hass.data[DOMAIN]
+
+    if entry.data.get("entry_type") == "presence_simulation":
+        return await hass.config_entries.async_unload_platforms(entry, ["switch", "sensor"])
+
     controller: RoomController = data["controllers"].pop(entry.entry_id, None)
 
     if controller:
