@@ -5,7 +5,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.core import callback
-from homeassistant.helpers import selector
+from homeassistant.helpers import entity_registry as er, selector
 
 from .const import (
     CONF_BYPASS_FREEZE_ENTITIES,
@@ -39,6 +39,7 @@ from .const import (
     CONF_SECONDARY_LIGHTS,
     CONF_SETTLING_COOLDOWN_SEC,
     CONF_SIMULATION_ARRIVAL_GRACE_MIN,
+    CONF_SIMULATION_ENABLED,
     CONF_SIMULATION_JITTER_MIN,
     CONF_SIMULATION_LABEL,
     CONF_SIMULATION_LOOKBACK_DAYS,
@@ -64,6 +65,7 @@ from .const import (
     DEFAULT_SECONDARY_LIGHTS,
     DEFAULT_SETTLING_COOLDOWN_SEC,
     DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN,
+    DEFAULT_SIMULATION_ENABLED,
     DEFAULT_SIMULATION_JITTER_MIN,
     DEFAULT_SIMULATION_LABEL,
     DEFAULT_SIMULATION_LOOKBACK_DAYS,
@@ -165,6 +167,26 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(step_id="room", data_schema=step1_schema, errors=errors)
 
+    async def async_step_import(self, import_data: Dict[str, Any]) -> config_entries.ConfigFlowResult:
+        """Auto-create dedicated presence simulation config entry from system."""
+        if import_data.get("entry_type") == "presence_simulation":
+            await self.async_set_unique_id(f"{DOMAIN}_presence_simulation")
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(
+                title="Presence Simulation",
+                data={
+                    "entry_type": "presence_simulation",
+                    CONF_SIMULATION_ENABLED: DEFAULT_SIMULATION_ENABLED,
+                    CONF_SIMULATION_LABEL: DEFAULT_SIMULATION_LABEL,
+                    CONF_SIMULATION_MODE: DEFAULT_SIMULATION_MODE,
+                    CONF_SIMULATION_LOOKBACK_DAYS: DEFAULT_SIMULATION_LOOKBACK_DAYS,
+                    CONF_SIMULATION_JITTER_MIN: DEFAULT_SIMULATION_JITTER_MIN,
+                    CONF_SIMULATION_ARRIVAL_GRACE_MIN: DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN,
+                    CONF_SIMULATION_MAX_BRIGHTNESS_PCT: DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT,
+                },
+            )
+        return self.async_abort(reason="unknown_import")
+
     async def async_step_presence_simulation(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
         """Configure presence simulation settings."""
         await self.async_set_unique_id(f"{DOMAIN}_presence_simulation")
@@ -174,9 +196,31 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data = {"entry_type": "presence_simulation", **user_input}
             return self.async_create_entry(title="Presence Simulation", data=data)
 
+        target_label = DEFAULT_SIMULATION_LABEL
+        reg = er.async_get(self.hass)
+        matching_lights = [
+            entry.entity_id
+            for entry in reg.entities.values()
+            if entry.domain == "light" and not entry.disabled and target_label in entry.labels
+        ]
+        matching_lights.sort()
+
+        if matching_lights:
+            lights_list = "\n".join(f"- `{entity_id}`" for entity_id in matching_lights)
+            summary_text = (
+                f"**Currently Included Lights ({len(matching_lights)}) with label `{target_label}`:**\n"
+                f"{lights_list}"
+            )
+        else:
+            summary_text = (
+                f"ℹ️ **No lights currently tagged with label `{target_label}`.**\n\n"
+                f"You can tag lights in Home Assistant at any time (Settings → Devices & Services → Entities → select light → Labels)."
+            )
+
         schema = vol.Schema(
             {
-                vol.Required(CONF_SIMULATION_LABEL, default=DEFAULT_SIMULATION_LABEL): selector.TextSelector(),
+                vol.Required(CONF_SIMULATION_ENABLED, default=DEFAULT_SIMULATION_ENABLED): selector.BooleanSelector(),
+                vol.Required(CONF_SIMULATION_LABEL, default=target_label): selector.TextSelector(),
                 vol.Required(CONF_SIMULATION_MODE, default=DEFAULT_SIMULATION_MODE): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[
@@ -200,7 +244,11 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
             }
         )
-        return self.async_show_form(step_id="presence_simulation", data_schema=schema)
+        return self.async_show_form(
+            step_id="presence_simulation",
+            data_schema=schema,
+            description_placeholders={"lights_summary": summary_text},
+        )
 
     async def async_step_advanced(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
         """Handle Step 2: Advanced settings, overrides, and bypasses."""
@@ -324,42 +372,7 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
         """Manage room or presence simulation options."""
         if self._entry.data.get("entry_type") == "presence_simulation":
-            if user_input is not None:
-                new_data = {**self._entry.data, **user_input}
-                self.hass.config_entries.async_update_entry(self._entry, data=new_data)
-                coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator")
-                if coordinator:
-                    coordinator.update_options(new_data)
-                return self.async_create_entry(title="", data={})
-
-            d = self._entry.data
-            schema = vol.Schema(
-                {
-                    vol.Required(CONF_SIMULATION_LABEL, default=d.get(CONF_SIMULATION_LABEL, DEFAULT_SIMULATION_LABEL)): selector.TextSelector(),
-                    vol.Required(CONF_SIMULATION_MODE, default=d.get(CONF_SIMULATION_MODE, DEFAULT_SIMULATION_MODE)): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=[
-                                selector.SelectOptionDict(value="hybrid", label="Hybrid (Smart History Replay with Synthetic Fallback)"),
-                                selector.SelectOptionDict(value="history_replay", label="Smart History Replay Only"),
-                                selector.SelectOptionDict(value="synthetic_routine", label="Synthetic Realistic Evening Routine Only"),
-                            ]
-                        )
-                    ),
-                    vol.Required(CONF_SIMULATION_LOOKBACK_DAYS, default=d.get(CONF_SIMULATION_LOOKBACK_DAYS, DEFAULT_SIMULATION_LOOKBACK_DAYS)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
-                    ),
-                    vol.Required(CONF_SIMULATION_JITTER_MIN, default=d.get(CONF_SIMULATION_JITTER_MIN, DEFAULT_SIMULATION_JITTER_MIN)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=0, max=60, step=5, mode=selector.NumberSelectorMode.BOX)
-                    ),
-                    vol.Required(CONF_SIMULATION_ARRIVAL_GRACE_MIN, default=d.get(CONF_SIMULATION_ARRIVAL_GRACE_MIN, DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
-                    ),
-                    vol.Required(CONF_SIMULATION_MAX_BRIGHTNESS_PCT, default=d.get(CONF_SIMULATION_MAX_BRIGHTNESS_PCT, DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT)): selector.NumberSelector(
-                        selector.NumberSelectorConfig(min=10, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
-                    ),
-                }
-            )
-            return self.async_show_form(step_id="init", data_schema=schema)
+            return await self.async_step_presence_simulation_options(user_input)
 
         if user_input is not None:
             # Unpack section dictionaries and update entry data
@@ -496,3 +509,75 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(step_id="init", data_schema=options_schema)
+
+    async def async_step_presence_simulation_options(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> config_entries.ConfigFlowResult:
+        """Manage presence simulation options and show current included lights."""
+        d = self._entry.data
+        target_label = d.get(CONF_SIMULATION_LABEL, DEFAULT_SIMULATION_LABEL)
+
+        if user_input is not None:
+            new_data = {**self._entry.data, **user_input}
+            self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+            coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator")
+            if coordinator:
+                coordinator.update_options(new_data)
+            return self.async_create_entry(title="", data={})
+
+        reg = er.async_get(self.hass)
+        matching_lights = [
+            entry.entity_id
+            for entry in reg.entities.values()
+            if entry.domain == "light" and not entry.disabled and target_label in entry.labels
+        ]
+        matching_lights.sort()
+
+        if matching_lights:
+            lights_list = "\n".join(f"- `{entity_id}`" for entity_id in matching_lights)
+            summary_text = (
+                f"**Currently Included Lights ({len(matching_lights)}) with label `{target_label}`:**\n"
+                f"{lights_list}"
+            )
+        else:
+            summary_text = (
+                f"⚠️ **No lights currently found with label `{target_label}`.**\n\n"
+                f"To include lights, assign the label `{target_label}` to any light entity in Home Assistant "
+                f"(Settings → Devices & Services → Entities → select light → Labels)."
+            )
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_SIMULATION_ENABLED,
+                    default=d.get(CONF_SIMULATION_ENABLED, DEFAULT_SIMULATION_ENABLED),
+                ): selector.BooleanSelector(),
+                vol.Required(CONF_SIMULATION_LABEL, default=target_label): selector.TextSelector(),
+                vol.Required(CONF_SIMULATION_MODE, default=d.get(CONF_SIMULATION_MODE, DEFAULT_SIMULATION_MODE)): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="hybrid", label="Hybrid (Smart History Replay with Synthetic Fallback)"),
+                            selector.SelectOptionDict(value="history_replay", label="Smart History Replay Only"),
+                            selector.SelectOptionDict(value="synthetic_routine", label="Synthetic Realistic Evening Routine Only"),
+                        ]
+                    )
+                ),
+                vol.Required(CONF_SIMULATION_LOOKBACK_DAYS, default=d.get(CONF_SIMULATION_LOOKBACK_DAYS, DEFAULT_SIMULATION_LOOKBACK_DAYS)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Required(CONF_SIMULATION_JITTER_MIN, default=d.get(CONF_SIMULATION_JITTER_MIN, DEFAULT_SIMULATION_JITTER_MIN)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=60, step=5, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Required(CONF_SIMULATION_ARRIVAL_GRACE_MIN, default=d.get(CONF_SIMULATION_ARRIVAL_GRACE_MIN, DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=30, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Required(CONF_SIMULATION_MAX_BRIGHTNESS_PCT, default=d.get(CONF_SIMULATION_MAX_BRIGHTNESS_PCT, DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT)): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=10, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="presence_simulation_options",
+            data_schema=schema,
+            description_placeholders={"lights_summary": summary_text},
+        )

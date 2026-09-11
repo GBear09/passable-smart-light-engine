@@ -11,7 +11,7 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, ServiceCall
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_registry as er
 
 from .const import (
     ATTR_CALIBRATE_FORCE,
@@ -23,6 +23,8 @@ from .const import (
     EVENT_SMART_LIGHT_ENGINE,
     LEGACY_DOMAIN,
     PLATFORMS,
+    PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID,
+    PRESENCE_SIMULATION_SWITCH_ENTITY_ID,
     RESET_TYPES,
     SERVICE_CALIBRATE_ROOM_CURVE,
     SERVICE_RESET_LEARNING_DATA,
@@ -127,6 +129,22 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
 
     hass.services.async_register(DOMAIN, SERVICE_STOP_PRESENCE_SIMULATION, _async_handle_stop_simulation)
 
+    # Ensure dedicated presence simulation entry is created
+    async def _async_ensure_simulation_entry() -> None:
+        sim_entries = [
+            e for e in hass.config_entries.async_entries(DOMAIN)
+            if e.data.get("entry_type") == "presence_simulation"
+        ]
+        if not sim_entries:
+            _LOGGER.info("PassableSmartLighting: Auto-creating dedicated Presence Simulation config entry...")
+            await hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": "import"},
+                data={"entry_type": "presence_simulation"},
+            )
+
+    hass.async_create_task(_async_ensure_simulation_entry())
+
     _LOGGER.info("Passable Adaptive Smart Lighting Controller component initialized successfully.")
     return True
 
@@ -140,6 +158,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator = data.get("coordinator")
         if coordinator:
             coordinator.update_options(dict(entry.data))
+
+        ent_reg = er.async_get(hass)
+        dev_reg = dr.async_get(hass)
+
+        for entity_id in [
+            PRESENCE_SIMULATION_SWITCH_ENTITY_ID,
+            PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID,
+            "sensor.presence_simulation_status",
+        ]:
+            reg_entry = ent_reg.async_get(entity_id)
+            if reg_entry and reg_entry.config_entry_id != entry.entry_id:
+                old_entry_id = reg_entry.config_entry_id
+                _LOGGER.info(
+                    "PassableSmartLighting: Migrating %s from config entry %s to dedicated entry %s",
+                    entity_id,
+                    old_entry_id,
+                    entry.entry_id,
+                )
+                ent_reg.async_update_entity(entity_id, config_entry_id=entry.entry_id)
+                if reg_entry.device_id:
+                    device = dev_reg.async_get(reg_entry.device_id)
+                    if device and old_entry_id in device.config_entries:
+                        dev_reg.async_update_device(
+                            device.id,
+                            add_config_entry_id=entry.entry_id,
+                            remove_config_entry_id=old_entry_id,
+                        )
+
         await hass.config_entries.async_forward_entry_setups(entry, ["switch", "sensor"])
         entry.async_on_unload(entry.add_update_listener(async_update_options_listener))
         _LOGGER.info("PassableSmartLighting: Set up Presence Simulation entry successfully.")

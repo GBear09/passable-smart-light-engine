@@ -16,12 +16,14 @@ import homeassistant.util.dt as dt_util
 
 from .const import (
     CONF_SIMULATION_ARRIVAL_GRACE_MIN,
+    CONF_SIMULATION_ENABLED,
     CONF_SIMULATION_JITTER_MIN,
     CONF_SIMULATION_LABEL,
     CONF_SIMULATION_LOOKBACK_DAYS,
     CONF_SIMULATION_MAX_BRIGHTNESS_PCT,
     CONF_SIMULATION_MODE,
     DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN,
+    DEFAULT_SIMULATION_ENABLED,
     DEFAULT_SIMULATION_JITTER_MIN,
     DEFAULT_SIMULATION_LABEL,
     DEFAULT_SIMULATION_LOOKBACK_DAYS,
@@ -63,6 +65,7 @@ class PresenceSimulationCoordinator:
         self.hass = hass
         self.engine = engine
         self._options: Dict[str, Any] = options or {}
+        self._enabled: bool = bool(self._options.get(CONF_SIMULATION_ENABLED, DEFAULT_SIMULATION_ENABLED))
         self._is_on: bool = False
         self._status: str = "idle"  # idle, planning, simulating, handover
         self._active_simulated_lights: Set[str] = set()
@@ -71,7 +74,29 @@ class PresenceSimulationCoordinator:
         self._next_event: Optional[Dict[str, Any]] = None
         self._plan_unsub: Optional[CALLBACK_TYPE] = None
         self._switch_entity: Any = None
+        self._master_switch_entity: Any = None
         self._listeners: List[CALLBACK_TYPE] = []
+
+    @property
+    def enabled(self) -> bool:
+        """Return True if simulation feature is enabled."""
+        return self._enabled
+
+    async def async_set_enabled(self, enabled: bool) -> None:
+        """Enable or disable the presence simulation function."""
+        if self._enabled == enabled:
+            return
+        self._enabled = enabled
+        self._options[CONF_SIMULATION_ENABLED] = enabled
+        _LOGGER.info("PresenceSimulation: Feature enabled status changed to %s", enabled)
+        if not enabled and self._is_on:
+            await self.async_stop()
+        if self._switch_entity:
+            self._switch_entity.async_write_ha_state()
+        if self._master_switch_entity:
+            self._master_switch_entity.async_write_ha_state()
+        for listener in self._listeners:
+            listener()
 
     @property
     def is_on(self) -> bool:
@@ -81,12 +106,19 @@ class PresenceSimulationCoordinator:
     @property
     def status(self) -> str:
         """Return operational status."""
+        if not self._enabled:
+            return "disabled"
         return self._status
 
     @property
     def active_simulated_lights(self) -> List[str]:
         """Return list of entities currently turned on by simulation."""
         return sorted(list(self._active_simulated_lights))
+
+    @property
+    def configured_target_entities(self) -> List[str]:
+        """Return all light entities matching the target simulation label."""
+        return self.async_resolve_target_entities()
 
     @property
     def next_event(self) -> Optional[Dict[str, Any]]:
@@ -127,9 +159,17 @@ class PresenceSimulationCoordinator:
         """Register the switch entity instance for state callbacks."""
         self._switch_entity = switch_entity
 
+    def register_master_switch(self, master_switch_entity: Any) -> None:
+        """Register the master enable switch entity instance."""
+        self._master_switch_entity = master_switch_entity
+
     def update_options(self, options: Dict[str, Any]) -> None:
         """Update coordinator options."""
         self._options.update(options)
+        if CONF_SIMULATION_ENABLED in options:
+            new_enabled = bool(options[CONF_SIMULATION_ENABLED])
+            if self._enabled != new_enabled:
+                self.hass.async_create_task(self.async_set_enabled(new_enabled))
 
     def is_light_simulating(self, entity_id: str) -> bool:
         """Check if a light entity is currently actively engaged in simulation."""
@@ -151,16 +191,16 @@ class PresenceSimulationCoordinator:
             if target_label in entity.labels:
                 matching_entities.append(entity.entity_id)
 
-        _LOGGER.debug(
-            "PresenceSimulation: Resolved %d entities for label '%s': %s",
-            len(matching_entities),
-            target_label,
-            matching_entities,
-        )
-        return matching_entities
+        return sorted(matching_entities)
 
     async def async_start(self) -> None:
         """Turn on presence simulation and schedule evening activities."""
+        if not self._enabled:
+            _LOGGER.warning("PresenceSimulation: Simulation is disabled in configuration. Ignoring start.")
+            if self._switch_entity:
+                self._switch_entity.async_write_ha_state()
+            return
+
         if self._is_on:
             return
 

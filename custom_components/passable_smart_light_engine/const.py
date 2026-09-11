@@ -122,6 +122,7 @@ ATTR_CALIBRATE_ROOM_ID = "room_id"
 ATTR_CALIBRATE_FORCE = "force"
 
 # Presence Simulation configuration keys
+CONF_SIMULATION_ENABLED = "simulation_enabled"
 CONF_SIMULATION_LABEL = "simulation_label"
 CONF_SIMULATION_MODE = "simulation_mode"
 CONF_SIMULATION_LOOKBACK_DAYS = "simulation_lookback_days"
@@ -136,6 +137,7 @@ SIMULATION_MODE_SYNTHETIC = "synthetic_routine"
 SIMULATION_MODES = [SIMULATION_MODE_HYBRID, SIMULATION_MODE_HISTORY, SIMULATION_MODE_SYNTHETIC]
 
 # Presence Simulation defaults
+DEFAULT_SIMULATION_ENABLED = True
 DEFAULT_SIMULATION_LABEL = "lights_presence_simulation"
 DEFAULT_SIMULATION_MODE = SIMULATION_MODE_HYBRID
 DEFAULT_SIMULATION_LOOKBACK_DAYS = 7
@@ -152,3 +154,5 @@ SERVICE_STOP_PRESENCE_SIMULATION = "stop_presence_simulation"
 # Entity IDs & unique IDs for drop-in compatibility
 PRESENCE_SIMULATION_SWITCH_ENTITY_ID = "switch.simulate_presence_away_mode"
 PRESENCE_SIMULATION_SWITCH_UNIQUE_ID = "switch.simulate_presence__away_mode_"
+PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID = "switch.presence_simulation"
+PRESENCE_SIMULATION_MASTER_SWITCH_UNIQUE_ID = "passable_presence_simulation_master"

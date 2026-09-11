@@ -201,8 +201,9 @@ When configured via the Native UI, the integration provisions a room Device with
 
 ### System-Wide Entities:
 * `sensor.passable_smart_light_engine_ready`: Publishes `active_rooms`, `room_datasets`, and `available_reset_types` state attributes to power dynamic dashboard popups.
-* `switch.simulate_presence_away_mode`: Master presence simulation toggle. Drop-in compatible with existing automations. Exposes live attributes including `status`, `active_simulated_lights`, and `next_event`.
-* `sensor.presence_simulation_status`: Real-time operational diagnostics (`idle`, `planning`, `simulating`, `handover`).
+* `switch.presence_simulation`: Master enable/disable toggle for the presence simulation function.
+* `switch.simulate_presence_away_mode`: Operational presence simulation away trigger switch. Drop-in compatible with existing automations. Exposes live attributes including `simulation_enabled`, `configured_lights`, `active_simulated_lights`, and `next_event`.
+* `sensor.presence_simulation_status`: Real-time operational diagnostics (`disabled`, `idle`, `planning`, `simulating`, `handover`).
 
 ---
 
@@ -211,8 +212,9 @@ When configured via the Native UI, the integration provisions a room Device with
 The integration includes a built-in, vacation-immune **Presence Simulation Engine** that replaces third-party replay components:
 
 ### Setup & Configuration
-- **Zero Disruption / Out-of-the-Box:** Works immediately upon upgrade. The engine auto-discovers lights labeled `lights_presence_simulation` and automatically provisions `switch.simulate_presence_away_mode`. Your existing room configurations are completely untouched—no rooms need to be deleted, re-added, or reconfigured.
-- **Optional Dedicated Entry:** If you want to customize simulation parameters (e.g. lookback days, jitter minutes, night arrival grace period, or custom label), go to **Settings > Devices & Services > Add Integration > Passable Adaptive Smart Lighting Controller** and choose **Configure Presence Simulation**. This creates an independent entry alongside your existing rooms.
+- **Dedicated Independent Entry:** The engine provisions its own dedicated configuration entry (**Presence Simulation**) in **Settings → Devices & Services**, completely separate from your room controllers.
+- **In-Flow Light Visibility:** Open the **Configure** page on the Presence Simulation entry at any time to see the live list of all light entities currently discovered under your configured label (`lights_presence_simulation`), along with an instant toggle to enable/disable the feature.
+- **Zero Disruption / Out-of-the-Box:** Your existing room configurations are completely untouched—no rooms need to be deleted, re-added, or reconfigured.
 
 ### Key Highlights
 - **🎭 Hybrid Simulation Strategy:**

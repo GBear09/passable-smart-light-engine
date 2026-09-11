@@ -27,8 +27,9 @@
       },
       "presence_simulation": {
         "title": "Presence Simulation Configuration",
-        "description": "Configure house-wide presence simulation.",
+        "description": "Configure house-wide presence simulation.\n\n{lights_summary}",
         "data": {
+          "simulation_enabled": "Enable Presence Simulation",
           "simulation_label": "Target Light Label",
           "simulation_mode": "Simulation Strategy",
           "simulation_lookback_days": "History Lookback Days",
@@ -267,6 +268,19 @@
           "late_night_stop_entity": "Late Night Stop Entity (input_datetime)",
           "power_grid_entity": "Power Grid Status Entity"
         }
+      },
+      "presence_simulation_options": {
+        "title": "Configure Presence Simulation",
+        "description": "Configure house-wide presence simulation behavior, timers, and active targets.\n\n{lights_summary}",
+        "data": {
+          "simulation_enabled": "Enable Presence Simulation",
+          "simulation_label": "Target Light Label",
+          "simulation_mode": "Simulation Strategy",
+          "simulation_lookback_days": "History Lookback Days",
+          "simulation_jitter_min": "Time Jitter Window (Minutes +/-)",
+          "simulation_arrival_grace_min": "Night Arrival Grace Period (Minutes)",
+          "simulation_max_brightness_pct": "Max Simulated Brightness %"
+        }
       }
     }
   },
@@ -295,6 +309,9 @@
       }
     },
     "switch": {
+      "presence_simulation_master": {
+        "name": "Presence Simulation Function"
+      },
       "simulate_presence_away_mode": {
         "name": "Simulate Presence (Away Mode)"
       }

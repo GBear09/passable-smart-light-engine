@@ -13,7 +13,10 @@ from .const import (
     CONF_CREATE_FREEZE_SWITCH,
     CONF_CREATE_OVERRIDE_SWITCH,
     CONF_ROOM_ID,
+    CONF_SIMULATION_ENABLED,
     DOMAIN,
+    PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID,
+    PRESENCE_SIMULATION_MASTER_SWITCH_UNIQUE_ID,
     PRESENCE_SIMULATION_SWITCH_ENTITY_ID,
     PRESENCE_SIMULATION_SWITCH_UNIQUE_ID,
 )
@@ -28,9 +31,12 @@ async def async_setup_entry(
     engine: PassableLightingEngine = data["engine"]
 
     if entry.data.get("entry_type") == "presence_simulation":
-        if not data.get("system_switch_registered"):
-            async_add_entities([PassablePresenceSimulationSwitch(hass, engine)])
-            data["system_switch_registered"] = True
+        async_add_entities(
+            [
+                PassablePresenceSimulationMasterSwitch(hass, entry, engine),
+                PassablePresenceSimulationSwitch(hass, engine),
+            ]
+        )
         return
 
     controllers = data["controllers"]
@@ -47,10 +53,6 @@ async def async_setup_entry(
 
     if entry.data.get(CONF_CREATE_FREEZE_SWITCH):
         entities.append(PassableLightingFreezeSwitch(entry, controller))
-
-    if not data.get("system_switch_registered"):
-        entities.append(PassablePresenceSimulationSwitch(hass, engine))
-        data["system_switch_registered"] = True
 
     async_add_entities(entities)
 
@@ -195,8 +197,61 @@ class PassableLightingFreezeSwitch(PassableLightingBaseEntity, SwitchEntity):
         self.async_write_ha_state()
 
 
+class PassablePresenceSimulationMasterSwitch(SwitchEntity):
+    """Master toggle switch to enable/disable the presence simulation function."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Presence Simulation Function"
+    _attr_icon = "mdi:shield-home"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, engine: PassableLightingEngine) -> None:
+        """Initialize master presence simulation switch."""
+        self.hass = hass
+        self._entry = entry
+        self._engine = engine
+        self._coordinator = engine.presence_simulation
+        if self._coordinator:
+            self._coordinator.register_master_switch(self)
+        self._attr_unique_id = PRESENCE_SIMULATION_MASTER_SWITCH_UNIQUE_ID
+        self.entity_id = PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return system device info."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "presence_simulation")},
+            name="Passable Smart Light Engine - Presence Simulation",
+            manufacturer="Passable",
+            model="Presence Simulation v1",
+            sw_version="2.0.0",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if simulation feature is enabled."""
+        if not self._coordinator:
+            return True
+        return self._coordinator.enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable presence simulation function."""
+        if self._coordinator:
+            await self._coordinator.async_set_enabled(True)
+        new_data = {**self._entry.data, CONF_SIMULATION_ENABLED: True}
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable presence simulation function."""
+        if self._coordinator:
+            await self._coordinator.async_set_enabled(False)
+        new_data = {**self._entry.data, CONF_SIMULATION_ENABLED: False}
+        self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+        self.async_write_ha_state()
+
+
 class PassablePresenceSimulationSwitch(SwitchEntity):
-    """Presence simulation master switch with drop-in compatibility."""
+    """Presence simulation away mode trigger switch with drop-in compatibility."""
 
     def __init__(self, hass: HomeAssistant, engine: PassableLightingEngine) -> None:
         """Initialize presence simulation switch."""
@@ -247,8 +302,11 @@ class PassablePresenceSimulationSwitch(SwitchEntity):
             return {}
         return {
             "status": self._coordinator.status,
+            "simulation_enabled": self._coordinator.enabled,
             "simulation_mode": self._coordinator.mode,
             "target_label": self._coordinator.label,
+            "configured_lights": self._coordinator.configured_target_entities,
+            "configured_count": len(self._coordinator.configured_target_entities),
             "active_simulated_lights": self._coordinator.active_simulated_lights,
             "active_lights_count": len(self._coordinator.active_simulated_lights),
             "next_event": self._coordinator.next_event,

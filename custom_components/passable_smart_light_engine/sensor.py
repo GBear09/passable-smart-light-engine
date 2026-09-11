@@ -61,10 +61,9 @@ async def async_setup_entry(
         PassableLightingActiveModeSensor(entry, controller, engine),
     ]
 
-    # Add the system-wide ready and simulation status sensors once if not already added
+    # Add the system-wide ready sensor once if not already added
     if not data.get("system_sensor_registered"):
         entities.append(PassableLightingEngineReadySensor(hass, engine.store))
-        entities.append(PassablePresenceSimulationStatusSensor(hass, engine))
         data["system_sensor_registered"] = True
 
     async_add_entities(entities)
@@ -327,7 +326,9 @@ class PassablePresenceSimulationStatusSensor(SensorEntity):
     def native_value(self) -> str:
         """Return current simulation status."""
         coord = self._engine.presence_simulation
-        return coord.status if coord else "idle"
+        if not coord:
+            return "idle"
+        return coord.status
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
@@ -337,6 +338,9 @@ class PassablePresenceSimulationStatusSensor(SensorEntity):
             return {}
         return {
             "is_active": coord.is_on,
+            "simulation_enabled": coord.enabled,
+            "configured_lights": coord.configured_target_entities,
+            "configured_count": len(coord.configured_target_entities),
             "active_simulated_lights": coord.active_simulated_lights,
             "active_count": len(coord.active_simulated_lights),
             "next_event": coord.next_event,
