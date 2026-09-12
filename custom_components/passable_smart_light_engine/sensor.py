@@ -15,12 +15,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     CONF_DEFAULT_LUX_RATIO,
+    CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_ROOM_ID,
     CONF_SECONDARY_LIGHTS,
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
     DEFAULT_LATE_NIGHT_PCT,
     DEFAULT_LUX_RATIO,
+    DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_SECONDARY_LIGHTS,
     DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
@@ -92,7 +94,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.1.11",
+            sw_version="2.2.2",
         )
 
 
@@ -255,6 +257,12 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
         return {
             "media_preferences": media_prefs,
             "media_target_pct": media_target,
+            "media_respect_ambient_lux": bool(
+                self._controller.entry_data.get(
+                    CONF_MEDIA_RESPECT_AMBIENT_LUX, DEFAULT_MEDIA_RESPECT_AMBIENT_LUX
+                )
+            ),
+            "media_daylight_suppressed": self._engine.is_media_daylight_suppressed(self._room_id),
             "late_night_preferences": late_night_prefs,
             "late_night_target_pct": late_night_target,
             "secondary_lights": sec_lights or [],

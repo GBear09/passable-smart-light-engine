@@ -28,6 +28,7 @@ from .const import (
     CONF_MANUAL_OVERRIDE_ENTITY,
     CONF_MAX_COLOR_TEMP,
     CONF_MEDIA_ENTITIES,
+    CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_MEDIA_SEED_PCT,
     CONF_MIN_COLOR_TEMP,
     CONF_MIN_OCCUPIED_PCT,
@@ -56,6 +57,7 @@ from .const import (
     DEFAULT_LATE_NIGHT_STOP_TIME,
     DEFAULT_LUX_RATIO,
     DEFAULT_MAX_COLOR_TEMP,
+    DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_MIN_COLOR_TEMP,
     DEFAULT_MIN_OCCUPIED_PCT,
@@ -318,6 +320,7 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Optional(CONF_MEDIA_SEED_PCT, default=DEFAULT_MEDIA_SEED_PCT): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=0, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
                             ),
+                            vol.Optional(CONF_MEDIA_RESPECT_AMBIENT_LUX, default=DEFAULT_MEDIA_RESPECT_AMBIENT_LUX): selector.BooleanSelector(),
                         }
                     ),
                     {"collapsed": True},
@@ -473,6 +476,10 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                             vol.Optional(CONF_MEDIA_SEED_PCT, default=d.get(CONF_MEDIA_SEED_PCT, DEFAULT_MEDIA_SEED_PCT)): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=0, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
                             ),
+                            vol.Optional(
+                                CONF_MEDIA_RESPECT_AMBIENT_LUX,
+                                default=d.get(CONF_MEDIA_RESPECT_AMBIENT_LUX, DEFAULT_MEDIA_RESPECT_AMBIENT_LUX),
+                            ): selector.BooleanSelector(),
                         }
                     ),
                     {"collapsed": True},

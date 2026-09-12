@@ -24,6 +24,7 @@ from .const import (
     CONF_LUX_SENSOR,
     CONF_MANUAL_OVERRIDE_ENTITY,
     CONF_MEDIA_ENTITIES,
+    CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_POWER_GRID_ENTITY,
     CONF_PRESENCE_ENTITIES,
     CONF_PRESENCE_TIMEOUT_MIN,
@@ -40,6 +41,7 @@ from .const import (
     DEFAULT_LATE_NIGHT_STOP_TIME,
     DEFAULT_LUX_RATIO,
     DEFAULT_MAX_COLOR_TEMP,
+    DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_MESH_SETTLE_SEC,
     DEFAULT_MIN_COLOR_TEMP,
@@ -230,6 +232,11 @@ class PassableLightingEngine:
         self._stabilizing_tasks: Dict[str, asyncio.Task] = {}
         self._controllers: Dict[str, "RoomController"] = {}
         self._presence_simulation: Optional[Any] = None
+        self._media_daylight_suppressed: Dict[str, bool] = {}
+
+    def is_media_daylight_suppressed(self, room_id: str) -> bool:
+        """Check if media lighting is currently suppressed due to natural daylight."""
+        return self._media_daylight_suppressed.get(room_id, False)
 
     @property
     def controllers(self) -> Dict[str, "RoomController"]:
@@ -991,6 +998,47 @@ class PassableLightingEngine:
 
         # Mode A: Media Playing
         if self.check_media(media_entities):
+            media_respect_ambient = bool(
+                p.get(CONF_MEDIA_RESPECT_AMBIENT_LUX, DEFAULT_MEDIA_RESPECT_AMBIENT_LUX)
+            )
+            if media_respect_ambient and lux_sensor:
+                sun_state = self.hass.states.get("sun.sun")
+                elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
+                azim = (
+                    float(sun_state.attributes.get("azimuth", 0))
+                    if sun_state and "azimuth" in sun_state.attributes
+                    else None
+                )
+                target_lux = calculate_learned_target_lux(target_lux_seed, user_prefs, elev, azim)
+                current_lux = self.get_smoothed_lux(room_id, lux_sensor)
+
+                # Bulb separation: determine natural ambient daylight without bulb contribution
+                if is_light_on and current_pct > 0:
+                    current_bulb_lux = get_expected_lux(room_curves, float(current_pct), default_lux_ratio)
+                    natural_ambient = max(0.0, current_lux - current_bulb_lux)
+                else:
+                    natural_ambient = max(0.0, current_lux)
+
+                if natural_ambient >= target_lux:
+                    self._media_daylight_suppressed[room_id] = True
+                    if is_light_on:
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Media active but natural daylight sufficient (%.1f >= %.1f). Turning lights OFF.",
+                            room_id,
+                            natural_ambient,
+                            target_lux,
+                        )
+                        await self.async_turn_off_light(room_id, light_entity)
+                    else:
+                        _LOGGER.debug(
+                            "PassableSmartLighting [%s]: Media active but natural daylight sufficient (%.1f >= %.1f). Keeping lights OFF.",
+                            room_id,
+                            natural_ambient,
+                            target_lux,
+                        )
+                    return
+
+            self._media_daylight_suppressed[room_id] = False
             target_pct = int(sum(media_prefs) / len(media_prefs)) if media_prefs else media_seed_pct
             if target_pct <= 0:
                 if is_light_on:
@@ -1006,6 +1054,8 @@ class PassableLightingEngine:
                     room_id, light_entity, target_pct, circadian_enabled, min_color_temp, max_color_temp
                 )
             return
+        else:
+            self._media_daylight_suppressed[room_id] = False
 
         # Mode B: Late Night Mode
         if self.is_late_night_active(

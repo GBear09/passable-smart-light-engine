@@ -81,11 +81,13 @@
             "description": "Dim room lights automatically when media players are active.",
             "data": {
               "media_entities": "Media Player Entities",
-              "media_seed_pct": "Media Brightness % (Seed)"
+              "media_seed_pct": "Media Brightness % (Seed)",
+              "media_respect_ambient_lux": "Respect Natural Daylight (Keep / Turn Off in Daylight)"
             },
             "data_description": {
               "media_entities": "Select media players to watch. When playing, lights transition to media brightness.",
-              "media_seed_pct": "Baseline brightness percentage applied when media is playing."
+              "media_seed_pct": "Baseline brightness percentage applied when media is playing.",
+              "media_respect_ambient_lux": "When enabled, media lighting only turns on when ambient lux is below the target threshold. If natural daylight is sufficient, lights remain off."
             }
           },
           "bypasses": {
@@ -208,11 +210,13 @@
             "description": "Dim room lights automatically when media players are active.",
             "data": {
               "media_entities": "Media Player Entities",
-              "media_seed_pct": "Media Brightness % (Seed)"
+              "media_seed_pct": "Media Brightness % (Seed)",
+              "media_respect_ambient_lux": "Respect Natural Daylight (Keep / Turn Off in Daylight)"
             },
             "data_description": {
               "media_entities": "Select media players to watch. When playing, lights transition to media brightness.",
-              "media_seed_pct": "Baseline brightness percentage applied when media is playing."
+              "media_seed_pct": "Baseline brightness percentage applied when media is playing.",
+              "media_respect_ambient_lux": "When enabled, media lighting only turns on when ambient lux is below the target threshold. If natural daylight is sufficient, lights remain off."
             }
           },
           "bypasses": {
