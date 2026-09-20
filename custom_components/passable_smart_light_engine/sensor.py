@@ -395,10 +395,10 @@ class PassableActiveHolidaySensor(SensorEntity):
         """Return device info linking this entity to the Holiday Lighting device."""
         return DeviceInfo(
             identifiers={(DOMAIN, "holiday_lighting")},
-            name="Holiday Lighting",
+            name="Holiday & Exterior Lighting",
             manufacturer="Passable",
-            model="Holiday Lighting Subsystem",
-            sw_version="1.0.0",
+            model="Holiday & Exterior Lighting Subsystem",
+            sw_version="2.4.0",
         )
 
     @property

@@ -17,18 +17,31 @@ from .const import (
     CONF_CREATE_FREEZE_SWITCH,
     CONF_CREATE_OVERRIDE_SWITCH,
     CONF_DEFAULT_LUX_RATIO,
-    CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
-    CONF_LATE_NIGHT_CONDITION_TYPE,
-    CONF_LATE_NIGHT_ENABLED,
+    CONF_DECORATIONS_OFF_TIME,
+    CONF_DECORATIONS_OFF_TRIGGER,
+    CONF_DECORATIONS_ON_TRIGGER,
+    CONF_DECORATIONS_SUNSET_OFFSET_MIN,
+    CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
+    CONF_EXTERIOR_BASELINE_KELVIN,
+    CONF_EXTERIOR_DUSK_TO_DAWN_ENABLED,
+    CONF_EXTERIOR_LIGHTS,
+    CONF_EXTERIOR_OFF_TIME,
+    CONF_EXTERIOR_OFF_TRIGGER,
+    CONF_EXTERIOR_ON_TIME,
+    CONF_EXTERIOR_ON_TRIGGER,
+    CONF_EXTERIOR_SUNRISE_OFFSET_MIN,
+    CONF_EXTERIOR_SUNSET_OFFSET_MIN,
     CONF_HOLIDAY_DECORATIONS_ENABLED,
     CONF_HOLIDAY_GLOBAL_DECORATIONS,
     CONF_HOLIDAY_GLOBAL_LABEL,
     CONF_HOLIDAY_GLOBAL_LIGHTS,
     CONF_HOLIDAY_HOME_STATE_ENTITY,
+    CONF_HOLIDAY_LATE_NIGHT_BEHAVIOR,
     CONF_HOLIDAY_LIGHTING_ENABLED,
     CONF_HOLIDAY_OFF_TIME,
     CONF_HOLIDAY_OFF_TRIGGER,
     CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION,
+    CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
     CONF_LATE_NIGHT_CONDITION_TYPE,
     CONF_LATE_NIGHT_ENABLED,
     CONF_LATE_NIGHT_ENTITY,
@@ -63,11 +76,26 @@ from .const import (
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
     DEFAULT_CIRCADIAN_ENABLED,
+    DEFAULT_DECORATIONS_OFF_TIME,
+    DEFAULT_DECORATIONS_OFF_TRIGGER,
+    DEFAULT_DECORATIONS_ON_TRIGGER,
+    DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN,
+    DEFAULT_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
+    DEFAULT_EXTERIOR_BASELINE_KELVIN,
+    DEFAULT_EXTERIOR_DUSK_TO_DAWN_ENABLED,
+    DEFAULT_EXTERIOR_LIGHTS,
+    DEFAULT_EXTERIOR_OFF_TIME,
+    DEFAULT_EXTERIOR_OFF_TRIGGER,
+    DEFAULT_EXTERIOR_ON_TIME,
+    DEFAULT_EXTERIOR_ON_TRIGGER,
+    DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN,
+    DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN,
     DEFAULT_HOLIDAY_DECORATIONS_ENABLED,
     DEFAULT_HOLIDAY_GLOBAL_DECORATIONS,
     DEFAULT_HOLIDAY_GLOBAL_LABEL,
     DEFAULT_HOLIDAY_GLOBAL_LIGHTS,
     DEFAULT_HOLIDAY_HOME_STATE_ENTITY,
+    DEFAULT_HOLIDAY_LATE_NIGHT_BEHAVIOR,
     DEFAULT_HOLIDAY_LIGHTING_ENABLED,
     DEFAULT_HOLIDAY_OFF_TIME,
     DEFAULT_HOLIDAY_OFF_TRIGGER,
@@ -638,16 +666,27 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def async_step_holiday_menu(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
-        """Main menu for Holiday Lighting options."""
+        """Main menu for Holiday & Exterior Lighting options."""
         return self.async_show_menu(
             step_id="holiday_menu",
-            menu_options=["holiday_global_settings", "holiday_select", "holiday_reset"],
+            menu_options=[
+                "holiday_exterior_settings",
+                "holiday_decoration_settings",
+                "holiday_select",
+                "holiday_reset",
+            ],
         )
 
     async def async_step_holiday_global_settings(
         self, user_input: Optional[Dict[str, Any]] = None
     ) -> config_entries.ConfigFlowResult:
-        """Configure global holiday lighting triggers, participating lights, and decoration plugs."""
+        """Redirect legacy global settings to exterior settings."""
+        return await self.async_step_holiday_exterior_settings(user_input)
+
+    async def async_step_holiday_exterior_settings(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> config_entries.ConfigFlowResult:
+        """Configure year-round dusk-to-dawn exterior lighting settings."""
         holiday_store = self.hass.data.get(DOMAIN, {}).get("holiday_store")
         if not holiday_store:
             return self.async_abort(reason="store_unavailable")
@@ -665,19 +704,108 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
         schema = vol.Schema(
             {
                 vol.Required(
-                    CONF_HOLIDAY_LIGHTING_ENABLED,
-                    default=opts.get(CONF_HOLIDAY_LIGHTING_ENABLED, DEFAULT_HOLIDAY_LIGHTING_ENABLED),
+                    CONF_EXTERIOR_DUSK_TO_DAWN_ENABLED,
+                    default=opts.get(CONF_EXTERIOR_DUSK_TO_DAWN_ENABLED, DEFAULT_EXTERIOR_DUSK_TO_DAWN_ENABLED),
                 ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_EXTERIOR_LIGHTS,
+                    default=opts.get(CONF_EXTERIOR_LIGHTS, DEFAULT_EXTERIOR_LIGHTS),
+                ): OptionalEntitySelector(
+                    selector.EntitySelectorConfig(domain="light", multiple=True)
+                ),
+                vol.Required(
+                    CONF_EXTERIOR_ON_TRIGGER,
+                    default=opts.get(CONF_EXTERIOR_ON_TRIGGER, DEFAULT_EXTERIOR_ON_TRIGGER),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="sunset", label="At Sunset (with Offset)"),
+                            selector.SelectOptionDict(value="fixed_time", label="At Specific Time"),
+                        ]
+                    )
+                ),
+                vol.Optional(
+                    CONF_EXTERIOR_SUNSET_OFFSET_MIN,
+                    default=opts.get(CONF_EXTERIOR_SUNSET_OFFSET_MIN, DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=-120, max=120, step=5, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_EXTERIOR_ON_TIME,
+                    default=opts.get(CONF_EXTERIOR_ON_TIME, DEFAULT_EXTERIOR_ON_TIME),
+                ): OptionalTimeSelector(),
+                vol.Required(
+                    CONF_EXTERIOR_OFF_TRIGGER,
+                    default=opts.get(CONF_EXTERIOR_OFF_TRIGGER, DEFAULT_EXTERIOR_OFF_TRIGGER),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="sunrise", label="At Sunrise (with Offset)"),
+                            selector.SelectOptionDict(value="fixed_time", label="At Specific Time"),
+                        ]
+                    )
+                ),
+                vol.Optional(
+                    CONF_EXTERIOR_SUNRISE_OFFSET_MIN,
+                    default=opts.get(CONF_EXTERIOR_SUNRISE_OFFSET_MIN, DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=-120, max=120, step=5, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(
+                    CONF_EXTERIOR_OFF_TIME,
+                    default=opts.get(CONF_EXTERIOR_OFF_TIME, DEFAULT_EXTERIOR_OFF_TIME),
+                ): OptionalTimeSelector(),
+                vol.Required(
+                    CONF_EXTERIOR_BASELINE_KELVIN,
+                    default=opts.get(CONF_EXTERIOR_BASELINE_KELVIN, DEFAULT_EXTERIOR_BASELINE_KELVIN),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=2000, max=6500, step=50, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Required(
+                    CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
+                    default=opts.get(CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT, DEFAULT_EXTERIOR_BASELINE_BRIGHTNESS_PCT),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
+                ),
+                vol.Required(
+                    CONF_HOLIDAY_LATE_NIGHT_BEHAVIOR,
+                    default=opts.get(CONF_HOLIDAY_LATE_NIGHT_BEHAVIOR, DEFAULT_HOLIDAY_LATE_NIGHT_BEHAVIOR),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="all_night", label="All Night (Keep Holiday Scene Until Sunrise)"),
+                            selector.SelectOptionDict(value="revert_to_baseline_at_sleep", label="Revert to Warm White Baseline at Sleep"),
+                        ]
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(step_id="holiday_exterior_settings", data_schema=schema)
+
+    async def async_step_holiday_decoration_settings(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> config_entries.ConfigFlowResult:
+        """Configure holiday outdoor decoration plug schedule and triggers."""
+        holiday_store = self.hass.data.get(DOMAIN, {}).get("holiday_store")
+        if not holiday_store:
+            return self.async_abort(reason="store_unavailable")
+
+        opts = holiday_store.options
+
+        if user_input is not None:
+            holiday_store.update_options(user_input)
+            await holiday_store.async_save()
+            coordinator = self.hass.data.get(DOMAIN, {}).get("holiday_coordinator")
+            if coordinator:
+                self.hass.async_create_task(coordinator._async_evaluate_schedule_trigger())
+            return self.async_create_entry(title="", data={})
+
+        schema = vol.Schema(
+            {
                 vol.Required(
                     CONF_HOLIDAY_DECORATIONS_ENABLED,
                     default=opts.get(CONF_HOLIDAY_DECORATIONS_ENABLED, DEFAULT_HOLIDAY_DECORATIONS_ENABLED),
                 ): selector.BooleanSelector(),
-                vol.Optional(
-                    CONF_HOLIDAY_GLOBAL_LIGHTS,
-                    default=opts.get(CONF_HOLIDAY_GLOBAL_LIGHTS, DEFAULT_HOLIDAY_GLOBAL_LIGHTS),
-                ): OptionalEntitySelector(
-                    selector.EntitySelectorConfig(domain="light", multiple=True)
-                ),
                 vol.Optional(
                     CONF_HOLIDAY_GLOBAL_DECORATIONS,
                     default=opts.get(CONF_HOLIDAY_GLOBAL_DECORATIONS, DEFAULT_HOLIDAY_GLOBAL_DECORATIONS),
@@ -688,6 +816,39 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                     CONF_HOLIDAY_GLOBAL_LABEL,
                     default=opts.get(CONF_HOLIDAY_GLOBAL_LABEL, DEFAULT_HOLIDAY_GLOBAL_LABEL),
                 ): selector.TextSelector(),
+                vol.Required(
+                    CONF_DECORATIONS_ON_TRIGGER,
+                    default=opts.get(CONF_DECORATIONS_ON_TRIGGER, DEFAULT_DECORATIONS_ON_TRIGGER),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="sunset", label="At Sunset (with Offset)"),
+                            selector.SelectOptionDict(value="fixed_time", label="At Specific Time"),
+                        ]
+                    )
+                ),
+                vol.Optional(
+                    CONF_DECORATIONS_SUNSET_OFFSET_MIN,
+                    default=opts.get(CONF_DECORATIONS_SUNSET_OFFSET_MIN, DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=-120, max=120, step=5, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Required(
+                    CONF_DECORATIONS_OFF_TRIGGER,
+                    default=opts.get(CONF_DECORATIONS_OFF_TRIGGER, DEFAULT_DECORATIONS_OFF_TRIGGER),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="sleep", label="When Home State is Sleep (Bedtime)"),
+                            selector.SelectOptionDict(value="sunrise", label="At Sunrise"),
+                            selector.SelectOptionDict(value="fixed_time", label="At Specific Cutoff Time"),
+                        ]
+                    )
+                ),
+                vol.Optional(
+                    CONF_DECORATIONS_OFF_TIME,
+                    default=opts.get(CONF_DECORATIONS_OFF_TIME, DEFAULT_DECORATIONS_OFF_TIME),
+                ): OptionalTimeSelector(),
                 vol.Optional(
                     CONF_HOLIDAY_HOME_STATE_ENTITY,
                     default=opts.get(CONF_HOLIDAY_HOME_STATE_ENTITY, DEFAULT_HOLIDAY_HOME_STATE_ENTITY),
@@ -695,28 +856,12 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                     selector.EntitySelectorConfig(domain="input_select")
                 ),
                 vol.Required(
-                    CONF_HOLIDAY_OFF_TRIGGER,
-                    default=opts.get(CONF_HOLIDAY_OFF_TRIGGER, DEFAULT_HOLIDAY_OFF_TRIGGER),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            selector.SelectOptionDict(value="sleep", label="When Home State is Sleep (Bedtime)"),
-                            selector.SelectOptionDict(value="sunrise", label="At Sunrise"),
-                            selector.SelectOptionDict(value="fixed_time", label="At Specific Time"),
-                        ]
-                    )
-                ),
-                vol.Optional(
-                    CONF_HOLIDAY_OFF_TIME,
-                    default=opts.get(CONF_HOLIDAY_OFF_TIME, DEFAULT_HOLIDAY_OFF_TIME),
-                ): OptionalTimeSelector(),
-                vol.Required(
                     CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION,
                     default=opts.get(CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION, DEFAULT_HOLIDAY_RESPECT_PRESENCE_SIMULATION),
                 ): selector.BooleanSelector(),
             }
         )
-        return self.async_show_form(step_id="holiday_global_settings", data_schema=schema)
+        return self.async_show_form(step_id="holiday_decoration_settings", data_schema=schema)
 
     async def async_step_holiday_select(
         self, user_input: Optional[Dict[str, Any]] = None

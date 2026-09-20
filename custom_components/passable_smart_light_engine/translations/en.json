@@ -295,23 +295,41 @@
         "title": "Holiday Lighting Configuration",
         "description": "Manage scheduled holidays, lighting scenes, and outdoor decoration plugs.",
         "menu_options": {
-          "holiday_global_settings": "Global Lighting & Schedule Settings",
+          "holiday_exterior_settings": "Exterior Dusk-to-Dawn Lighting",
+          "holiday_decoration_settings": "Holiday Outdoor Decorations",
           "holiday_select": "Customize or Add Holidays",
           "holiday_reset": "Reset Catalog to Factory Defaults"
         }
       },
-      "holiday_global_settings": {
-        "title": "Global Holiday Lighting Settings",
-        "description": "Configure general holiday lighting behavior, participating entities, and automatic schedule triggers.",
+      "holiday_exterior_settings": {
+        "title": "Exterior Dusk-to-Dawn Lighting Settings",
+        "description": "Configure year-round dusk-to-dawn exterior lighting, baseline warm white, triggers, and late-night holiday behavior.",
         "data": {
-          "holiday_lighting_enabled": "Enable Holiday Lighting Automation",
+          "exterior_dusk_to_dawn_enabled": "Enable Year-Round Dusk-to-Dawn Lighting",
+          "exterior_lights": "Participating Exterior Lights (e.g. Front Porch)",
+          "exterior_on_trigger": "Evening Turn-On Trigger",
+          "exterior_sunset_offset_min": "Sunset Offset in Minutes (e.g. -30 for 30m before sunset)",
+          "exterior_on_time": "Turn-On Time (if fixed time)",
+          "exterior_off_trigger": "Morning Turn-Off Trigger",
+          "exterior_sunrise_offset_min": "Sunrise Offset in Minutes (e.g. +30 for 30m after sunrise)",
+          "exterior_off_time": "Turn-Off Time (if fixed time)",
+          "exterior_baseline_kelvin": "Baseline Warm White Color Temp (Kelvin)",
+          "exterior_baseline_brightness_pct": "Baseline Brightness %",
+          "holiday_late_night_behavior": "Late-Night Holiday Transition"
+        }
+      },
+      "holiday_decoration_settings": {
+        "title": "Outdoor Holiday Decorations Settings",
+        "description": "Configure automatic schedules and smart plugs for outdoor holiday decorations.",
+        "data": {
           "holiday_decorations_enabled": "Enable Holiday Decoration Plugs Automation",
-          "holiday_global_lights": "Default Participating Lights",
-          "holiday_global_decorations": "Default Participating Decoration Plugs",
-          "holiday_global_label": "Target Holiday Light Label",
+          "holiday_global_decorations": "Participating Smart Plugs",
+          "holiday_global_label": "Target Decoration Plug Label",
+          "decorations_on_trigger": "Turn-On Trigger",
+          "decorations_sunset_offset_min": "Sunset Offset in Minutes",
+          "decorations_off_trigger": "Evening Turn-Off Trigger",
+          "decorations_off_time": "Turn-Off Cutoff Time (if fixed time)",
           "holiday_home_state_entity": "Home State Entity (input_select)",
-          "holiday_off_trigger": "Evening Turn-Off Trigger",
-          "holiday_off_time": "Turn-Off Time (if fixed time)",
           "holiday_respect_presence_simulation": "Respect Presence Simulation (Don't override away mode)"
         }
       },
@@ -394,6 +412,9 @@
       },
       "holiday_decorations": {
         "name": "Holiday Decorations"
+      },
+      "exterior_lighting": {
+        "name": "Exterior Dusk-to-Dawn Lighting"
       }
     },
     "sensor": {

@@ -172,6 +172,25 @@ CONF_HOLIDAY_OFF_TRIGGER = "holiday_off_trigger"
 CONF_HOLIDAY_OFF_TIME = "holiday_off_time"
 CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION = "holiday_respect_presence_simulation"
 
+# Dusk-to-Dawn Exterior Lighting configuration keys
+CONF_EXTERIOR_DUSK_TO_DAWN_ENABLED = "exterior_dusk_to_dawn_enabled"
+CONF_EXTERIOR_LIGHTS = "exterior_lights"
+CONF_EXTERIOR_ON_TRIGGER = "exterior_on_trigger"
+CONF_EXTERIOR_SUNSET_OFFSET_MIN = "exterior_sunset_offset_min"
+CONF_EXTERIOR_ON_TIME = "exterior_on_time"
+CONF_EXTERIOR_OFF_TRIGGER = "exterior_off_trigger"
+CONF_EXTERIOR_SUNRISE_OFFSET_MIN = "exterior_sunrise_offset_min"
+CONF_EXTERIOR_OFF_TIME = "exterior_off_time"
+CONF_EXTERIOR_BASELINE_KELVIN = "exterior_baseline_kelvin"
+CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT = "exterior_baseline_brightness_pct"
+CONF_HOLIDAY_LATE_NIGHT_BEHAVIOR = "holiday_late_night_behavior"
+
+# Decoration Plugs configuration keys
+CONF_DECORATIONS_ON_TRIGGER = "decorations_on_trigger"
+CONF_DECORATIONS_SUNSET_OFFSET_MIN = "decorations_sunset_offset_min"
+CONF_DECORATIONS_OFF_TRIGGER = "decorations_off_trigger"
+CONF_DECORATIONS_OFF_TIME = "decorations_off_time"
+
 # Holiday Lighting defaults
 DEFAULT_HOLIDAY_LIGHTING_ENABLED = True
 DEFAULT_HOLIDAY_DECORATIONS_ENABLED = True
@@ -185,8 +204,27 @@ DEFAULT_HOLIDAY_OFF_TRIGGER = "sleep"
 DEFAULT_HOLIDAY_OFF_TIME = "23:00:00"
 DEFAULT_HOLIDAY_RESPECT_PRESENCE_SIMULATION = True
 
+# Dusk-to-Dawn Exterior Lighting defaults
+DEFAULT_EXTERIOR_DUSK_TO_DAWN_ENABLED = True
+DEFAULT_EXTERIOR_LIGHTS = ["light.front_porch"]
+DEFAULT_EXTERIOR_ON_TRIGGER = "sunset"
+DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN = -30
+DEFAULT_EXTERIOR_ON_TIME = "18:00:00"
+DEFAULT_EXTERIOR_OFF_TRIGGER = "sunrise"
+DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN = 30
+DEFAULT_EXTERIOR_OFF_TIME = "06:00:00"
+DEFAULT_EXTERIOR_BASELINE_KELVIN = 2000
+DEFAULT_EXTERIOR_BASELINE_BRIGHTNESS_PCT = 100
+DEFAULT_HOLIDAY_LATE_NIGHT_BEHAVIOR = "all_night"
+
+DEFAULT_DECORATIONS_ON_TRIGGER = "sunset"
+DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN = 0
+DEFAULT_DECORATIONS_OFF_TRIGGER = "sleep"
+DEFAULT_DECORATIONS_OFF_TIME = "23:00:00"
+
 # Holiday Lighting modes & settings
 MODE_HOLIDAY = "holiday"
+MODE_EXTERIOR_BASELINE = "exterior_baseline"
 LIGHT_MODE_HUE_SCENE = "hue_scene"
 LIGHT_MODE_EFFECT = "effect"
 LIGHT_MODE_RGB = "rgb"
@@ -198,6 +236,8 @@ HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID = "switch.holiday_lighting"
 HOLIDAY_LIGHTING_MASTER_SWITCH_UNIQUE_ID = "passable_holiday_lighting_master"
 HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID = "switch.holiday_decorations"
 HOLIDAY_DECORATIONS_SWITCH_UNIQUE_ID = "passable_holiday_decorations_switch"
+EXTERIOR_LIGHTING_SWITCH_ENTITY_ID = "switch.exterior_dusk_to_dawn_lighting"
+EXTERIOR_LIGHTING_SWITCH_UNIQUE_ID = "passable_exterior_lighting_switch"
 ACTIVE_HOLIDAY_SENSOR_ENTITY_ID = "sensor.active_holiday"
 ACTIVE_HOLIDAY_SENSOR_UNIQUE_ID = "passable_active_holiday"
 

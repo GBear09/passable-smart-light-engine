@@ -15,6 +15,8 @@ from .const import (
     CONF_ROOM_ID,
     CONF_SIMULATION_ENABLED,
     DOMAIN,
+    EXTERIOR_LIGHTING_SWITCH_ENTITY_ID,
+    EXTERIOR_LIGHTING_SWITCH_UNIQUE_ID,
     HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID,
     HOLIDAY_DECORATIONS_SWITCH_UNIQUE_ID,
     HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID,
@@ -48,8 +50,13 @@ async def async_setup_entry(
         if holiday_coord:
             master_sw = PassableHolidayLightingMasterSwitch(entry, holiday_coord)
             decor_sw = PassableHolidayDecorationsSwitch(entry, holiday_coord)
-            holiday_coord.register_entities(master_switch=master_sw, decor_switch=decor_sw)
-            async_add_entities([master_sw, decor_sw])
+            exterior_sw = PassableExteriorLightingSwitch(entry, holiday_coord)
+            holiday_coord.register_entities(
+                master_switch=master_sw,
+                decor_switch=decor_sw,
+                exterior_switch=exterior_sw,
+            )
+            async_add_entities([master_sw, decor_sw, exterior_sw])
         return
 
     controllers = data["controllers"]
@@ -343,13 +350,13 @@ class PassableHolidayLightingMasterSwitch(SwitchEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device info linking this entity to the Holiday Lighting device."""
+        """Return device info linking this entity to the Holiday & Exterior Lighting device."""
         return DeviceInfo(
             identifiers={(DOMAIN, "holiday_lighting")},
-            name="Holiday Lighting",
+            name="Holiday & Exterior Lighting",
             manufacturer="Passable",
-            model="Holiday Lighting Subsystem",
-            sw_version="1.0.0",
+            model="Holiday & Exterior Lighting Subsystem",
+            sw_version="2.4.0",
         )
 
     @property
@@ -395,13 +402,13 @@ class PassableHolidayDecorationsSwitch(SwitchEntity):
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return device info linking this entity to the Holiday Lighting device."""
+        """Return device info linking this entity to the Holiday & Exterior Lighting device."""
         return DeviceInfo(
             identifiers={(DOMAIN, "holiday_lighting")},
-            name="Holiday Lighting",
+            name="Holiday & Exterior Lighting",
             manufacturer="Passable",
-            model="Holiday Lighting Subsystem",
-            sw_version="1.0.0",
+            model="Holiday & Exterior Lighting Subsystem",
+            sw_version="2.4.0",
         )
 
     @property
@@ -426,4 +433,54 @@ class PassableHolidayDecorationsSwitch(SwitchEntity):
             "active_decorations": self._coordinator.active_decorations,
             "active_decorations_count": len(self._coordinator.active_decorations),
         }
+
+
+class PassableExteriorLightingSwitch(SwitchEntity):
+    """Toggle switch specifically for dusk-to-dawn exterior lighting."""
+
+    def __init__(self, entry: ConfigEntry, coordinator: Any) -> None:
+        """Initialize exterior dusk-to-dawn lighting switch."""
+        self._entry = entry
+        self._coordinator = coordinator
+        self.entity_id = EXTERIOR_LIGHTING_SWITCH_ENTITY_ID
+        self._attr_unique_id = EXTERIOR_LIGHTING_SWITCH_UNIQUE_ID
+        self._attr_name = "Exterior Dusk-to-Dawn Lighting"
+        self._attr_icon = "mdi:weather-sunset-down"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking this entity to the Holiday & Exterior Lighting device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "holiday_lighting")},
+            name="Holiday & Exterior Lighting",
+            manufacturer="Passable",
+            model="Holiday & Exterior Lighting Subsystem",
+            sw_version="2.4.0",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if exterior dusk-to-dawn lighting is enabled."""
+        return self._coordinator.exterior_enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn on exterior dusk-to-dawn lighting."""
+        await self._coordinator.async_set_exterior_enabled(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off exterior dusk-to-dawn lighting."""
+        await self._coordinator.async_set_exterior_enabled(False)
+        self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose exterior lighting attributes."""
+        return {
+            "exterior_active": self._coordinator.is_exterior_active,
+            "baseline_active": self._coordinator.is_baseline_active,
+            "holiday_active": self._coordinator.is_holiday_active_now,
+            "participating_exterior_lights": self._coordinator.resolve_exterior_lights(),
+        }
+
 

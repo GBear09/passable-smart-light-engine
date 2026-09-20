@@ -20,22 +20,52 @@ import homeassistant.util.dt as dt_util
 
 from .const import (
     ACTIVE_HOLIDAY_SENSOR_ENTITY_ID,
+    CONF_DECORATIONS_OFF_TIME,
+    CONF_DECORATIONS_OFF_TRIGGER,
+    CONF_DECORATIONS_ON_TRIGGER,
+    CONF_DECORATIONS_SUNSET_OFFSET_MIN,
+    CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
+    CONF_EXTERIOR_BASELINE_KELVIN,
+    CONF_EXTERIOR_DUSK_TO_DAWN_ENABLED,
+    CONF_EXTERIOR_LIGHTS,
+    CONF_EXTERIOR_OFF_TIME,
+    CONF_EXTERIOR_OFF_TRIGGER,
+    CONF_EXTERIOR_ON_TIME,
+    CONF_EXTERIOR_ON_TRIGGER,
+    CONF_EXTERIOR_SUNRISE_OFFSET_MIN,
+    CONF_EXTERIOR_SUNSET_OFFSET_MIN,
     CONF_HOLIDAY_DECORATIONS_ENABLED,
     CONF_HOLIDAY_GLOBAL_DECORATIONS,
     CONF_HOLIDAY_GLOBAL_LABEL,
     CONF_HOLIDAY_GLOBAL_LIGHTS,
     CONF_HOLIDAY_HOME_STATE_ENTITY,
+    CONF_HOLIDAY_LATE_NIGHT_BEHAVIOR,
     CONF_HOLIDAY_LIGHTING_ENABLED,
     CONF_HOLIDAY_OFF_TIME,
     CONF_HOLIDAY_OFF_TRIGGER,
     CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION,
     CONF_HOLIDAY_SUNRISE_OFFSET_MIN,
     CONF_HOLIDAY_SUNSET_OFFSET_MIN,
+    DEFAULT_DECORATIONS_OFF_TIME,
+    DEFAULT_DECORATIONS_OFF_TRIGGER,
+    DEFAULT_DECORATIONS_ON_TRIGGER,
+    DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN,
+    DEFAULT_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
+    DEFAULT_EXTERIOR_BASELINE_KELVIN,
+    DEFAULT_EXTERIOR_DUSK_TO_DAWN_ENABLED,
+    DEFAULT_EXTERIOR_LIGHTS,
+    DEFAULT_EXTERIOR_OFF_TIME,
+    DEFAULT_EXTERIOR_OFF_TRIGGER,
+    DEFAULT_EXTERIOR_ON_TIME,
+    DEFAULT_EXTERIOR_ON_TRIGGER,
+    DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN,
+    DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN,
     DEFAULT_HOLIDAY_DECORATIONS_ENABLED,
     DEFAULT_HOLIDAY_GLOBAL_DECORATIONS,
     DEFAULT_HOLIDAY_GLOBAL_LABEL,
     DEFAULT_HOLIDAY_GLOBAL_LIGHTS,
     DEFAULT_HOLIDAY_HOME_STATE_ENTITY,
+    DEFAULT_HOLIDAY_LATE_NIGHT_BEHAVIOR,
     DEFAULT_HOLIDAY_LIGHTING_ENABLED,
     DEFAULT_HOLIDAY_OFF_TIME,
     DEFAULT_HOLIDAY_OFF_TRIGGER,
@@ -44,6 +74,7 @@ from .const import (
     DEFAULT_HOLIDAY_SUNSET_OFFSET_MIN,
     DEFAULT_HOLIDAYS,
     DOMAIN,
+    EXTERIOR_LIGHTING_SWITCH_ENTITY_ID,
     HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID,
     HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID,
     HOLIDAY_STORAGE_KEY,
@@ -52,6 +83,7 @@ from .const import (
     LIGHT_MODE_EFFECT,
     LIGHT_MODE_HUE_SCENE,
     LIGHT_MODE_RGB,
+    MODE_EXTERIOR_BASELINE,
     MODE_HOLIDAY,
 )
 
@@ -101,6 +133,23 @@ class HolidayStore:
                 CONF_HOLIDAY_OFF_TRIGGER: DEFAULT_HOLIDAY_OFF_TRIGGER,
                 CONF_HOLIDAY_OFF_TIME: DEFAULT_HOLIDAY_OFF_TIME,
                 CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION: DEFAULT_HOLIDAY_RESPECT_PRESENCE_SIMULATION,
+                # Dusk-to-Dawn Exterior Settings
+                CONF_EXTERIOR_DUSK_TO_DAWN_ENABLED: DEFAULT_EXTERIOR_DUSK_TO_DAWN_ENABLED,
+                CONF_EXTERIOR_LIGHTS: copy.deepcopy(DEFAULT_EXTERIOR_LIGHTS),
+                CONF_EXTERIOR_ON_TRIGGER: DEFAULT_EXTERIOR_ON_TRIGGER,
+                CONF_EXTERIOR_SUNSET_OFFSET_MIN: DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN,
+                CONF_EXTERIOR_ON_TIME: DEFAULT_EXTERIOR_ON_TIME,
+                CONF_EXTERIOR_OFF_TRIGGER: DEFAULT_EXTERIOR_OFF_TRIGGER,
+                CONF_EXTERIOR_SUNRISE_OFFSET_MIN: DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN,
+                CONF_EXTERIOR_OFF_TIME: DEFAULT_EXTERIOR_OFF_TIME,
+                CONF_EXTERIOR_BASELINE_KELVIN: DEFAULT_EXTERIOR_BASELINE_KELVIN,
+                CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT: DEFAULT_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
+                CONF_HOLIDAY_LATE_NIGHT_BEHAVIOR: DEFAULT_HOLIDAY_LATE_NIGHT_BEHAVIOR,
+                # Decoration Plugs Schedule
+                CONF_DECORATIONS_ON_TRIGGER: DEFAULT_DECORATIONS_ON_TRIGGER,
+                CONF_DECORATIONS_SUNSET_OFFSET_MIN: DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN,
+                CONF_DECORATIONS_OFF_TRIGGER: DEFAULT_DECORATIONS_OFF_TRIGGER,
+                CONF_DECORATIONS_OFF_TIME: DEFAULT_DECORATIONS_OFF_TIME,
             },
             "holidays": copy.deepcopy(DEFAULT_HOLIDAYS),
         }
@@ -188,15 +237,20 @@ class HolidayLightingCoordinator:
         self.store = store
 
         self._is_active: bool = False
+        self._is_exterior_active: bool = False
+        self._is_baseline_active: bool = False
+        self._is_holiday_active: bool = False
         self._active_holiday: Optional[Dict[str, Any]] = None
         self._preview_holiday: Optional[Dict[str, Any]] = None
         self._active_lights: Set[str] = set()
         self._active_decorations: Set[str] = set()
         self._unsub_listeners: List[CALLBACK_TYPE] = []
         self._midnight_unsub: Optional[CALLBACK_TYPE] = None
+        self._solar_unsub: Optional[CALLBACK_TYPE] = None
 
         self._master_switch_entity: Any = None
         self._decorations_switch_entity: Any = None
+        self._exterior_switch_entity: Any = None
         self._sensor_entity: Any = None
 
     @property
@@ -211,8 +265,22 @@ class HolidayLightingCoordinator:
         self.store.update_options({CONF_HOLIDAY_LIGHTING_ENABLED: enabled})
         await self.store.async_save()
         _LOGGER.info("PassableSmartLighting: Holiday lighting enabled changed to %s", enabled)
-        if not enabled and self._is_active:
-            await self.async_turn_off_holiday_lighting()
+        await self._async_evaluate_schedule_trigger()
+        self._update_entities()
+
+    @property
+    def exterior_enabled(self) -> bool:
+        """Return True if exterior dusk-to-dawn lighting feature is enabled."""
+        return bool(self.store.options.get(CONF_EXTERIOR_DUSK_TO_DAWN_ENABLED, DEFAULT_EXTERIOR_DUSK_TO_DAWN_ENABLED))
+
+    async def async_set_exterior_enabled(self, enabled: bool) -> None:
+        """Enable or disable exterior dusk-to-dawn lighting."""
+        if self.exterior_enabled == enabled:
+            return
+        self.store.update_options({CONF_EXTERIOR_DUSK_TO_DAWN_ENABLED: enabled})
+        await self.store.async_save()
+        _LOGGER.info("PassableSmartLighting: Exterior dusk-to-dawn enabled changed to %s", enabled)
+        await self._async_evaluate_schedule_trigger()
         self._update_entities()
 
     @property
@@ -227,16 +295,28 @@ class HolidayLightingCoordinator:
         self.store.update_options({CONF_HOLIDAY_DECORATIONS_ENABLED: enabled})
         await self.store.async_save()
         _LOGGER.info("PassableSmartLighting: Holiday decorations enabled changed to %s", enabled)
-        if not enabled and self._active_decorations:
-            await self._async_turn_off_decorations()
-        elif enabled and self._is_active:
-            await self._async_turn_on_decorations()
+        await self._async_evaluate_schedule_trigger()
         self._update_entities()
 
     @property
     def is_active(self) -> bool:
-        """Return True if holiday lighting is currently active."""
+        """Return True if holiday or exterior lighting is currently active."""
         return self._is_active
+
+    @property
+    def is_exterior_active(self) -> bool:
+        """Return True if dusk-to-dawn exterior lighting is currently on."""
+        return self._is_exterior_active
+
+    @property
+    def is_baseline_active(self) -> bool:
+        """Return True if non-holiday baseline warm-white lighting is active."""
+        return self._is_baseline_active
+
+    @property
+    def is_holiday_active_now(self) -> bool:
+        """Return True if a holiday dynamic scene/effect is currently active."""
+        return self._is_holiday_active
 
     @property
     def active_holiday(self) -> Optional[Dict[str, Any]]:
@@ -245,7 +325,7 @@ class HolidayLightingCoordinator:
 
     @property
     def active_lights(self) -> List[str]:
-        """Return list of light entities currently controlled by holiday lighting."""
+        """Return list of light entities currently controlled by holiday or exterior lighting."""
         return sorted(list(self._active_lights))
 
     @property
@@ -254,12 +334,18 @@ class HolidayLightingCoordinator:
         return sorted(list(self._active_decorations))
 
     def is_light_active(self, entity_id: Optional[str]) -> bool:
-        """Check if an entity is currently actively controlled by holiday lighting."""
+        """Check if an entity is currently actively controlled by holiday or exterior lighting."""
         if not entity_id or not self._is_active:
             return False
         return entity_id in self._active_lights
 
-    def register_entities(self, master_switch: Any = None, decor_switch: Any = None, sensor: Any = None) -> None:
+    def register_entities(
+        self,
+        master_switch: Any = None,
+        decor_switch: Any = None,
+        sensor: Any = None,
+        exterior_switch: Any = None,
+    ) -> None:
         """Link entity objects for live state updates."""
         if master_switch:
             self._master_switch_entity = master_switch
@@ -267,6 +353,8 @@ class HolidayLightingCoordinator:
             self._decorations_switch_entity = decor_switch
         if sensor:
             self._sensor_entity = sensor
+        if exterior_switch:
+            self._exterior_switch_entity = exterior_switch
 
     def _update_entities(self) -> None:
         """Notify registered entities to refresh HA state."""
@@ -274,6 +362,8 @@ class HolidayLightingCoordinator:
             self._master_switch_entity.async_write_ha_state()
         if self._decorations_switch_entity:
             self._decorations_switch_entity.async_write_ha_state()
+        if self._exterior_switch_entity:
+            self._exterior_switch_entity.async_write_ha_state()
         if self._sensor_entity:
             self._sensor_entity.async_write_ha_state()
 
@@ -361,79 +451,27 @@ class HolidayLightingCoordinator:
 
         self._midnight_unsub = async_call_later(self.hass, max(5.0, delay), _midnight_fired)
 
-    async def _async_evaluate_schedule_trigger(self) -> None:
-        """Evaluate if holiday lights should turn on, turn off, or update."""
-        if not self.enabled:
-            if self._is_active:
-                await self.async_turn_off_holiday_lighting()
-            return
+    def resolve_exterior_lights(self) -> List[str]:
+        """Resolve participating exterior dusk-to-dawn lights."""
+        lights = self.store.options.get(CONF_EXTERIOR_LIGHTS, DEFAULT_EXTERIOR_LIGHTS)
+        if isinstance(lights, str):
+            lights = [lights]
+        resolved: Set[str] = set()
+        for item in lights or []:
+            if item and isinstance(item, str):
+                resolved.add(item.strip())
+        return sorted(list(resolved))
 
-        current_holiday = self.active_holiday
-        if not current_holiday:
-            if self._is_active:
-                await self.async_turn_off_holiday_lighting()
-            return
-
-        # Check conditions for turning on
-        sun_state = self.hass.states.get("sun.sun")
-        elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
-        is_sun_down = elev < -1.0  # At or below sunset
-
-        home_state_entity = self.store.options.get(CONF_HOLIDAY_HOME_STATE_ENTITY, DEFAULT_HOLIDAY_HOME_STATE_ENTITY)
-        home_state = None
-        if home_state_entity:
-            st = self.hass.states.get(home_state_entity)
-            if st and st.state:
-                home_state = str(st.state).lower()
-
-        # Home state sleep check
-        is_sleeping = home_state == "sleep"
-
-        # Check off trigger
-        off_trigger = self.store.options.get(CONF_HOLIDAY_OFF_TRIGGER, DEFAULT_HOLIDAY_OFF_TRIGGER)
-        should_be_on = False
-
-        if is_sun_down:
-            if off_trigger == "sleep":
-                should_be_on = not is_sleeping
-            elif off_trigger == "sunrise":
-                should_be_on = True
-            elif off_trigger == "fixed_time":
-                off_time_str = self.store.options.get(CONF_HOLIDAY_OFF_TIME, DEFAULT_HOLIDAY_OFF_TIME)
-                try:
-                    parts = off_time_str.split(":")
-                    off_time = dtime(int(parts[0]), int(parts[1]))
-                    now_time = dt_util.now().time()
-                    if now_time < off_time or elev < -15.0:
-                        should_be_on = True
-                except Exception:
-                    should_be_on = not is_sleeping
-            else:
-                should_be_on = not is_sleeping
-
-        if should_be_on and not self._is_active:
-            _LOGGER.info(
-                "PassableSmartLighting: Holiday schedule triggered ON for '%s'.",
-                current_holiday["name"],
-            )
-            await self.async_turn_on_holiday_lighting()
-        elif not should_be_on and self._is_active:
-            _LOGGER.info(
-                "PassableSmartLighting: Holiday schedule triggered OFF for '%s'.",
-                current_holiday["name"],
-            )
-            await self.async_turn_off_holiday_lighting()
-
-    def resolve_participating_lights(self, holiday: Dict[str, Any]) -> List[str]:
-        """Resolve all participating lights for a given holiday."""
-        lights = holiday.get("participating_lights") or self.store.options.get(
+    def resolve_participating_lights(self, holiday: Optional[Dict[str, Any]] = None) -> List[str]:
+        """Resolve all participating lights for a given holiday, falling back to exterior lights."""
+        lights = (holiday.get("participating_lights") if holiday else None) or self.store.options.get(
             CONF_HOLIDAY_GLOBAL_LIGHTS, DEFAULT_HOLIDAY_GLOBAL_LIGHTS
         )
         if isinstance(lights, str):
             lights = [lights]
 
         resolved: Set[str] = set()
-        for item in lights:
+        for item in lights or []:
             if item and isinstance(item, str):
                 resolved.add(item.strip())
 
@@ -445,18 +483,23 @@ class HolidayLightingCoordinator:
                 if entry.domain == "light" and not entry.disabled and target_label in entry.labels:
                     resolved.add(entry.entity_id)
 
+        # Fallback to exterior lights if no custom lights were set
+        if not resolved:
+            for ext in self.resolve_exterior_lights():
+                resolved.add(ext)
+
         return sorted(list(resolved))
 
-    def resolve_participating_decorations(self, holiday: Dict[str, Any]) -> List[str]:
+    def resolve_participating_decorations(self, holiday: Optional[Dict[str, Any]] = None) -> List[str]:
         """Resolve all participating decoration switches/plugs."""
-        decorations = holiday.get("participating_decorations") or self.store.options.get(
+        decorations = (holiday.get("participating_decorations") if holiday else None) or self.store.options.get(
             CONF_HOLIDAY_GLOBAL_DECORATIONS, DEFAULT_HOLIDAY_GLOBAL_DECORATIONS
         )
         if isinstance(decorations, str):
             decorations = [decorations]
 
         resolved: Set[str] = set()
-        for item in decorations:
+        for item in decorations or []:
             if item and isinstance(item, str):
                 resolved.add(item.strip())
 
@@ -468,6 +511,302 @@ class HolidayLightingCoordinator:
                     resolved.add(entry.entity_id)
 
         return sorted(list(resolved))
+
+    def _is_exterior_window_active(self, now: Optional[datetime] = None) -> bool:
+        """Determine if the exterior dusk-to-dawn lighting window is currently active."""
+        if not self.exterior_enabled:
+            return False
+
+        now_dt = now or dt_util.now()
+        on_trigger = self.store.options.get(CONF_EXTERIOR_ON_TRIGGER, DEFAULT_EXTERIOR_ON_TRIGGER)
+        off_trigger = self.store.options.get(CONF_EXTERIOR_OFF_TRIGGER, DEFAULT_EXTERIOR_OFF_TRIGGER)
+        sunset_offset = int(self.store.options.get(CONF_EXTERIOR_SUNSET_OFFSET_MIN, DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN))
+        sunrise_offset = int(self.store.options.get(CONF_EXTERIOR_SUNRISE_OFFSET_MIN, DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN))
+
+        if on_trigger == "fixed_time" and off_trigger == "fixed_time":
+            on_time_str = self.store.options.get(CONF_EXTERIOR_ON_TIME, DEFAULT_EXTERIOR_ON_TIME)
+            off_time_str = self.store.options.get(CONF_EXTERIOR_OFF_TIME, DEFAULT_EXTERIOR_OFF_TIME)
+            try:
+                on_p = on_time_str.split(":")
+                off_p = off_time_str.split(":")
+                t_on = dtime(int(on_p[0]), int(on_p[1]))
+                t_off = dtime(int(off_p[0]), int(off_p[1]))
+                curr_t = now_dt.time()
+                if t_on <= t_off:
+                    return t_on <= curr_t < t_off
+                else:
+                    return curr_t >= t_on or curr_t < t_off
+            except Exception as err:
+                _LOGGER.error("PassableSmartLighting: Error parsing exterior fixed times: %s", err)
+                return False
+
+        sun_state = self.hass.states.get("sun.sun")
+        if not sun_state:
+            return False
+
+        next_setting_str = sun_state.attributes.get("next_setting")
+        next_rising_str = sun_state.attributes.get("next_rising")
+        next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
+        next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
+        is_sun_below = sun_state.state == "below_horizon"
+
+        # Sun is below horizon (nighttime)
+        if is_sun_below:
+            if off_trigger == "sunrise" and next_rising:
+                cutoff = next_rising + timedelta(minutes=sunrise_offset)
+                return now_dt < cutoff
+            return True
+
+        # Sun is above horizon (daytime)
+        # Check dusk onset before sunset: e.g. 30m before sunset
+        if on_trigger == "sunset" and next_setting:
+            dusk_start = next_setting + timedelta(minutes=sunset_offset)
+            if now_dt >= dusk_start:
+                return True
+
+        # Check morning twilight window after sunrise: e.g. up to 30m after sunrise
+        if off_trigger == "sunrise" and sunrise_offset > 0 and next_rising:
+            approx_recent_rising = next_rising - timedelta(days=1)
+            morning_cutoff = approx_recent_rising + timedelta(minutes=sunrise_offset)
+            if approx_recent_rising - timedelta(minutes=5) <= now_dt < morning_cutoff:
+                return True
+
+        return False
+
+    def _is_decorations_window_active(self, now: Optional[datetime] = None) -> bool:
+        """Determine if the holiday outdoor decorations window is currently active."""
+        if not self.decorations_enabled:
+            return False
+        if not self.enabled:
+            return False
+        if not self.active_holiday:
+            return False
+
+        now_dt = now or dt_util.now()
+        on_trigger = self.store.options.get(CONF_DECORATIONS_ON_TRIGGER, DEFAULT_DECORATIONS_ON_TRIGGER)
+        off_trigger = self.store.options.get(CONF_DECORATIONS_OFF_TRIGGER, DEFAULT_DECORATIONS_OFF_TRIGGER)
+        sunset_offset = int(self.store.options.get(CONF_DECORATIONS_SUNSET_OFFSET_MIN, DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN))
+
+        # Check Bedtime / Sleep condition
+        if off_trigger == "sleep":
+            home_state_entity = self.store.options.get(CONF_HOLIDAY_HOME_STATE_ENTITY, DEFAULT_HOLIDAY_HOME_STATE_ENTITY)
+            if home_state_entity:
+                st = self.hass.states.get(home_state_entity)
+                if st and str(st.state).lower() == "sleep":
+                    return False
+
+        # Check Fixed Cutoff Time condition
+        if off_trigger == "fixed_time":
+            off_time_str = self.store.options.get(CONF_DECORATIONS_OFF_TIME, DEFAULT_DECORATIONS_OFF_TIME)
+            try:
+                parts = off_time_str.split(":")
+                t_off = dtime(int(parts[0]), int(parts[1]))
+                if now_dt.time() >= t_off and now_dt.hour >= 12:
+                    return False
+            except Exception:
+                pass
+
+        # Check On condition
+        if on_trigger == "sunset":
+            sun_state = self.hass.states.get("sun.sun")
+            if not sun_state:
+                return False
+            next_setting_str = sun_state.attributes.get("next_setting")
+            next_rising_str = sun_state.attributes.get("next_rising")
+            next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
+            next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
+            is_sun_below = sun_state.state == "below_horizon"
+
+            if is_sun_below:
+                if next_rising and now_dt >= next_rising:
+                    return False
+                return True
+
+            if next_setting:
+                dusk_start = next_setting + timedelta(minutes=sunset_offset)
+                if now_dt >= dusk_start:
+                    return True
+            return False
+
+        return True
+
+    def _schedule_next_solar_events(self) -> None:
+        """Schedule timer for next upcoming solar transition point."""
+        if self._solar_unsub:
+            try:
+                self._solar_unsub()
+            except Exception:
+                pass
+            self._solar_unsub = None
+
+        now = dt_util.now()
+        sun_state = self.hass.states.get("sun.sun")
+        if not sun_state:
+            return
+
+        next_setting_str = sun_state.attributes.get("next_setting")
+        next_rising_str = sun_state.attributes.get("next_rising")
+        next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
+        next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
+
+        ext_sunset_offset = int(self.store.options.get(CONF_EXTERIOR_SUNSET_OFFSET_MIN, DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN))
+        ext_sunrise_offset = int(self.store.options.get(CONF_EXTERIOR_SUNRISE_OFFSET_MIN, DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN))
+        dec_sunset_offset = int(self.store.options.get(CONF_DECORATIONS_SUNSET_OFFSET_MIN, DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN))
+
+        candidate_times: List[datetime] = []
+        if next_setting:
+            candidate_times.append(next_setting + timedelta(minutes=ext_sunset_offset))
+            candidate_times.append(next_setting + timedelta(minutes=dec_sunset_offset))
+        if next_rising:
+            candidate_times.append(next_rising + timedelta(minutes=ext_sunrise_offset))
+            candidate_times.append(next_rising)
+
+        future_times = [t for t in candidate_times if t > now]
+        if not future_times:
+            return
+
+        next_event = min(future_times)
+        delay = (next_event - now).total_seconds()
+        _LOGGER.debug(
+            "PassableSmartLighting: Next exterior/decorations schedule event in %.1fs (at %s)",
+            delay,
+            next_event.isoformat(),
+        )
+
+        @callback
+        def _solar_fired(_now: Any) -> None:
+            self.hass.async_create_task(self._async_evaluate_schedule_trigger())
+
+        self._solar_unsub = async_call_later(self.hass, max(2.0, delay), _solar_fired)
+
+    async def _async_turn_on_exterior_baseline(
+        self, lights: Optional[List[str]] = None, context: Optional[Context] = None
+    ) -> None:
+        """Actuate participating exterior lights with baseline warm white (e.g. 2000K)."""
+        target_lights = lights or self.resolve_exterior_lights()
+        if not target_lights:
+            return
+
+        ctx = context or Context()
+        self.engine.register_engine_context(ctx.id, ttl_sec=30.0)
+
+        kelvin = int(self.store.options.get(CONF_EXTERIOR_BASELINE_KELVIN, DEFAULT_EXTERIOR_BASELINE_KELVIN))
+        brightness_pct = int(
+            self.store.options.get(CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT, DEFAULT_EXTERIOR_BASELINE_BRIGHTNESS_PCT)
+        )
+
+        _LOGGER.info(
+            "PassableSmartLighting: Actuating exterior baseline (Kelvin=%d, Brightness=%d%%) across %d light(s).",
+            kelvin,
+            brightness_pct,
+            len(target_lights),
+        )
+
+        for light_id in target_lights:
+            if self.store.options.get(CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION, True):
+                if self.engine.is_simulating_presence(light_id):
+                    _LOGGER.debug(
+                        "PassableSmartLighting: Light '%s' is simulating presence; skipping baseline actuation.",
+                        light_id,
+                    )
+                    continue
+
+            self._active_lights.add(light_id)
+            try:
+                await self.hass.services.async_call(
+                    "light",
+                    "turn_on",
+                    {
+                        ATTR_ENTITY_ID: light_id,
+                        "color_temp_kelvin": kelvin,
+                        "brightness_pct": brightness_pct,
+                    },
+                    context=ctx,
+                )
+            except Exception as err:
+                _LOGGER.error("PassableSmartLighting: Failed to set exterior baseline on '%s': %s", light_id, err)
+
+        self._is_exterior_active = True
+        self._is_baseline_active = True
+        self._is_holiday_active = False
+        self._is_active = True
+        self._update_entities()
+
+    async def _async_evaluate_schedule_trigger(self) -> None:
+        """Evaluate exterior dusk-to-dawn lighting and holiday decorations independently."""
+        self._schedule_next_solar_events()
+
+        if self._preview_holiday is not None:
+            _LOGGER.debug("PassableSmartLighting: Holiday preview currently active; skipping schedule evaluation.")
+            return
+
+        now = dt_util.now()
+        exterior_active = self._is_exterior_window_active(now)
+        decorations_active = self._is_decorations_window_active(now)
+
+        current_holiday = self.active_holiday
+        holiday_engine_enabled = self.enabled
+
+        # Track A: Exterior Dusk-to-Dawn Lighting
+        if exterior_active:
+            # Exterior lights should be ON
+            home_state_entity = self.store.options.get(CONF_HOLIDAY_HOME_STATE_ENTITY, DEFAULT_HOLIDAY_HOME_STATE_ENTITY)
+            is_sleeping = False
+            if home_state_entity:
+                st = self.hass.states.get(home_state_entity)
+                if st and str(st.state).lower() == "sleep":
+                    is_sleeping = True
+
+            late_night_behavior = self.store.options.get(
+                CONF_HOLIDAY_LATE_NIGHT_BEHAVIOR, DEFAULT_HOLIDAY_LATE_NIGHT_BEHAVIOR
+            )
+
+            should_run_holiday = (
+                holiday_engine_enabled
+                and current_holiday is not None
+                and not (is_sleeping and late_night_behavior == "revert_to_baseline_at_sleep")
+            )
+
+            if should_run_holiday:
+                if not self._is_holiday_active:
+                    _LOGGER.info(
+                        "PassableSmartLighting: Exterior schedule activating Holiday '%s'.",
+                        current_holiday["name"],
+                    )
+                    await self.async_turn_on_holiday_lighting()
+            else:
+                if not self._is_baseline_active:
+                    _LOGGER.info("PassableSmartLighting: Exterior schedule activating Baseline Warm White.")
+                    await self._async_turn_on_exterior_baseline()
+        else:
+            # Exterior lights should be OFF
+            if self._is_exterior_active or self._active_lights:
+                _LOGGER.info("PassableSmartLighting: Exterior schedule window ended. Turning off exterior lights.")
+                ctx = Context()
+                self.engine.register_engine_context(ctx.id, ttl_sec=30.0)
+                for light_id in list(self._active_lights):
+                    try:
+                        await self.hass.services.async_call("light", "turn_off", {ATTR_ENTITY_ID: light_id}, context=ctx)
+                    except Exception as err:
+                        _LOGGER.debug("PassableSmartLighting: Error turning off light '%s': %s", light_id, err)
+                self._active_lights.clear()
+                self._is_exterior_active = False
+                self._is_baseline_active = False
+                self._is_holiday_active = False
+
+        # Track B: Holiday Outdoor Decorations
+        if decorations_active:
+            if not self._active_decorations:
+                _LOGGER.info("PassableSmartLighting: Decorations schedule window active. Turning on decorations.")
+                await self._async_turn_on_decorations()
+        else:
+            if self._active_decorations:
+                _LOGGER.info("PassableSmartLighting: Decorations schedule window ended. Turning off decorations.")
+                await self._async_turn_off_decorations()
+
+        self._is_active = self._is_exterior_active or bool(self._active_decorations)
+        self._update_entities()
+
 
     async def async_turn_on_holiday_lighting(self, preview_holiday: Optional[Dict[str, Any]] = None) -> None:
         """Actuate lights and decorations for the active or preview holiday."""
@@ -590,6 +929,9 @@ class HolidayLightingCoordinator:
         if self.decorations_enabled and holiday.get("decorations_on", True):
             await self._async_turn_on_decorations(ctx)
 
+        self._is_exterior_active = True
+        self._is_holiday_active = True
+        self._is_baseline_active = False
         self._is_active = True
         self._update_entities()
 
@@ -646,6 +988,9 @@ class HolidayLightingCoordinator:
         await self._async_turn_off_decorations(ctx)
 
         self._is_active = False
+        self._is_exterior_active = False
+        self._is_baseline_active = False
+        self._is_holiday_active = False
         self._preview_holiday = None
         self._update_entities()
 
@@ -713,6 +1058,10 @@ class HolidayLightingCoordinator:
             "dynamic_active": dynamic_active,
             "participating_lights": self.resolve_participating_lights(curr) if curr else [],
             "active_decorations": list(self._active_decorations),
+            "exterior_active": "true" if self._is_exterior_active else "false",
+            "baseline_active": "true" if self._is_baseline_active else "false",
+            "holiday_active": "true" if self._is_holiday_active else "false",
+            "exterior_lights": self.resolve_exterior_lights(),
             "friendly_name": "Active Holiday",
             "icon": icon,
         }
@@ -731,3 +1080,9 @@ class HolidayLightingCoordinator:
             except Exception:
                 pass
             self._midnight_unsub = None
+        if self._solar_unsub:
+            try:
+                self._solar_unsub()
+            except Exception:
+                pass
+            self._solar_unsub = None
