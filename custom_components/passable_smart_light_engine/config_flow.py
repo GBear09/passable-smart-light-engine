@@ -398,11 +398,19 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Schema(
                         {
                             vol.Optional(CONF_CIRCADIAN_ENABLED, default=DEFAULT_CIRCADIAN_ENABLED): selector.BooleanSelector(),
-                            vol.Optional(CONF_MIN_COLOR_TEMP, default=DEFAULT_MIN_COLOR_TEMP): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=2000, max=4000, step=100, mode=selector.NumberSelectorMode.BOX)
+                            vol.Optional(CONF_MIN_COLOR_TEMP, default=DEFAULT_MIN_COLOR_TEMP): selector.ColorTempSelector(
+                                selector.ColorTempSelectorConfig(
+                                    min=2000,
+                                    max=4000,
+                                    unit=getattr(getattr(selector, "ColorTempSelectorUnit", None), "KELVIN", "kelvin"),
+                                )
                             ),
-                            vol.Optional(CONF_MAX_COLOR_TEMP, default=DEFAULT_MAX_COLOR_TEMP): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=4000, max=6500, step=100, mode=selector.NumberSelectorMode.BOX)
+                            vol.Optional(CONF_MAX_COLOR_TEMP, default=DEFAULT_MAX_COLOR_TEMP): selector.ColorTempSelector(
+                                selector.ColorTempSelectorConfig(
+                                    min=4000,
+                                    max=6500,
+                                    unit=getattr(getattr(selector, "ColorTempSelectorUnit", None), "KELVIN", "kelvin"),
+                                )
                             ),
                         }
                     ),
@@ -557,11 +565,19 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                     vol.Schema(
                         {
                             vol.Optional(CONF_CIRCADIAN_ENABLED, default=d.get(CONF_CIRCADIAN_ENABLED, DEFAULT_CIRCADIAN_ENABLED)): selector.BooleanSelector(),
-                            vol.Optional(CONF_MIN_COLOR_TEMP, default=d.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP)): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=2000, max=4000, step=100, mode=selector.NumberSelectorMode.BOX)
+                            vol.Optional(CONF_MIN_COLOR_TEMP, default=d.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP)): selector.ColorTempSelector(
+                                selector.ColorTempSelectorConfig(
+                                    min=2000,
+                                    max=4000,
+                                    unit=getattr(getattr(selector, "ColorTempSelectorUnit", None), "KELVIN", "kelvin"),
+                                )
                             ),
-                            vol.Optional(CONF_MAX_COLOR_TEMP, default=d.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP)): selector.NumberSelector(
-                                selector.NumberSelectorConfig(min=4000, max=6500, step=100, mode=selector.NumberSelectorMode.BOX)
+                            vol.Optional(CONF_MAX_COLOR_TEMP, default=d.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP)): selector.ColorTempSelector(
+                                selector.ColorTempSelectorConfig(
+                                    min=4000,
+                                    max=6500,
+                                    unit=getattr(getattr(selector, "ColorTempSelectorUnit", None), "KELVIN", "kelvin"),
+                                )
                             ),
                         }
                     ),
@@ -810,8 +826,12 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_EXTERIOR_BASELINE_KELVIN,
                     default=opts.get(CONF_EXTERIOR_BASELINE_KELVIN, DEFAULT_EXTERIOR_BASELINE_KELVIN),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(min=2000, max=6500, step=50, mode=selector.NumberSelectorMode.BOX)
+                ): selector.ColorTempSelector(
+                    selector.ColorTempSelectorConfig(
+                        min=2000,
+                        max=6500,
+                        unit=getattr(getattr(selector, "ColorTempSelectorUnit", None), "KELVIN", "kelvin"),
+                    )
                 ),
                 vol.Required(
                     CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
@@ -972,11 +992,17 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
             h_name = str(user_input.get("name", curr_holiday.get("name", "Custom Holiday"))).strip()
             h_id = self._selected_holiday_id if not is_new else h_name.lower().replace(" ", "_").replace("'", "")
 
-            rgb = [
-                int(user_input.get("rgb_red", 255)),
-                int(user_input.get("rgb_green", 140)),
-                int(user_input.get("rgb_blue", 0)),
-            ]
+            raw_rgb = user_input.get("rgb_color")
+            if isinstance(raw_rgb, (list, tuple)) and len(raw_rgb) >= 3:
+                rgb = [int(raw_rgb[0]), int(raw_rgb[1]), int(raw_rgb[2])]
+            elif "rgb_red" in user_input:
+                rgb = [
+                    int(user_input.get("rgb_red", 255)),
+                    int(user_input.get("rgb_green", 140)),
+                    int(user_input.get("rgb_blue", 0)),
+                ]
+            else:
+                rgb = curr_holiday.get("rgb_color", [255, 140, 0])
 
             holiday_data = {
                 "id": h_id,
@@ -1053,17 +1079,13 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                     mode=selector.SelectSelectorMode.DROPDOWN,
                 )
             ),
-            vol.Optional("rgb_red", default=d_rgb[0] if len(d_rgb) > 0 else 255): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=0, max=255, step=1, mode=selector.NumberSelectorMode.BOX)
-            ),
-            vol.Optional("rgb_green", default=d_rgb[1] if len(d_rgb) > 1 else 140): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=0, max=255, step=1, mode=selector.NumberSelectorMode.BOX)
-            ),
-            vol.Optional("rgb_blue", default=d_rgb[2] if len(d_rgb) > 2 else 0): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=0, max=255, step=1, mode=selector.NumberSelectorMode.BOX)
-            ),
-            vol.Optional("color_temp_kelvin", default=curr_holiday.get("color_temp_kelvin", 2200)): selector.NumberSelector(
-                selector.NumberSelectorConfig(min=2000, max=6500, step=100, mode=selector.NumberSelectorMode.BOX)
+            vol.Optional("rgb_color", default=curr_holiday.get("rgb_color", [255, 140, 0])): selector.ColorRGBSelector(),
+            vol.Optional("color_temp_kelvin", default=curr_holiday.get("color_temp_kelvin", 2200)): selector.ColorTempSelector(
+                selector.ColorTempSelectorConfig(
+                    min=2000,
+                    max=6500,
+                    unit=getattr(getattr(selector, "ColorTempSelectorUnit", None), "KELVIN", "kelvin"),
+                )
             ),
             vol.Required("brightness_pct", default=curr_holiday.get("brightness_pct", 100)): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=10, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
