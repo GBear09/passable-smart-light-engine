@@ -7,12 +7,12 @@
         "menu_options": {
           "room": "Add Smart Lighting Room",
           "presence_simulation": "Configure Presence Simulation",
-          "holiday_lighting": "Configure Holiday Lighting"
+          "holiday_lighting": "Configure Holiday & Exterior Lighting"
         }
       },
       "holiday_lighting": {
-        "title": "Holiday Lighting Subsystem",
-        "description": "Initialize the Holiday Lighting Subsystem. Once added, you can manage active holidays, Philips Hue scenes, bulb effects, and decoration plugs from the options flow."
+        "title": "Holiday & Exterior Lighting Subsystem",
+        "description": "Initialize the Holiday & Exterior Lighting Subsystem. Once added, you can manage dusk-to-dawn exterior lighting, active holidays, Philips Hue scenes, bulb effects, and decoration plugs from the options flow."
       },
       "room": {
         "title": "Passable Adaptive Smart Lighting - Room Setup",
@@ -292,8 +292,8 @@
         }
       },
       "holiday_menu": {
-        "title": "Holiday Lighting Configuration",
-        "description": "Manage scheduled holidays, lighting scenes, and outdoor decoration plugs.",
+        "title": "Holiday & Exterior Lighting Configuration",
+        "description": "Manage dusk-to-dawn exterior lighting, scheduled holidays, lighting scenes, and outdoor decoration plugs.",
         "menu_options": {
           "holiday_exterior_settings": "Exterior Dusk-to-Dawn Lighting",
           "holiday_decoration_settings": "Holiday Outdoor Decorations",
@@ -354,8 +354,8 @@
           "light_mode": "Lighting Mode",
           "hue_scene": "Philips Hue Scene",
           "dynamic_scene": "Enable Dynamic Hue Scene Animation",
-          "effect": "Bulb Firmware Effect",
-          "fallback_effect": "Fallback Bulb Effect",
+          "effect": "Bulb Firmware Effect (e.g. fire, candle, prism)",
+          "fallback_effect": "Fallback Bulb Effect (if primary effect unavailable)",
           "rgb_red": "RGB Red (0-255)",
           "rgb_green": "RGB Green (0-255)",
           "rgb_blue": "RGB Blue (0-255)",

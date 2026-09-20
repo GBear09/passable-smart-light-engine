@@ -356,7 +356,7 @@ class PassableHolidayLightingMasterSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.4.0",
+            sw_version="2.4.1",
         )
 
     @property
@@ -408,7 +408,7 @@ class PassableHolidayDecorationsSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.4.0",
+            sw_version="2.4.1",
         )
 
     @property
@@ -455,7 +455,7 @@ class PassableExteriorLightingSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.4.0",
+            sw_version="2.4.1",
         )
 
     @property

@@ -215,7 +215,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
             if e.data.get("entry_type") == "holiday_lighting"
         ]
         if not h_entries:
-            _LOGGER.info("PassableSmartLighting: Auto-creating dedicated Holiday Lighting config entry...")
+            _LOGGER.info("PassableSmartLighting: Auto-creating dedicated Holiday & Exterior Lighting config entry...")
             await hass.config_entries.flow.async_init(
                 DOMAIN,
                 context={"source": "import"},
@@ -271,6 +271,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return True
 
     if entry.data.get("entry_type") == "holiday_lighting":
+        if entry.title != "Holiday & Exterior Lighting":
+            _LOGGER.info(
+                "PassableSmartLighting: Updating config entry title from '%s' to 'Holiday & Exterior Lighting'",
+                entry.title,
+            )
+            hass.config_entries.async_update_entry(entry, title="Holiday & Exterior Lighting")
+
         holiday_coord: Optional[HolidayLightingCoordinator] = data.get("holiday_coordinator")
         if holiday_coord:
             await holiday_coord.async_start()
@@ -304,7 +311,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         await hass.config_entries.async_forward_entry_setups(entry, ["switch", "sensor"])
         entry.async_on_unload(entry.add_update_listener(async_update_options_listener))
-        _LOGGER.info("PassableSmartLighting: Set up Holiday Lighting entry successfully.")
+        _LOGGER.info("PassableSmartLighting: Set up Holiday & Exterior Lighting entry successfully.")
         return True
 
     controller = RoomController(hass, engine, dict(entry.data))

@@ -1,13 +1,13 @@
 """Config flow and options flow for Passable Adaptive Smart Lighting Controller."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import voluptuous as vol
 
 _LOGGER = logging.getLogger(__name__)
 
 from homeassistant import config_entries, data_entry_flow
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er, selector
 
 from .const import (
@@ -163,6 +163,58 @@ class OptionalTimeSelector(selector.TimeSelector):
         return super().__call__(data)
 
 
+def get_available_bulb_effects(
+    hass: Optional[HomeAssistant] = None, current_values: Optional[List[str]] = None
+) -> List[selector.SelectOptionDict]:
+    """Collect known and dynamically discovered bulb firmware effects across all lights in Home Assistant."""
+    known_effects: Dict[str, str] = {
+        "candle": "🕯️ Candle",
+        "fire": "🔥 Fire",
+        "prism": "🌈 Prism",
+        "sparkle": "✨ Sparkle",
+        "opal": "💎 Opal",
+        "glisten": "🌟 Glisten",
+        "sunrise": "🌅 Sunrise",
+        "sunset": "🌇 Sunset",
+        "underwater": "🌊 Underwater",
+        "cosmos": "🌌 Cosmos",
+        "enchant": "✨ Enchant",
+        "sunbeam": "☀️ Sunbeam",
+        "Slow Pulse": "💓 Slow Pulse",
+        "Fast Pulse": "⚡ Fast Pulse",
+    }
+
+    discovered: Dict[str, str] = {}
+    if hass and hasattr(hass, "states"):
+        for state in hass.states.async_all("light"):
+            eff_list = state.attributes.get("effect_list")
+            if eff_list and isinstance(eff_list, (list, tuple)):
+                for eff in eff_list:
+                    if eff and isinstance(eff, str):
+                        s_eff = eff.strip()
+                        if s_eff.lower() in ("none", "off", ""):
+                            continue
+                        if s_eff not in discovered:
+                            discovered[s_eff] = known_effects.get(s_eff, s_eff.title())
+
+    for k, v in known_effects.items():
+        if k not in discovered:
+            discovered[k] = v
+
+    if current_values:
+        for cv in current_values:
+            if cv and isinstance(cv, str) and cv.strip() and cv.strip().lower() not in ("none", "off", ""):
+                c_clean = cv.strip()
+                if c_clean not in discovered:
+                    discovered[c_clean] = known_effects.get(c_clean, c_clean.title())
+
+    options = [selector.SelectOptionDict(value="", label="None / No Effect")]
+    for val, lbl in sorted(discovered.items(), key=lambda x: x[1].lower()):
+        options.append(selector.SelectOptionDict(value=val, label=lbl))
+
+    return options
+
+
 class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Passable Adaptive Smart Lighting Controller."""
 
@@ -247,7 +299,7 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"{DOMAIN}_holiday_lighting")
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
-                title="Holiday Lighting",
+                title="Holiday & Exterior Lighting",
                 data={"entry_type": "holiday_lighting"},
             )
         return self.async_abort(reason="unknown_import")
@@ -257,7 +309,7 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(f"{DOMAIN}_holiday_lighting")
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
-            title="Holiday Lighting",
+            title="Holiday & Exterior Lighting",
             data={"entry_type": "holiday_lighting"},
         )
 
@@ -959,6 +1011,12 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={})
 
         d_rgb = curr_holiday.get("rgb_color", [255, 140, 0])
+        curr_effect = curr_holiday.get("effect") or ""
+        curr_fallback_effect = curr_holiday.get("fallback_effect") or "fire"
+        effect_options = get_available_bulb_effects(
+            self.hass, [curr_effect, curr_fallback_effect]
+        )
+
         fields = {
             vol.Required("name", default=curr_holiday.get("name", "Custom Holiday")): selector.TextSelector(),
             vol.Required("enabled", default=curr_holiday.get("enabled", True)): selector.BooleanSelector(),
@@ -981,8 +1039,20 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                 selector.EntitySelectorConfig(domain="scene")
             ),
             vol.Optional("dynamic_scene", default=curr_holiday.get("dynamic_scene", True)): selector.BooleanSelector(),
-            vol.Optional("effect", default=curr_holiday.get("effect", "")): selector.TextSelector(),
-            vol.Optional("fallback_effect", default=curr_holiday.get("fallback_effect", "fire")): selector.TextSelector(),
+            vol.Optional("effect", default=curr_effect): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=effect_options,
+                    custom_value=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional("fallback_effect", default=curr_fallback_effect): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=effect_options,
+                    custom_value=True,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            ),
             vol.Optional("rgb_red", default=d_rgb[0] if len(d_rgb) > 0 else 255): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0, max=255, step=1, mode=selector.NumberSelectorMode.BOX)
             ),

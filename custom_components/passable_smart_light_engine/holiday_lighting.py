@@ -871,16 +871,21 @@ class HolidayLightingCoordinator:
                         )
 
             # Mode 2: Hardware Bulb Effect (e.g. fire, candle, prism)
-            if not success and (mode == LIGHT_MODE_EFFECT or holiday.get("fallback_effect")):
-                effect_name = holiday.get("effect") or holiday.get("fallback_effect")
-                if effect_name:
+            if not success and (
+                mode == LIGHT_MODE_EFFECT
+                or (mode == LIGHT_MODE_HUE_SCENE and holiday.get("fallback_effect"))
+            ):
+                effect_name = holiday.get("effect") if mode == LIGHT_MODE_EFFECT else holiday.get("fallback_effect")
+                if not effect_name and mode == LIGHT_MODE_EFFECT:
+                    effect_name = holiday.get("fallback_effect")
+                if effect_name and str(effect_name).strip().lower() not in ("none", "off", ""):
                     try:
                         await self.hass.services.async_call(
                             "light",
                             "turn_on",
                             {
                                 ATTR_ENTITY_ID: light_id,
-                                "effect": effect_name,
+                                "effect": str(effect_name).strip(),
                                 "brightness_pct": brightness_pct,
                             },
                             context=ctx,
