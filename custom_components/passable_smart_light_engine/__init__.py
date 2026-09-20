@@ -14,24 +14,32 @@ from homeassistant.core import Event, HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_registry as er
 
 from .const import (
+    ACTIVE_HOLIDAY_SENSOR_ENTITY_ID,
     ATTR_CALIBRATE_FORCE,
     ATTR_CALIBRATE_ROOM_ID,
+    ATTR_DURATION_SEC,
+    ATTR_HOLIDAY_NAME,
     ATTR_RESET_ROOM_ID,
     ATTR_RESET_TYPE,
     DOMAIN,
     EVENT_PASSABLE_SMART_LIGHT_ENGINE,
     EVENT_SMART_LIGHT_ENGINE,
+    HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID,
+    HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID,
     LEGACY_DOMAIN,
     PLATFORMS,
     PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID,
     PRESENCE_SIMULATION_SWITCH_ENTITY_ID,
     RESET_TYPES,
+    SERVICE_APPLY_HOLIDAY_LIGHTING,
     SERVICE_CALIBRATE_ROOM_CURVE,
+    SERVICE_PREVIEW_HOLIDAY,
     SERVICE_RESET_LEARNING_DATA,
     SERVICE_START_PRESENCE_SIMULATION,
     SERVICE_STOP_PRESENCE_SIMULATION,
 )
 from .engine import PassableLightingEngine, RoomController
+from .holiday_lighting import HolidayLightingCoordinator, HolidayStore
 from .presence_simulation import PresenceSimulationCoordinator
 from .storage import LearningDataStore
 
@@ -53,6 +61,20 @@ CALIBRATE_SERVICE_SCHEMA = vol.Schema(
     }
 )
 
+APPLY_HOLIDAY_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_HOLIDAY_NAME): cv.string,
+    }
+)
+
+PREVIEW_HOLIDAY_SCHEMA = vol.Schema(
+    {
+        vol.Required(ATTR_HOLIDAY_NAME): cv.string,
+        vol.Optional(ATTR_DURATION_SEC, default=60): cv.positive_int,
+    }
+)
+
+
 
 async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
     """Set up the Passable Adaptive Smart Lighting Controller integration."""
@@ -61,14 +83,22 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
     store = LearningDataStore(hass)
     await store.async_load()
 
+    holiday_store = HolidayStore(hass)
+    await holiday_store.async_load()
+
     engine = PassableLightingEngine(hass, store)
     coordinator = PresenceSimulationCoordinator(hass, engine)
     engine.presence_simulation = coordinator
 
+    holiday_coordinator = HolidayLightingCoordinator(hass, engine, holiday_store)
+    engine.holiday_lighting = holiday_coordinator
+
     hass.data[DOMAIN] = {
         "store": store,
+        "holiday_store": holiday_store,
         "engine": engine,
         "coordinator": coordinator,
+        "holiday_coordinator": holiday_coordinator,
         "controllers": {},
         "system_sensor_registered": False,
         "system_switch_registered": False,
@@ -129,6 +159,39 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
 
     hass.services.async_register(DOMAIN, SERVICE_STOP_PRESENCE_SIMULATION, _async_handle_stop_simulation)
 
+    async def _async_handle_apply_holiday(call: ServiceCall) -> None:
+        """Manually trigger or test holiday lighting."""
+        h_name = call.data.get(ATTR_HOLIDAY_NAME)
+        holiday_obj = None
+        if h_name:
+            for h in holiday_store.holidays.values():
+                if h["name"].lower() == h_name.lower() or h["id"].lower() == h_name.lower():
+                    holiday_obj = h
+                    break
+        await holiday_coordinator.async_turn_on_holiday_lighting(preview_holiday=holiday_obj)
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_APPLY_HOLIDAY_LIGHTING, _async_handle_apply_holiday, schema=APPLY_HOLIDAY_SCHEMA
+    )
+
+    async def _async_handle_preview_holiday(call: ServiceCall) -> None:
+        """Preview a holiday configuration for a set duration."""
+        h_name = call.data[ATTR_HOLIDAY_NAME]
+        dur = call.data.get(ATTR_DURATION_SEC, 60)
+        h_id = None
+        for hid, h in holiday_store.holidays.items():
+            if h["name"].lower() == h_name.lower() or hid.lower() == h_name.lower():
+                h_id = hid
+                break
+        if h_id:
+            await holiday_coordinator.async_preview_holiday(h_id, duration_sec=dur)
+        else:
+            _LOGGER.warning("PassableSmartLighting: Holiday '%s' not found for preview.", h_name)
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_PREVIEW_HOLIDAY, _async_handle_preview_holiday, schema=PREVIEW_HOLIDAY_SCHEMA
+    )
+
     # Ensure dedicated presence simulation entry is created
     async def _async_ensure_simulation_entry() -> None:
         sim_entries = [
@@ -145,12 +208,28 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
 
     hass.async_create_task(_async_ensure_simulation_entry())
 
+    # Ensure dedicated holiday lighting entry is created
+    async def _async_ensure_holiday_entry() -> None:
+        h_entries = [
+            e for e in hass.config_entries.async_entries(DOMAIN)
+            if e.data.get("entry_type") == "holiday_lighting"
+        ]
+        if not h_entries:
+            _LOGGER.info("PassableSmartLighting: Auto-creating dedicated Holiday Lighting config entry...")
+            await hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": "import"},
+                data={"entry_type": "holiday_lighting"},
+            )
+
+    hass.async_create_task(_async_ensure_holiday_entry())
+
     _LOGGER.info("Passable Adaptive Smart Lighting Controller component initialized successfully.")
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up a room or presence simulation from a config entry."""
+    """Set up a room, presence simulation, or holiday lighting from a config entry."""
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
 
@@ -191,6 +270,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("PassableSmartLighting: Set up Presence Simulation entry successfully.")
         return True
 
+    if entry.data.get("entry_type") == "holiday_lighting":
+        holiday_coord: Optional[HolidayLightingCoordinator] = data.get("holiday_coordinator")
+        if holiday_coord:
+            await holiday_coord.async_start()
+
+        ent_reg = er.async_get(hass)
+        dev_reg = dr.async_get(hass)
+
+        for entity_id in [
+            HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID,
+            HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID,
+            ACTIVE_HOLIDAY_SENSOR_ENTITY_ID,
+        ]:
+            reg_entry = ent_reg.async_get(entity_id)
+            if reg_entry and reg_entry.config_entry_id != entry.entry_id:
+                old_entry_id = reg_entry.config_entry_id
+                _LOGGER.info(
+                    "PassableSmartLighting: Migrating %s from config entry %s to dedicated entry %s",
+                    entity_id,
+                    old_entry_id,
+                    entry.entry_id,
+                )
+                ent_reg.async_update_entity(entity_id, config_entry_id=entry.entry_id)
+                if reg_entry.device_id:
+                    device = dev_reg.async_get(reg_entry.device_id)
+                    if device and old_entry_id in device.config_entries:
+                        dev_reg.async_update_device(
+                            device.id,
+                            add_config_entry_id=entry.entry_id,
+                            remove_config_entry_id=old_entry_id,
+                        )
+
+        await hass.config_entries.async_forward_entry_setups(entry, ["switch", "sensor"])
+        entry.async_on_unload(entry.add_update_listener(async_update_options_listener))
+        _LOGGER.info("PassableSmartLighting: Set up Holiday Lighting entry successfully.")
+        return True
+
     controller = RoomController(hass, engine, dict(entry.data))
     data["controllers"][entry.entry_id] = controller
     engine.register_controller(controller.room_id, controller)
@@ -205,11 +321,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a room or presence simulation config entry."""
+    """Unload a room, presence simulation, or holiday lighting config entry."""
     data = hass.data[DOMAIN]
 
     if entry.data.get("entry_type") == "presence_simulation":
         return await hass.config_entries.async_unload_platforms(entry, ["switch", "sensor"])
+
+    if entry.data.get("entry_type") == "holiday_lighting":
+        holiday_coord = data.get("holiday_coordinator")
+        if holiday_coord:
+            holiday_coord.stop()
+        return await hass.config_entries.async_unload_platforms(entry, ["switch", "sensor"])
+
 
     controller: RoomController = data["controllers"].pop(entry.entry_id, None)
 

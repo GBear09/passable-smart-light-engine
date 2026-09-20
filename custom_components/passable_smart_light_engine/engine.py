@@ -232,6 +232,7 @@ class PassableLightingEngine:
         self._stabilizing_tasks: Dict[str, asyncio.Task] = {}
         self._controllers: Dict[str, "RoomController"] = {}
         self._presence_simulation: Optional[Any] = None
+        self._holiday_lighting: Optional[Any] = None
         self._media_daylight_suppressed: Dict[str, bool] = {}
 
     def is_media_daylight_suppressed(self, room_id: str) -> bool:
@@ -258,6 +259,22 @@ class PassableLightingEngine:
         if not entity_id or not self._presence_simulation:
             return False
         return self._presence_simulation.is_light_simulating(entity_id)
+
+    @property
+    def holiday_lighting(self) -> Optional[Any]:
+        """Return holiday lighting coordinator."""
+        return self._holiday_lighting
+
+    @holiday_lighting.setter
+    def holiday_lighting(self, coordinator: Any) -> None:
+        """Set holiday lighting coordinator."""
+        self._holiday_lighting = coordinator
+
+    def is_holiday_active(self, entity_id: Optional[str]) -> bool:
+        """Check if an entity is currently actively controlled by holiday lighting."""
+        if not entity_id or not self._holiday_lighting:
+            return False
+        return self._holiday_lighting.is_light_active(entity_id)
 
     def _cleanup_contexts(self) -> None:
         """Prune expired engine context IDs."""
@@ -747,7 +764,7 @@ class PassableLightingEngine:
         is_frozen, is_forced_off = self.check_bypasses(
             bypass_freeze_entities, bypass_off_entities, manual_override_entity
         )
-        if self.is_simulating_presence(light_entity):
+        if self.is_simulating_presence(light_entity) or self.is_holiday_active(light_entity):
             is_forced_off = False
 
         if is_forced_off:
@@ -780,6 +797,15 @@ class PassableLightingEngine:
                     room_id,
                 )
                 return
+
+            # A00. Active holiday lighting match
+            if self.is_holiday_active(light_entity):
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Light change event absorbed by active holiday lighting.",
+                    room_id,
+                )
+                return
+
 
             # A. Explicit Engine Context match
             if self.is_engine_context(evt_context):
@@ -986,6 +1012,15 @@ class PassableLightingEngine:
             _LOGGER.debug(
                 "PassableSmartLighting [%s]: Room occupied with secondary light(s) active. Suppressing main lights.",
                 room_id,
+            )
+            return
+
+        # Holiday Lighting Check (Yields control to HolidayLightingCoordinator)
+        if self.is_holiday_active(light_entity):
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Light '%s' is actively managed by Holiday Lighting. Holding state.",
+                room_id,
+                light_entity,
             )
             return
 
@@ -1834,6 +1869,12 @@ class RoomController:
         """Check if this room's light is actively simulating presence."""
         light_entity = self.entry_data.get(CONF_LIGHT_ENTITY)
         return self.engine.is_simulating_presence(light_entity)
+
+    @property
+    def is_holiday_active(self) -> bool:
+        """Check if this room's light is actively managed by holiday lighting."""
+        light_entity = self.entry_data.get(CONF_LIGHT_ENTITY)
+        return self.engine.is_holiday_active(light_entity)
 
     def set_freeze_bypass(self, active: bool) -> None:
         """Set dedicated freeze switch state."""

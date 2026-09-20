@@ -15,6 +15,10 @@ from .const import (
     CONF_ROOM_ID,
     CONF_SIMULATION_ENABLED,
     DOMAIN,
+    HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID,
+    HOLIDAY_DECORATIONS_SWITCH_UNIQUE_ID,
+    HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID,
+    HOLIDAY_LIGHTING_MASTER_SWITCH_UNIQUE_ID,
     PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID,
     PRESENCE_SIMULATION_MASTER_SWITCH_UNIQUE_ID,
     PRESENCE_SIMULATION_SWITCH_ENTITY_ID,
@@ -26,7 +30,7 @@ from .engine import PassableLightingEngine, RoomController
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up switch entities for a room or presence simulation config entry."""
+    """Set up switch entities for a room, presence simulation, or holiday lighting config entry."""
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
 
@@ -37,6 +41,15 @@ async def async_setup_entry(
                 PassablePresenceSimulationSwitch(hass, engine),
             ]
         )
+        return
+
+    if entry.data.get("entry_type") == "holiday_lighting":
+        holiday_coord = data.get("holiday_coordinator")
+        if holiday_coord:
+            master_sw = PassableHolidayLightingMasterSwitch(entry, holiday_coord)
+            decor_sw = PassableHolidayDecorationsSwitch(entry, holiday_coord)
+            holiday_coord.register_entities(master_switch=master_sw, decor_switch=decor_sw)
+            async_add_entities([master_sw, decor_sw])
         return
 
     controllers = data["controllers"]
@@ -314,3 +327,103 @@ class PassablePresenceSimulationSwitch(SwitchEntity):
             "jitter_minutes": self._coordinator.jitter_min,
             "arrival_grace_minutes": self._coordinator.arrival_grace_min,
         }
+
+
+class PassableHolidayLightingMasterSwitch(SwitchEntity):
+    """Master toggle switch for Holiday Lighting subsystem."""
+
+    def __init__(self, entry: ConfigEntry, coordinator: Any) -> None:
+        """Initialize holiday lighting master switch."""
+        self._entry = entry
+        self._coordinator = coordinator
+        self.entity_id = HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID
+        self._attr_unique_id = HOLIDAY_LIGHTING_MASTER_SWITCH_UNIQUE_ID
+        self._attr_name = "Holiday Lighting"
+        self._attr_icon = "mdi:party-popper"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking this entity to the Holiday Lighting device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "holiday_lighting")},
+            name="Holiday Lighting",
+            manufacturer="Passable",
+            model="Holiday Lighting Subsystem",
+            sw_version="1.0.0",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if holiday lighting is enabled."""
+        return self._coordinator.enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn on holiday lighting."""
+        await self._coordinator.async_set_enabled(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off holiday lighting."""
+        await self._coordinator.async_set_enabled(False)
+        self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose operational attributes."""
+        curr = self._coordinator.active_holiday
+        return {
+            "is_active": self._coordinator.is_active,
+            "active_holiday": curr["name"] if curr else None,
+            "active_lights": self._coordinator.active_lights,
+            "active_lights_count": len(self._coordinator.active_lights),
+            "active_decorations": self._coordinator.active_decorations,
+            "active_decorations_count": len(self._coordinator.active_decorations),
+        }
+
+
+class PassableHolidayDecorationsSwitch(SwitchEntity):
+    """Toggle switch specifically for holiday decoration plugs and switches."""
+
+    def __init__(self, entry: ConfigEntry, coordinator: Any) -> None:
+        """Initialize holiday decorations switch."""
+        self._entry = entry
+        self._coordinator = coordinator
+        self.entity_id = HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID
+        self._attr_unique_id = HOLIDAY_DECORATIONS_SWITCH_UNIQUE_ID
+        self._attr_name = "Holiday Decorations"
+        self._attr_icon = "mdi:power-plug"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking this entity to the Holiday Lighting device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "holiday_lighting")},
+            name="Holiday Lighting",
+            manufacturer="Passable",
+            model="Holiday Lighting Subsystem",
+            sw_version="1.0.0",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if holiday decorations are enabled."""
+        return self._coordinator.decorations_enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn on holiday decorations."""
+        await self._coordinator.async_set_decorations_enabled(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn off holiday decorations."""
+        await self._coordinator.async_set_decorations_enabled(False)
+        self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose decorations attributes."""
+        return {
+            "active_decorations": self._coordinator.active_decorations,
+            "active_decorations_count": len(self._coordinator.active_decorations),
+        }
+

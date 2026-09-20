@@ -53,3 +53,40 @@ start_presence_simulation:
 stop_presence_simulation:
   name: Stop Presence Simulation
   description: Deactivates presence simulation. If stopping at night with Home mode active, performs graceful handover to room controllers; otherwise sweeps off all simulated lights.
+
+apply_holiday_lighting:
+  name: Apply Holiday Lighting
+  description: Manually triggers or re-evaluates holiday lighting. If a specific holiday name or ID is provided, applies that holiday immediately; otherwise applies the active scheduled holiday.
+  fields:
+    holiday_name:
+      name: Holiday Name / ID
+      description: Specific holiday name or ID to apply (e.g. 'halloween', 'Christmas'). If omitted, evaluates the active holiday.
+      example: "halloween"
+      required: false
+      selector:
+        text:
+
+preview_holiday:
+  name: Preview Holiday Lighting
+  description: Previews a holiday lighting scene and effects across configured lights for a short test period, then automatically reverts to normal lighting.
+  fields:
+    holiday_name:
+      name: Holiday Name / ID
+      description: The holiday name or ID to preview (e.g. 'halloween', 'christmas').
+      example: "halloween"
+      required: true
+      selector:
+        text:
+    duration_sec:
+      name: Duration (Seconds)
+      description: Number of seconds to preview before reverting back to previous lighting state.
+      default: 60
+      example: 60
+      required: false
+      selector:
+        number:
+          min: 5
+          max: 300
+          step: 5
+          mode: box
+

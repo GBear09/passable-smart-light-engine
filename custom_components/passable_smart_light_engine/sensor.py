@@ -14,6 +14,8 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    ACTIVE_HOLIDAY_SENSOR_ENTITY_ID,
+    ACTIVE_HOLIDAY_SENSOR_UNIQUE_ID,
     CONF_DEFAULT_LUX_RATIO,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_ROOM_ID,
@@ -28,6 +30,7 @@ from .const import (
     DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
     DOMAIN,
+    MODE_HOLIDAY,
     MODE_PRESENCE_SIMULATION,
     RESET_TYPES,
 )
@@ -44,7 +47,7 @@ from .storage import LearningDataStore
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up sensor entities for a room or presence simulation config entry."""
+    """Set up sensor entities for a room, presence simulation, or holiday lighting config entry."""
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
 
@@ -52,6 +55,14 @@ async def async_setup_entry(
         if not data.get("system_simulation_sensor_registered"):
             async_add_entities([PassablePresenceSimulationStatusSensor(hass, engine)])
             data["system_simulation_sensor_registered"] = True
+        return
+
+    if entry.data.get("entry_type") == "holiday_lighting":
+        holiday_coord = data.get("holiday_coordinator")
+        if holiday_coord:
+            sensor = PassableActiveHolidaySensor(entry, holiday_coord)
+            holiday_coord.register_entities(sensor=sensor)
+            async_add_entities([sensor])
         return
 
     controllers = data["controllers"]
@@ -183,6 +194,9 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
 
         if self._engine.is_manual_override_active(self._room_id):
             return "manual_override"
+
+        if self._controller.is_holiday_active:
+            return MODE_HOLIDAY
 
         if self._controller.is_simulating_presence:
             return MODE_PRESENCE_SIMULATION
@@ -358,3 +372,45 @@ class PassablePresenceSimulationStatusSensor(SensorEntity):
             "jitter_minutes": coord.jitter_min,
             "arrival_grace_minutes": coord.arrival_grace_min,
         }
+
+
+class PassableActiveHolidaySensor(SensorEntity):
+    """Sensor reporting active holiday status and legacy dashboard attributes."""
+
+    def __init__(self, entry: ConfigEntry, coordinator: Any) -> None:
+        """Initialize active holiday sensor."""
+        self._entry = entry
+        self._coordinator = coordinator
+        self.entity_id = ACTIVE_HOLIDAY_SENSOR_ENTITY_ID
+        self._attr_unique_id = ACTIVE_HOLIDAY_SENSOR_UNIQUE_ID
+        self._attr_name = "Active Holiday"
+        self._attr_icon = "mdi:calendar-star"
+
+    async def async_added_to_hass(self) -> None:
+        """Register storage listener to refresh state when holiday settings change."""
+        self._coordinator.store.register_update_listener(self.async_write_ha_state)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device info linking this entity to the Holiday Lighting device."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "holiday_lighting")},
+            name="Holiday Lighting",
+            manufacturer="Passable",
+            model="Holiday Lighting Subsystem",
+            sw_version="1.0.0",
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return current holiday name, or 'unknown' to preserve conditional dashboard cards."""
+        curr = self._coordinator.active_holiday
+        if curr:
+            return curr.get("name", "unknown")
+        return "unknown"
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Return legacy attributes and new rich holiday lighting metadata."""
+        return self._coordinator.get_legacy_sensor_attributes()
+

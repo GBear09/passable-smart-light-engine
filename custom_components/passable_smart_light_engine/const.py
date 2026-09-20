@@ -158,3 +158,240 @@ PRESENCE_SIMULATION_SWITCH_ENTITY_ID = "switch.simulate_presence_away_mode"
 PRESENCE_SIMULATION_SWITCH_UNIQUE_ID = "switch.simulate_presence__away_mode_"
 PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID = "switch.presence_simulation"
 PRESENCE_SIMULATION_MASTER_SWITCH_UNIQUE_ID = "passable_presence_simulation_master"
+
+# Holiday Lighting configuration keys
+CONF_HOLIDAY_LIGHTING_ENABLED = "holiday_lighting_enabled"
+CONF_HOLIDAY_DECORATIONS_ENABLED = "holiday_decorations_enabled"
+CONF_HOLIDAY_GLOBAL_LIGHTS = "holiday_global_lights"
+CONF_HOLIDAY_GLOBAL_DECORATIONS = "holiday_global_decorations"
+CONF_HOLIDAY_GLOBAL_LABEL = "holiday_global_label"
+CONF_HOLIDAY_SUNSET_OFFSET_MIN = "holiday_sunset_offset_min"
+CONF_HOLIDAY_SUNRISE_OFFSET_MIN = "holiday_sunrise_offset_min"
+CONF_HOLIDAY_HOME_STATE_ENTITY = "holiday_home_state_entity"
+CONF_HOLIDAY_OFF_TRIGGER = "holiday_off_trigger"
+CONF_HOLIDAY_OFF_TIME = "holiday_off_time"
+CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION = "holiday_respect_presence_simulation"
+
+# Holiday Lighting defaults
+DEFAULT_HOLIDAY_LIGHTING_ENABLED = True
+DEFAULT_HOLIDAY_DECORATIONS_ENABLED = True
+DEFAULT_HOLIDAY_GLOBAL_LIGHTS = ["light.front_porch"]
+DEFAULT_HOLIDAY_GLOBAL_DECORATIONS = []
+DEFAULT_HOLIDAY_GLOBAL_LABEL = "holiday_lights"
+DEFAULT_HOLIDAY_SUNSET_OFFSET_MIN = -30
+DEFAULT_HOLIDAY_SUNRISE_OFFSET_MIN = 30
+DEFAULT_HOLIDAY_HOME_STATE_ENTITY = "input_select.home_state"
+DEFAULT_HOLIDAY_OFF_TRIGGER = "sleep"
+DEFAULT_HOLIDAY_OFF_TIME = "23:00:00"
+DEFAULT_HOLIDAY_RESPECT_PRESENCE_SIMULATION = True
+
+# Holiday Lighting modes & settings
+MODE_HOLIDAY = "holiday"
+LIGHT_MODE_HUE_SCENE = "hue_scene"
+LIGHT_MODE_EFFECT = "effect"
+LIGHT_MODE_RGB = "rgb"
+LIGHT_MODE_COLOR_TEMP = "color_temp"
+LIGHT_MODES = [LIGHT_MODE_HUE_SCENE, LIGHT_MODE_EFFECT, LIGHT_MODE_RGB, LIGHT_MODE_COLOR_TEMP]
+
+# Holiday Lighting entity IDs & unique IDs
+HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID = "switch.holiday_lighting"
+HOLIDAY_LIGHTING_MASTER_SWITCH_UNIQUE_ID = "passable_holiday_lighting_master"
+HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID = "switch.holiday_decorations"
+HOLIDAY_DECORATIONS_SWITCH_UNIQUE_ID = "passable_holiday_decorations_switch"
+ACTIVE_HOLIDAY_SENSOR_ENTITY_ID = "sensor.active_holiday"
+ACTIVE_HOLIDAY_SENSOR_UNIQUE_ID = "passable_active_holiday"
+
+# Holiday Lighting storage
+HOLIDAY_STORAGE_KEY = f"{DOMAIN}_holidays"
+HOLIDAY_STORAGE_VERSION = 1
+
+# Holiday Lighting services
+SERVICE_APPLY_HOLIDAY_LIGHTING = "apply_holiday_lighting"
+SERVICE_PREVIEW_HOLIDAY = "preview_holiday"
+ATTR_HOLIDAY_NAME = "holiday_name"
+ATTR_DURATION_SEC = "duration_sec"
+
+# Default Holiday Catalog
+DEFAULT_HOLIDAYS = {
+    "halloween": {
+        "id": "halloween",
+        "name": "Halloween",
+        "enabled": True,
+        "start_date": "10-01",
+        "end_date": "10-31",
+        "icon": "mdi:ghost",
+        "phrase": "Spooky Season is Here!",
+        "theme_color": "#9c4600",
+        "rgb_color": [156, 70, 0],
+        "color_temp_kelvin": 2000,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_HUE_SCENE,
+        "hue_scene": "scene.front_porch_spooky",
+        "dynamic_scene": True,
+        "fallback_effect": "fire",
+        "decorations_on": True,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+    "christmas": {
+        "id": "christmas",
+        "name": "Christmas",
+        "enabled": True,
+        "start_date": "12-01",
+        "end_date": "12-25",
+        "icon": "mdi:pine-tree",
+        "phrase": "Merry Christmas!",
+        "theme_color": "#2e5c3e",
+        "rgb_color": [46, 92, 62],
+        "color_temp_kelvin": 2000,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_HUE_SCENE,
+        "hue_scene": "scene.front_porch_christmas",
+        "dynamic_scene": True,
+        "fallback_effect": "prism",
+        "decorations_on": True,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+    "thanksgiving": {
+        "id": "thanksgiving",
+        "name": "Thanksgiving",
+        "enabled": True,
+        "start_date": "11-15",
+        "end_date": "11-30",
+        "icon": "mdi:turkey",
+        "phrase": "Happy Thanksgiving!",
+        "theme_color": "#b45f06",
+        "rgb_color": [255, 140, 0],
+        "color_temp_kelvin": 2200,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_RGB,
+        "hue_scene": "",
+        "dynamic_scene": False,
+        "fallback_effect": "",
+        "decorations_on": True,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+    "new_years_eve": {
+        "id": "new_years_eve",
+        "name": "New Year's Eve",
+        "enabled": True,
+        "start_date": "12-31",
+        "end_date": "01-01",
+        "icon": "mdi:party-popper",
+        "phrase": "Happy New Year!",
+        "theme_color": "#FFD700",
+        "rgb_color": [255, 215, 0],
+        "color_temp_kelvin": 2500,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_RGB,
+        "hue_scene": "",
+        "dynamic_scene": False,
+        "fallback_effect": "",
+        "decorations_on": True,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+    "july_4th": {
+        "id": "july_4th",
+        "name": "July 4th",
+        "enabled": True,
+        "start_date": "07-01",
+        "end_date": "07-05",
+        "icon": "mdi:firework",
+        "phrase": "Happy Independence Day!",
+        "theme_color": "#1a3a6e",
+        "rgb_color": [26, 58, 110],
+        "color_temp_kelvin": 3000,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_RGB,
+        "hue_scene": "",
+        "dynamic_scene": False,
+        "fallback_effect": "",
+        "decorations_on": False,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+    "memorial_day": {
+        "id": "memorial_day",
+        "name": "Memorial Day",
+        "enabled": True,
+        "start_date": "05-24",
+        "end_date": "05-31",
+        "icon": "mdi:flag-variant",
+        "phrase": "Honoring Our Heroes",
+        "theme_color": "#1a3a6e",
+        "rgb_color": [26, 58, 110],
+        "color_temp_kelvin": 3000,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_RGB,
+        "hue_scene": "",
+        "dynamic_scene": False,
+        "fallback_effect": "",
+        "decorations_on": False,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+    "labor_day": {
+        "id": "labor_day",
+        "name": "Labor Day",
+        "enabled": True,
+        "start_date": "09-01",
+        "end_date": "09-07",
+        "icon": "mdi:flag-variant",
+        "phrase": "Happy Labor Day!",
+        "theme_color": "#1a3a6e",
+        "rgb_color": [26, 58, 110],
+        "color_temp_kelvin": 3000,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_RGB,
+        "hue_scene": "",
+        "dynamic_scene": False,
+        "fallback_effect": "",
+        "decorations_on": False,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+    "valentines_day": {
+        "id": "valentines_day",
+        "name": "Valentine's Day",
+        "enabled": True,
+        "start_date": "02-07",
+        "end_date": "02-14",
+        "icon": "mdi:heart-multiple",
+        "phrase": "Love is in the Air!",
+        "theme_color": "#8a1c2e",
+        "rgb_color": [138, 28, 46],
+        "color_temp_kelvin": 2200,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_RGB,
+        "hue_scene": "",
+        "dynamic_scene": False,
+        "fallback_effect": "",
+        "decorations_on": False,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+    "st_patricks_day": {
+        "id": "st_patricks_day",
+        "name": "St. Patrick's Day",
+        "enabled": True,
+        "start_date": "03-10",
+        "end_date": "03-17",
+        "icon": "mdi:clover",
+        "phrase": "Feeling Lucky?",
+        "theme_color": "#51f569",
+        "rgb_color": [81, 245, 105],
+        "color_temp_kelvin": 3000,
+        "brightness_pct": 100,
+        "light_mode": LIGHT_MODE_RGB,
+        "hue_scene": "",
+        "dynamic_scene": False,
+        "fallback_effect": "",
+        "decorations_on": False,
+        "participating_lights": [],
+        "participating_decorations": [],
+    },
+}
+
