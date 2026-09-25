@@ -398,7 +398,7 @@ class PassableActiveHolidaySensor(SensorEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.4.2",
+            sw_version="2.4.3",
         )
 
     @property

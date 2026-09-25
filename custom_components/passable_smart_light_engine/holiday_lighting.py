@@ -512,6 +512,54 @@ class HolidayLightingCoordinator:
 
         return sorted(list(resolved))
 
+    def _is_solar_interval_active(
+        self,
+        now_dt: datetime,
+        sunset_offset_min: int,
+        sunrise_offset_min: int = 0,
+    ) -> bool:
+        """Evaluate if now_dt is within the dusk-to-dawn interval defined by sun and offsets."""
+        sun_state = self.hass.states.get("sun.sun")
+        if not sun_state:
+            return False
+
+        next_setting_str = sun_state.attributes.get("next_setting")
+        next_rising_str = sun_state.attributes.get("next_rising")
+        next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
+        next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
+
+        if not next_setting or not next_rising:
+            return sun_state.state == "below_horizon"
+
+        # next_setting is always the upcoming sunset; previous sunset was ~1 day ago
+        upcoming_sunset = next_setting
+        recent_sunset = next_setting - timedelta(days=1)
+
+        # next_rising is always the upcoming sunrise; previous sunrise was ~1 day ago
+        upcoming_sunrise = next_rising
+        recent_sunrise = next_rising - timedelta(days=1)
+
+        # Determine the sunrise that bounds the night starting at recent_sunset:
+        # If next_setting < next_rising, today's sunrise has already occurred (daytime).
+        # Therefore, the sunrise ending last night was recent_sunrise (this morning).
+        # If next_rising < next_setting, we are in the night before upcoming_sunrise.
+        if next_setting < next_rising:
+            night_cutoff = recent_sunrise + timedelta(minutes=sunrise_offset_min)
+        else:
+            night_cutoff = upcoming_sunrise + timedelta(minutes=sunrise_offset_min)
+
+        # Check Window A: The night that began with recent_sunset
+        night_start = recent_sunset + timedelta(minutes=sunset_offset_min)
+        if night_start <= now_dt < night_cutoff:
+            return True
+
+        # Check Window B: The upcoming night beginning with upcoming_sunset
+        upcoming_dusk_start = upcoming_sunset + timedelta(minutes=sunset_offset_min)
+        if now_dt >= upcoming_dusk_start:
+            return True
+
+        return False
+
     def _is_exterior_window_active(self, now: Optional[datetime] = None) -> bool:
         """Determine if the exterior dusk-to-dawn lighting window is currently active."""
         if not self.exterior_enabled:
@@ -540,38 +588,27 @@ class HolidayLightingCoordinator:
                 _LOGGER.error("PassableSmartLighting: Error parsing exterior fixed times: %s", err)
                 return False
 
-        sun_state = self.hass.states.get("sun.sun")
-        if not sun_state:
-            return False
+        # Check fixed cutoff time if configured
+        if off_trigger == "fixed_time":
+            off_time_str = self.store.options.get(CONF_EXTERIOR_OFF_TIME, DEFAULT_EXTERIOR_OFF_TIME)
+            try:
+                parts = off_time_str.split(":")
+                t_off = dtime(int(parts[0]), int(parts[1]))
+                curr_t = now_dt.time()
+                if t_off >= dtime(12, 0):
+                    if curr_t >= t_off or curr_t < dtime(12, 0):
+                        return False
+                else:
+                    if curr_t >= t_off and now_dt.hour < 12:
+                        return False
+            except Exception:
+                pass
 
-        next_setting_str = sun_state.attributes.get("next_setting")
-        next_rising_str = sun_state.attributes.get("next_rising")
-        next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
-        next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
-        is_sun_below = sun_state.state == "below_horizon"
+        if on_trigger == "sunset":
+            effective_sunrise_offset = sunrise_offset if off_trigger == "sunrise" else 0
+            return self._is_solar_interval_active(now_dt, sunset_offset, effective_sunrise_offset)
 
-        # Sun is below horizon (nighttime)
-        if is_sun_below:
-            if off_trigger == "sunrise" and next_rising:
-                cutoff = next_rising + timedelta(minutes=sunrise_offset)
-                return now_dt < cutoff
-            return True
-
-        # Sun is above horizon (daytime)
-        # Check dusk onset before sunset: e.g. 30m before sunset
-        if on_trigger == "sunset" and next_setting:
-            dusk_start = next_setting + timedelta(minutes=sunset_offset)
-            if now_dt >= dusk_start:
-                return True
-
-        # Check morning twilight window after sunrise: e.g. up to 30m after sunrise
-        if off_trigger == "sunrise" and sunrise_offset > 0 and next_rising:
-            approx_recent_rising = next_rising - timedelta(days=1)
-            morning_cutoff = approx_recent_rising + timedelta(minutes=sunrise_offset)
-            if approx_recent_rising - timedelta(minutes=5) <= now_dt < morning_cutoff:
-                return True
-
-        return False
+        return True
 
     def _is_decorations_window_active(self, now: Optional[datetime] = None) -> bool:
         """Determine if the holiday outdoor decorations window is currently active."""
@@ -601,32 +638,20 @@ class HolidayLightingCoordinator:
             try:
                 parts = off_time_str.split(":")
                 t_off = dtime(int(parts[0]), int(parts[1]))
-                if now_dt.time() >= t_off and now_dt.hour >= 12:
-                    return False
+                curr_t = now_dt.time()
+                if t_off >= dtime(12, 0):
+                    if curr_t >= t_off or curr_t < dtime(12, 0):
+                        return False
+                else:
+                    if curr_t >= t_off and now_dt.hour < 12:
+                        return False
             except Exception:
                 pass
 
         # Check On condition
         if on_trigger == "sunset":
-            sun_state = self.hass.states.get("sun.sun")
-            if not sun_state:
-                return False
-            next_setting_str = sun_state.attributes.get("next_setting")
-            next_rising_str = sun_state.attributes.get("next_rising")
-            next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
-            next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
-            is_sun_below = sun_state.state == "below_horizon"
-
-            if is_sun_below:
-                if next_rising and now_dt >= next_rising:
-                    return False
-                return True
-
-            if next_setting:
-                dusk_start = next_setting + timedelta(minutes=sunset_offset)
-                if now_dt >= dusk_start:
-                    return True
-            return False
+            sunrise_offset = 0
+            return self._is_solar_interval_active(now_dt, sunset_offset, sunrise_offset)
 
         return True
 
@@ -657,9 +682,19 @@ class HolidayLightingCoordinator:
         if next_setting:
             candidate_times.append(next_setting + timedelta(minutes=ext_sunset_offset))
             candidate_times.append(next_setting + timedelta(minutes=dec_sunset_offset))
+            candidate_times.append(next_setting)
         if next_rising:
             candidate_times.append(next_rising + timedelta(minutes=ext_sunrise_offset))
             candidate_times.append(next_rising)
+
+        # Also consider today's recent solar events if their offsets extend into the future
+        recent_setting = next_setting - timedelta(days=1) if next_setting else None
+        recent_rising = next_rising - timedelta(days=1) if next_rising else None
+        if recent_setting:
+            candidate_times.append(recent_setting + timedelta(minutes=ext_sunset_offset))
+            candidate_times.append(recent_setting + timedelta(minutes=dec_sunset_offset))
+        if recent_rising:
+            candidate_times.append(recent_rising + timedelta(minutes=ext_sunrise_offset))
 
         future_times = [t for t in candidate_times if t > now]
         if not future_times:
