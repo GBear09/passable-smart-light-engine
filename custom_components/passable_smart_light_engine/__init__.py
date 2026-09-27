@@ -10,7 +10,8 @@ from typing import Any, Dict
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Event, HomeAssistant, ServiceCall
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_registry as er
 
 from .const import (
@@ -87,6 +88,14 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
     await holiday_store.async_load()
 
     engine = PassableLightingEngine(hass, store)
+    await engine.async_start()
+
+    @callback
+    def _on_hass_stop(_event: Event) -> None:
+        engine.stop()
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_hass_stop)
+
     coordinator = PresenceSimulationCoordinator(hass, engine)
     engine.presence_simulation = coordinator
 

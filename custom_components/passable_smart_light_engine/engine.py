@@ -12,6 +12,7 @@ from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
     async_track_state_change_event,
+    async_track_time_interval,
 )
 import homeassistant.util.dt as dt_util
 
@@ -20,11 +21,14 @@ from .const import (
     BRIGHTNESS_HYSTERESIS_PCT,
     CONF_BYPASS_FREEZE_ENTITIES,
     CONF_BYPASS_OFF_ENTITIES,
+    CONF_CIRCADIAN_ENABLED,
     CONF_LIGHT_ENTITY,
     CONF_LUX_SENSOR,
     CONF_MANUAL_OVERRIDE_ENTITY,
+    CONF_MAX_COLOR_TEMP,
     CONF_MEDIA_ENTITIES,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
+    CONF_MIN_COLOR_TEMP,
     CONF_POWER_GRID_ENTITY,
     CONF_PRESENCE_ENTITIES,
     CONF_PRESENCE_TIMEOUT_MIN,
@@ -33,6 +37,9 @@ from .const import (
     CONF_SETTLING_COOLDOWN_SEC,
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_CIRCADIAN_ENABLED,
+    DEFAULT_CIRCADIAN_MIN_DELTA_KELVIN,
+    DEFAULT_CIRCADIAN_TRANSITION_SEC,
+    DEFAULT_CIRCADIAN_UPDATE_INTERVAL_SEC,
     DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
     DEFAULT_LATE_NIGHT_CONDITION_TYPE,
     DEFAULT_LATE_NIGHT_ENABLED,
@@ -234,6 +241,8 @@ class PassableLightingEngine:
         self._presence_simulation: Optional[Any] = None
         self._holiday_lighting: Optional[Any] = None
         self._media_daylight_suppressed: Dict[str, bool] = {}
+        self._circadian_unsub: Optional[CALLBACK_TYPE] = None
+        self._sun_unsub: Optional[CALLBACK_TYPE] = None
 
     def is_media_daylight_suppressed(self, room_id: str) -> bool:
         """Check if media lighting is currently suppressed due to natural daylight."""
@@ -306,6 +315,8 @@ class PassableLightingEngine:
     def register_controller(self, room_id: str, controller: "RoomController") -> None:
         """Register an active native room controller."""
         self._controllers[room_id] = controller
+        if self._circadian_unsub or self._sun_unsub:
+            self.hass.async_create_task(self.async_evaluate_dynamic_circadian(room_id))
 
     def unregister_controller(self, room_id: str) -> None:
         """Unregister an active native room controller."""
@@ -565,6 +576,177 @@ class PassableLightingEngine:
         await self.hass.services.async_call(
             "light", "turn_off", {"entity_id": light_entity, "transition": transition}, context=engine_context
         )
+
+    async def async_start(self) -> None:
+        """Start central background services including dynamic circadian rhythm tracking."""
+        if self._circadian_unsub:
+            self._circadian_unsub()
+            self._circadian_unsub = None
+        if self._sun_unsub:
+            self._sun_unsub()
+            self._sun_unsub = None
+
+        @callback
+        def _on_circadian_tick(_now: Any) -> None:
+            self.hass.async_create_task(self.async_evaluate_dynamic_circadian())
+
+        self._circadian_unsub = async_track_time_interval(
+            self.hass, _on_circadian_tick, timedelta(seconds=DEFAULT_CIRCADIAN_UPDATE_INTERVAL_SEC)
+        )
+
+        @callback
+        def _on_sun_change(_evt: Event) -> None:
+            self.hass.async_create_task(self.async_evaluate_dynamic_circadian())
+
+        self._sun_unsub = async_track_state_change_event(self.hass, ["sun.sun"], _on_sun_change)
+        _LOGGER.info("PassableSmartLighting: Dynamic circadian rhythm tracking started.")
+
+    def stop(self) -> None:
+        """Stop background tasks and listeners."""
+        if self._circadian_unsub:
+            try:
+                self._circadian_unsub()
+            except Exception:
+                pass
+            self._circadian_unsub = None
+        if self._sun_unsub:
+            try:
+                self._sun_unsub()
+            except Exception:
+                pass
+            self._sun_unsub = None
+
+    async def async_apply_circadian_to_entity(
+        self,
+        room_id: str,
+        entity_id: str,
+        target_kelvin: int,
+        transition: float = DEFAULT_CIRCADIAN_TRANSITION_SEC,
+    ) -> bool:
+        """Apply circadian color temperature to an active light entity if eligible and delta threshold exceeded."""
+        st = self.hass.states.get(entity_id)
+        if not st or st.state != "on":
+            return False
+
+        attrs = st.attributes
+        supported_modes = [str(m).lower() for m in (attrs.get("supported_color_modes") or [])]
+        if "color_temp" not in supported_modes:
+            return False
+
+        # Guard against disrupting active bulb effects (e.g. candle, fire, prism)
+        effect = attrs.get("effect")
+        if effect and str(effect).lower() not in ("off", "none"):
+            return False
+
+        # Guard against disrupting explicit color modes (e.g. RGB / HS / XY)
+        color_mode = attrs.get("color_mode")
+        if color_mode and str(color_mode).lower() not in ("color_temp", "white", "unknown"):
+            return False
+
+        # Clamp target kelvin to hardware fixture limits if exposed
+        min_k = attrs.get("min_color_temp_kelvin")
+        max_k = attrs.get("max_color_temp_kelvin")
+        effective_target = target_kelvin
+        if min_k is not None:
+            effective_target = max(int(min_k), effective_target)
+        if max_k is not None:
+            effective_target = min(int(max_k), effective_target)
+
+        current_kelvin = attrs.get("color_temp_kelvin")
+        if not current_kelvin and attrs.get("color_temp"):
+            try:
+                current_kelvin = int(1000000 / attrs["color_temp"])
+            except (ZeroDivisionError, ValueError, TypeError):
+                current_kelvin = None
+
+        if current_kelvin is not None:
+            delta = abs(effective_target - current_kelvin)
+            if delta < DEFAULT_CIRCADIAN_MIN_DELTA_KELVIN:
+                return False
+
+        # Send color-only command with engine context
+        service_data: Dict[str, Any] = {
+            "entity_id": entity_id,
+            "color_temp_kelvin": effective_target,
+            "transition": transition,
+        }
+        engine_context = Context()
+        ttl = transition + DEFAULT_MESH_SETTLE_SEC + 5.0
+        self.register_engine_context(engine_context.id, ttl)
+
+        _LOGGER.info(
+            "PassableSmartLighting [%s]: Dynamic circadian transition: shifting %s from %sK to %sK (trans: %.1fs)",
+            room_id,
+            entity_id,
+            current_kelvin or "unknown",
+            effective_target,
+            transition,
+        )
+        try:
+            await self.hass.services.async_call("light", "turn_on", service_data, context=engine_context)
+            return True
+        except Exception as err:
+            _LOGGER.warning(
+                "PassableSmartLighting [%s]: Failed to apply dynamic circadian transition to %s: %s",
+                room_id,
+                entity_id,
+                err,
+            )
+            return False
+
+    async def async_evaluate_dynamic_circadian(self, room_id: Optional[str] = None) -> None:
+        """Evaluate and apply dynamic circadian color temperature for active rooms."""
+        target_controllers = (
+            [self._controllers[room_id]]
+            if room_id and room_id in self._controllers
+            else list(self._controllers.values())
+        )
+
+        for ctrl in target_controllers:
+            if not ctrl.is_enabled:
+                continue
+
+            entry_data = ctrl.entry_data
+            if not bool(entry_data.get(CONF_CIRCADIAN_ENABLED, DEFAULT_CIRCADIAN_ENABLED)):
+                continue
+
+            r_id = ctrl.room_id
+
+            # Skip if manual override is active
+            if self.is_manual_override_active(r_id):
+                continue
+
+            # Skip if freeze bypass or force-off bypass is active
+            is_frozen, is_forced_off = self.check_bypasses(
+                entry_data.get(CONF_BYPASS_FREEZE_ENTITIES),
+                entry_data.get(CONF_BYPASS_OFF_ENTITIES),
+                entry_data.get(CONF_MANUAL_OVERRIDE_ENTITY),
+            )
+            if is_frozen or is_forced_off or ctrl.freeze_bypass_active:
+                continue
+
+            light_entity = entry_data.get(CONF_LIGHT_ENTITY)
+            if not light_entity:
+                continue
+
+            # Skip if simulating presence or holiday lighting active on this fixture
+            if self.is_simulating_presence(light_entity) or self.is_holiday_active(light_entity):
+                continue
+
+            min_temp = int(entry_data.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP))
+            max_temp = int(entry_data.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP))
+            target_kelvin = get_circadian_temp(self.hass, min_temp, max_temp)
+
+            # Apply to primary light entity
+            await self.async_apply_circadian_to_entity(r_id, light_entity, target_kelvin)
+
+            # Also apply to secondary lights if on and supported
+            sec_lights = entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS) or []
+            if isinstance(sec_lights, str):
+                sec_lights = [sec_lights]
+            for sec_ent in sec_lights:
+                if sec_ent:
+                    await self.async_apply_circadian_to_entity(r_id, sec_ent, target_kelvin)
 
     async def async_sync_helper(self, entity_id: Optional[str], target_state: bool) -> None:
         """Synchronize an existing helper entity (e.g. input_boolean)."""

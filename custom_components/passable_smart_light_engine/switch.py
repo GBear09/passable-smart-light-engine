@@ -146,6 +146,9 @@ class PassableLightingCircadianSwitch(PassableLightingBaseEntity, SwitchEntity):
         self._controller.entry_data = new_data
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
         self.async_write_ha_state()
+        self.hass.async_create_task(
+            self._controller.engine.async_evaluate_dynamic_circadian(self._room_id)
+        )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable circadian rhythm."""
@@ -356,7 +359,7 @@ class PassableHolidayLightingMasterSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.4.3",
+            sw_version="2.4.4",
         )
 
     @property
@@ -408,7 +411,7 @@ class PassableHolidayDecorationsSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.4.3",
+            sw_version="2.4.4",
         )
 
     @property
@@ -455,7 +458,7 @@ class PassableExteriorLightingSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.4.3",
+            sw_version="2.4.4",
         )
 
     @property
