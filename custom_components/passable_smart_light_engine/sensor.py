@@ -1,4 +1,4 @@
-"""Sensor platform for Passable Adaptive Smart Lighting Controller."""
+"""Sensor platform for Passable Smart Light Engine."""
 
 import time
 from typing import Any, Dict, List, Optional
@@ -31,6 +31,7 @@ from .const import (
     DEFAULT_TARGET_LUX,
     DOMAIN,
     MODE_HOLIDAY,
+    MODE_NOTIFICATION,
     MODE_PRESENCE_SIMULATION,
     RESET_TYPES,
 )
@@ -213,6 +214,9 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
         if is_frozen:
             return "frozen"
 
+        if self._controller.is_notification_showing:
+            return MODE_NOTIFICATION
+
         media = self._controller.entry_data.get("media_entities", [])
         if self._engine.check_media(media):
             return "media"
@@ -269,6 +273,10 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
         )
 
         return {
+            "notification_light_enabled": self._controller.is_notification_enabled,
+            "notification_pending": self._controller.is_notification_pending,
+            "notification_showing": self._controller.is_notification_showing,
+            "notification_light_entity": self._controller.notification_light_entity,
             "media_preferences": media_prefs,
             "media_target_pct": media_target,
             "media_respect_ambient_lux": bool(
@@ -398,7 +406,7 @@ class PassableActiveHolidaySensor(SensorEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.4.4",
+            sw_version="2.5.0",
         )
 
     @property

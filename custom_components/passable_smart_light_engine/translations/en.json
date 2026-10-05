@@ -116,6 +116,28 @@
               "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout.",
               "settling_cooldown_sec": "Time to wait for slow illuminance sensors (e.g. Aqara Matter, battery Zigbee) to report before making another closed-loop brightness adjustment."
             }
+          },
+          "notification_light": {
+            "name": "🔔 Visual Notification Lights",
+            "description": "Configure an individual light bulb to display visual notifications (e.g. laundry alert) while other room lights operate normally.",
+            "data": {
+              "notification_light_enabled": "Enable Visual Notification Light",
+              "notification_trigger_entity": "Notification Trigger Entity (e.g. input_boolean.laundry_washer_pending)",
+              "notification_light_entity": "Target Notification Light (Individual Bulb)",
+              "notification_color": "Notification RGB Color",
+              "notification_brightness_pct": "Notification Brightness %",
+              "notification_presence_gated": "Presence-Gated (Only illuminate when room is occupied)",
+              "notification_suppression_entities": "Sleep / Quiet Suppression Entities"
+            },
+            "data_description": {
+              "notification_light_enabled": "When enabled, the selected light bulb will display the visual alert color when the trigger is active.",
+              "notification_trigger_entity": "Entity that triggers the visual notification when ON or ACTIVE.",
+              "notification_light_entity": "Specific light fixture or bulb (e.g. overhead pendant) to claim out of the room group.",
+              "notification_color": "RGB color to display for the visual notification.",
+              "notification_brightness_pct": "Brightness percentage for the visual notification.",
+              "notification_presence_gated": "When enabled, the notification bulb turns on only when room presence is detected, and turns off when vacant.",
+              "notification_suppression_entities": "Entities that suppress the notification when active (e.g. input_boolean.sleeping_in_living_room or input_select.home_state)."
+            }
           }
         },
         "data": {
@@ -144,7 +166,7 @@
       }
     },
     "abort": {
-      "already_configured": "This room ID is already configured in Passable Adaptive Smart Lighting Controller."
+      "already_configured": "This room ID is already configured in Passable Smart Light Engine."
     }
   },
   "options": {
@@ -244,6 +266,28 @@
               "override_timeout_min": "Minutes to keep manual override active before resuming automatic control.",
               "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout.",
               "settling_cooldown_sec": "Time to wait for slow illuminance sensors (e.g. Aqara Matter, battery Zigbee) to report before making another closed-loop brightness adjustment."
+            }
+          },
+          "notification_light": {
+            "name": "🔔 Visual Notification Lights",
+            "description": "Configure an individual light bulb to display visual notifications (e.g. laundry alert) while other room lights operate normally.",
+            "data": {
+              "notification_light_enabled": "Enable Visual Notification Light",
+              "notification_trigger_entity": "Notification Trigger Entity (e.g. input_boolean.laundry_washer_pending)",
+              "notification_light_entity": "Target Notification Light (Individual Bulb)",
+              "notification_color": "Notification RGB Color",
+              "notification_brightness_pct": "Notification Brightness %",
+              "notification_presence_gated": "Presence-Gated (Only illuminate when room is occupied)",
+              "notification_suppression_entities": "Sleep / Quiet Suppression Entities"
+            },
+            "data_description": {
+              "notification_light_enabled": "When enabled, the selected light bulb will display the visual alert color when the trigger is active.",
+              "notification_trigger_entity": "Entity that triggers the visual notification when ON or ACTIVE.",
+              "notification_light_entity": "Specific light fixture or bulb (e.g. overhead pendant) to claim out of the room group.",
+              "notification_color": "RGB color to display for the visual notification.",
+              "notification_brightness_pct": "Brightness percentage for the visual notification.",
+              "notification_presence_gated": "When enabled, the notification bulb turns on only when room presence is detected, and turns off when vacant.",
+              "notification_suppression_entities": "Entities that suppress the notification when active (e.g. input_boolean.sleeping_in_living_room or input_select.home_state)."
             }
           }
         },

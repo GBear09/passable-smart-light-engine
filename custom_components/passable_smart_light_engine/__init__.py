@@ -1,4 +1,4 @@
-"""Passable Adaptive Smart Lighting Controller integration setup."""
+"""Passable Smart Light Engine integration setup."""
 
 import asyncio
 import logging
@@ -233,7 +233,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
 
     hass.async_create_task(_async_ensure_holiday_entry())
 
-    _LOGGER.info("Passable Adaptive Smart Lighting Controller component initialized successfully.")
+    _LOGGER.info("Passable Smart Light Engine component initialized successfully.")
     return True
 
 

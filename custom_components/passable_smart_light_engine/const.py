@@ -1,4 +1,4 @@
-"""Constants for the Passable Adaptive Smart Lighting Controller integration."""
+"""Constants for the Passable Smart Light Engine integration."""
 
 from typing import List
 
@@ -51,6 +51,14 @@ CONF_LATE_NIGHT_START_ENTITY = "late_night_start_entity"
 CONF_LATE_NIGHT_STOP_TIME = "late_night_stop_time"
 CONF_LATE_NIGHT_STOP_ENTITY = "late_night_stop_entity"
 
+CONF_NOTIFICATION_LIGHT_ENABLED = "notification_light_enabled"
+CONF_NOTIFICATION_TRIGGER_ENTITY = "notification_trigger_entity"
+CONF_NOTIFICATION_LIGHT_ENTITY = "notification_light_entity"
+CONF_NOTIFICATION_COLOR = "notification_color"
+CONF_NOTIFICATION_BRIGHTNESS_PCT = "notification_brightness_pct"
+CONF_NOTIFICATION_PRESENCE_GATED = "notification_presence_gated"
+CONF_NOTIFICATION_SUPPRESSION_ENTITIES = "notification_suppression_entities"
+
 CONF_POWER_GRID_ENTITY = "power_grid_entity"
 CONF_SETTLING_COOLDOWN_SEC = "settling_cooldown_sec"
 
@@ -60,6 +68,15 @@ SECTION_CIRCADIAN = "circadian"
 SECTION_LATE_NIGHT = "late_night"
 SECTION_MEDIA = "media"
 SECTION_BYPASSES = "bypasses"
+SECTION_NOTIFICATION_LIGHT = "notification_light"
+
+# Default values
+DEFAULT_NOTIFICATION_LIGHT_ENABLED = False
+DEFAULT_NOTIFICATION_COLOR = [0, 0, 255]
+DEFAULT_NOTIFICATION_BRIGHTNESS_PCT = 100
+DEFAULT_NOTIFICATION_PRESENCE_GATED = True
+DEFAULT_NOTIFICATION_SUPPRESSION_ENTITIES: List[str] = []
+MODE_NOTIFICATION = "notification"
 
 # Default values
 DEFAULT_TARGET_LUX = 40

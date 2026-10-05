@@ -1,4 +1,4 @@
-# 💡 Passable Adaptive Smart Lighting Controller
+# 💡 Passable Smart Light Engine
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/default)
 [![GitHub Release](https://img.shields.io/github/v/release/GBear09/passable-smart-light-engine)](https://github.com/GBear09/passable-smart-light-engine/releases)
@@ -12,6 +12,7 @@ Configure rooms seamlessly using the **Native UI Config Flow** (with zero automa
 
 ## ⚙️ Key Features
 
+- **🔔 Visual Notification Lights:** Claims an individual bulb or fixture out of a room group to display custom RGB notifications (such as laundry, doorbell, or alert flags). Seamlessly disaggregates group control so remaining fixtures maintain adaptive lux dimming and circadian white, follows the room's occupancy and vacancy countdown lifecycle (with daylight exemption), and honors sleep/quiet suppression.
 - **📈 Adaptive Lux Yield Curve Learning:** Calculates how much ambient lux each 1% of brightness produces in your specific room, adjusting dimmer levels smoothly to maintain your target lux.
 - **🎓 Dual-Track Preference Learning:** Learns your personal brightness preferences based on sun elevation whenever you manually override the lights.
 - **⏱️ Sensor Lag Compensation:** Asynchronously waits for slow sensors (e.g., Philips Hue, Zigbee motion/illuminance sensors) to report final lux values before saving preference data.
@@ -148,7 +149,7 @@ flowchart TD
    https://github.com/GBear09/passable-smart-light-engine
    ```
 4. Select **Type:** `Integration`.
-5. Click **Add**, then find **Passable Adaptive Smart Lighting Controller** and click **Download**.
+5. Click **Add**, then find **Passable Smart Light Engine** and click **Download**.
 6. Restart Home Assistant.
 
 ---
@@ -158,7 +159,7 @@ flowchart TD
 ### Option A: Native UI Config Flow (Zero Automations)
 
 1. Go to **Settings → Devices & Services → Add Integration**.
-2. Search for **Passable Adaptive Smart Lighting Controller**.
+2. Search for **Passable Smart Light Engine**.
 3. **Step 1: Core Room Setup**
    * **Room ID:** Unique room identifier with no spaces (e.g. `living_room`).
    * **Light Entity:** The main light or light group to control.

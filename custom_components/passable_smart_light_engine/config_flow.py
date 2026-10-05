@@ -1,4 +1,4 @@
-"""Config flow and options flow for Passable Adaptive Smart Lighting Controller."""
+"""Config flow and options flow for Passable Smart Light Engine."""
 
 import logging
 from typing import Any, Dict, List, Optional
@@ -59,6 +59,13 @@ from .const import (
     CONF_MEDIA_SEED_PCT,
     CONF_MIN_COLOR_TEMP,
     CONF_MIN_OCCUPIED_PCT,
+    CONF_NOTIFICATION_BRIGHTNESS_PCT,
+    CONF_NOTIFICATION_COLOR,
+    CONF_NOTIFICATION_LIGHT_ENABLED,
+    CONF_NOTIFICATION_LIGHT_ENTITY,
+    CONF_NOTIFICATION_PRESENCE_GATED,
+    CONF_NOTIFICATION_SUPPRESSION_ENTITIES,
+    CONF_NOTIFICATION_TRIGGER_ENTITY,
     CONF_OVERRIDE_TIMEOUT_MIN,
     CONF_POWER_GRID_ENTITY,
     CONF_PRESENCE_ENTITIES,
@@ -112,6 +119,11 @@ from .const import (
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_MIN_COLOR_TEMP,
     DEFAULT_MIN_OCCUPIED_PCT,
+    DEFAULT_NOTIFICATION_BRIGHTNESS_PCT,
+    DEFAULT_NOTIFICATION_COLOR,
+    DEFAULT_NOTIFICATION_LIGHT_ENABLED,
+    DEFAULT_NOTIFICATION_PRESENCE_GATED,
+    DEFAULT_NOTIFICATION_SUPPRESSION_ENTITIES,
     DEFAULT_OVERRIDE_TIMEOUT_MIN,
     DEFAULT_POWER_GRID_ENTITY,
     DEFAULT_PRESENCE_TIMEOUT_MIN,
@@ -137,6 +149,7 @@ from .const import (
     SECTION_HARDWARE,
     SECTION_LATE_NIGHT,
     SECTION_MEDIA,
+    SECTION_NOTIFICATION_LIGHT,
 )
 
 
@@ -486,6 +499,28 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     {"collapsed": True},
                 ),
+                vol.Required(SECTION_NOTIFICATION_LIGHT): data_entry_flow.section(
+                    vol.Schema(
+                        {
+                            vol.Optional(CONF_NOTIFICATION_LIGHT_ENABLED, default=DEFAULT_NOTIFICATION_LIGHT_ENABLED): selector.BooleanSelector(),
+                            vol.Optional(CONF_NOTIFICATION_TRIGGER_ENTITY): OptionalEntitySelector(
+                                selector.EntitySelectorConfig(domain=["input_boolean", "binary_sensor", "switch", "sensor"])
+                            ),
+                            vol.Optional(CONF_NOTIFICATION_LIGHT_ENTITY): OptionalEntitySelector(
+                                selector.EntitySelectorConfig(domain="light")
+                            ),
+                            vol.Optional(CONF_NOTIFICATION_COLOR, default=DEFAULT_NOTIFICATION_COLOR): selector.ColorRGBSelector(),
+                            vol.Optional(CONF_NOTIFICATION_BRIGHTNESS_PCT, default=DEFAULT_NOTIFICATION_BRIGHTNESS_PCT): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=1, max=100, step=1, mode=selector.NumberSelectorMode.SLIDER)
+                            ),
+                            vol.Optional(CONF_NOTIFICATION_PRESENCE_GATED, default=DEFAULT_NOTIFICATION_PRESENCE_GATED): selector.BooleanSelector(),
+                            vol.Optional(CONF_NOTIFICATION_SUPPRESSION_ENTITIES, default=[]): OptionalEntitySelector(
+                                selector.EntitySelectorConfig(multiple=True)
+                            ),
+                        }
+                    ),
+                    {"collapsed": True},
+                ),
             }
         )
 
@@ -651,6 +686,49 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                             ),
                             vol.Optional(CONF_SETTLING_COOLDOWN_SEC, default=d.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC)): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=5, max=180, step=5, mode=selector.NumberSelectorMode.BOX)
+                            ),
+                        }
+                    ),
+                    {"collapsed": True},
+                ),
+                vol.Required(SECTION_NOTIFICATION_LIGHT): data_entry_flow.section(
+                    vol.Schema(
+                        {
+                            vol.Optional(
+                                CONF_NOTIFICATION_LIGHT_ENABLED,
+                                default=d.get(CONF_NOTIFICATION_LIGHT_ENABLED, DEFAULT_NOTIFICATION_LIGHT_ENABLED),
+                            ): selector.BooleanSelector(),
+                            vol.Optional(
+                                CONF_NOTIFICATION_TRIGGER_ENTITY,
+                                description={"suggested_value": d.get(CONF_NOTIFICATION_TRIGGER_ENTITY)},
+                            ): OptionalEntitySelector(
+                                selector.EntitySelectorConfig(domain=["input_boolean", "binary_sensor", "switch", "sensor"])
+                            ),
+                            vol.Optional(
+                                CONF_NOTIFICATION_LIGHT_ENTITY,
+                                description={"suggested_value": d.get(CONF_NOTIFICATION_LIGHT_ENTITY)},
+                            ): OptionalEntitySelector(
+                                selector.EntitySelectorConfig(domain="light")
+                            ),
+                            vol.Optional(
+                                CONF_NOTIFICATION_COLOR,
+                                default=d.get(CONF_NOTIFICATION_COLOR, DEFAULT_NOTIFICATION_COLOR),
+                            ): selector.ColorRGBSelector(),
+                            vol.Optional(
+                                CONF_NOTIFICATION_BRIGHTNESS_PCT,
+                                default=d.get(CONF_NOTIFICATION_BRIGHTNESS_PCT, DEFAULT_NOTIFICATION_BRIGHTNESS_PCT),
+                            ): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=1, max=100, step=1, mode=selector.NumberSelectorMode.SLIDER)
+                            ),
+                            vol.Optional(
+                                CONF_NOTIFICATION_PRESENCE_GATED,
+                                default=d.get(CONF_NOTIFICATION_PRESENCE_GATED, DEFAULT_NOTIFICATION_PRESENCE_GATED),
+                            ): selector.BooleanSelector(),
+                            vol.Optional(
+                                CONF_NOTIFICATION_SUPPRESSION_ENTITIES,
+                                description={"suggested_value": d.get(CONF_NOTIFICATION_SUPPRESSION_ENTITIES, [])},
+                            ): OptionalEntitySelector(
+                                selector.EntitySelectorConfig(multiple=True)
                             ),
                         }
                     ),
