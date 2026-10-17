@@ -17,13 +17,17 @@ from .const import (
     ACTIVE_HOLIDAY_SENSOR_ENTITY_ID,
     ACTIVE_HOLIDAY_SENSOR_UNIQUE_ID,
     CONF_DEFAULT_LUX_RATIO,
+    CONF_LATE_NIGHT_LEARN_PREFS,
+    CONF_MEDIA_LEARN_PREFS,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_ROOM_ID,
     CONF_SECONDARY_LIGHTS,
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
+    DEFAULT_LATE_NIGHT_LEARN_PREFS,
     DEFAULT_LATE_NIGHT_PCT,
     DEFAULT_LUX_RATIO,
+    DEFAULT_MEDIA_LEARN_PREFS,
     DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_SECONDARY_LIGHTS,
@@ -79,6 +83,7 @@ async def async_setup_entry(
     if not data.get("system_sensor_registered"):
         entities.append(PassableLightingEngineReadySensor(hass, engine.store))
         data["system_sensor_registered"] = True
+        data["system_sensor_entry_id"] = entry.entry_id
 
     async_add_entities(entities)
 
@@ -106,7 +111,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.2.2",
+            sw_version="2.6.0",
         )
 
 
@@ -261,8 +266,20 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
         media_seed = int(self._controller.entry_data.get("media_seed_pct", DEFAULT_MEDIA_SEED_PCT))
         late_night_seed = int(self._controller.entry_data.get("late_night_pct", DEFAULT_LATE_NIGHT_PCT))
 
-        media_target = int(sum(media_prefs) / len(media_prefs)) if media_prefs else media_seed
-        late_night_target = int(sum(late_night_prefs) / len(late_night_prefs)) if late_night_prefs else late_night_seed
+        media_learn = bool(self._controller.entry_data.get(CONF_MEDIA_LEARN_PREFS, DEFAULT_MEDIA_LEARN_PREFS))
+        late_night_learn = bool(
+            self._controller.entry_data.get(CONF_LATE_NIGHT_LEARN_PREFS, DEFAULT_LATE_NIGHT_LEARN_PREFS)
+        )
+
+        if media_learn and media_prefs:
+            media_target = int(sum(media_prefs) / len(media_prefs))
+        else:
+            media_target = media_seed
+
+        if late_night_learn and late_night_prefs:
+            late_night_target = int(sum(late_night_prefs) / len(late_night_prefs))
+        else:
+            late_night_target = late_night_seed
 
         sec_lights = self._controller.entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
         if isinstance(sec_lights, str):
@@ -277,6 +294,7 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
             "notification_pending": self._controller.is_notification_pending,
             "notification_showing": self._controller.is_notification_showing,
             "notification_light_entity": self._controller.notification_light_entity,
+            "media_learning_enabled": media_learn,
             "media_preferences": media_prefs,
             "media_target_pct": media_target,
             "media_respect_ambient_lux": bool(
@@ -285,6 +303,7 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
                 )
             ),
             "media_daylight_suppressed": self._engine.is_media_daylight_suppressed(self._room_id),
+            "late_night_learning_enabled": late_night_learn,
             "late_night_preferences": late_night_prefs,
             "late_night_target_pct": late_night_target,
             "secondary_lights": sec_lights or [],
@@ -406,7 +425,7 @@ class PassableActiveHolidaySensor(SensorEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.5.0",
+            sw_version="2.6.0",
         )
 
     @property

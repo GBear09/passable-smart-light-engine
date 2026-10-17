@@ -45,6 +45,7 @@ from .const import (
     CONF_LATE_NIGHT_CONDITION_TYPE,
     CONF_LATE_NIGHT_ENABLED,
     CONF_LATE_NIGHT_ENTITY,
+    CONF_LATE_NIGHT_LEARN_PREFS,
     CONF_LATE_NIGHT_PCT,
     CONF_LATE_NIGHT_START_ENTITY,
     CONF_LATE_NIGHT_START_TIME,
@@ -55,6 +56,7 @@ from .const import (
     CONF_MANUAL_OVERRIDE_ENTITY,
     CONF_MAX_COLOR_TEMP,
     CONF_MEDIA_ENTITIES,
+    CONF_MEDIA_LEARN_PREFS,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_MEDIA_SEED_PCT,
     CONF_MIN_COLOR_TEMP,
@@ -110,11 +112,13 @@ from .const import (
     DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
     DEFAULT_LATE_NIGHT_CONDITION_TYPE,
     DEFAULT_LATE_NIGHT_ENABLED,
+    DEFAULT_LATE_NIGHT_LEARN_PREFS,
     DEFAULT_LATE_NIGHT_PCT,
     DEFAULT_LATE_NIGHT_START_TIME,
     DEFAULT_LATE_NIGHT_STOP_TIME,
     DEFAULT_LUX_RATIO,
     DEFAULT_MAX_COLOR_TEMP,
+    DEFAULT_MEDIA_LEARN_PREFS,
     DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_MIN_COLOR_TEMP,
@@ -453,6 +457,7 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             vol.Optional(CONF_LATE_NIGHT_STOP_ENTITY): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="input_datetime")
                             ),
+                            vol.Optional(CONF_LATE_NIGHT_LEARN_PREFS, default=DEFAULT_LATE_NIGHT_LEARN_PREFS): selector.BooleanSelector(),
                         }
                     ),
                     {"collapsed": True},
@@ -467,6 +472,7 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 selector.NumberSelectorConfig(min=0, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
                             ),
                             vol.Optional(CONF_MEDIA_RESPECT_AMBIENT_LUX, default=DEFAULT_MEDIA_RESPECT_AMBIENT_LUX): selector.BooleanSelector(),
+                            vol.Optional(CONF_MEDIA_LEARN_PREFS, default=DEFAULT_MEDIA_LEARN_PREFS): selector.BooleanSelector(),
                         }
                     ),
                     {"collapsed": True},
@@ -642,6 +648,10 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                             vol.Optional(CONF_LATE_NIGHT_STOP_ENTITY, description={"suggested_value": d.get(CONF_LATE_NIGHT_STOP_ENTITY)}): OptionalEntitySelector(
                                 selector.EntitySelectorConfig(domain="input_datetime")
                             ),
+                            vol.Optional(
+                                CONF_LATE_NIGHT_LEARN_PREFS,
+                                default=d.get(CONF_LATE_NIGHT_LEARN_PREFS, DEFAULT_LATE_NIGHT_LEARN_PREFS),
+                            ): selector.BooleanSelector(),
                         }
                     ),
                     {"collapsed": True},
@@ -658,6 +668,10 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                             vol.Optional(
                                 CONF_MEDIA_RESPECT_AMBIENT_LUX,
                                 default=d.get(CONF_MEDIA_RESPECT_AMBIENT_LUX, DEFAULT_MEDIA_RESPECT_AMBIENT_LUX),
+                            ): selector.BooleanSelector(),
+                            vol.Optional(
+                                CONF_MEDIA_LEARN_PREFS,
+                                default=d.get(CONF_MEDIA_LEARN_PREFS, DEFAULT_MEDIA_LEARN_PREFS),
                             ): selector.BooleanSelector(),
                         }
                     ),

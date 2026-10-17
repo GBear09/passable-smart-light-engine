@@ -27,7 +27,9 @@ from .const import (
     CONF_MANUAL_OVERRIDE_ENTITY,
     CONF_MAX_COLOR_TEMP,
     CONF_MEDIA_ENTITIES,
+    CONF_MEDIA_LEARN_PREFS,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
+    CONF_LATE_NIGHT_LEARN_PREFS,
     CONF_MIN_COLOR_TEMP,
     CONF_NOTIFICATION_BRIGHTNESS_PCT,
     CONF_NOTIFICATION_COLOR,
@@ -50,11 +52,13 @@ from .const import (
     DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
     DEFAULT_LATE_NIGHT_CONDITION_TYPE,
     DEFAULT_LATE_NIGHT_ENABLED,
+    DEFAULT_LATE_NIGHT_LEARN_PREFS,
     DEFAULT_LATE_NIGHT_PCT,
     DEFAULT_LATE_NIGHT_START_TIME,
     DEFAULT_LATE_NIGHT_STOP_TIME,
     DEFAULT_LUX_RATIO,
     DEFAULT_MAX_COLOR_TEMP,
+    DEFAULT_MEDIA_LEARN_PREFS,
     DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_MESH_SETTLE_SEC,
@@ -993,6 +997,7 @@ class PassableLightingEngine:
         min_color_temp = int(p.get("min_color_temp", DEFAULT_MIN_COLOR_TEMP))
         max_color_temp = int(p.get("max_color_temp", DEFAULT_MAX_COLOR_TEMP))
         media_seed_pct = int(p.get("media_seed_pct", DEFAULT_MEDIA_SEED_PCT))
+        media_learn_prefs = bool(p.get(CONF_MEDIA_LEARN_PREFS, DEFAULT_MEDIA_LEARN_PREFS))
         override_timeout_min = int(p.get("override_timeout_min", DEFAULT_OVERRIDE_TIMEOUT_MIN))
         manual_override_entity = p.get("manual_override_entity")
         ignore_max_override = bool(p.get("ignore_max_brightness_override", DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE))
@@ -1001,6 +1006,7 @@ class PassableLightingEngine:
         late_night_pct = int(p.get("late_night_pct", DEFAULT_LATE_NIGHT_PCT))
         late_night_cond_type = str(p.get("late_night_condition_type", DEFAULT_LATE_NIGHT_CONDITION_TYPE))
         late_night_entity = p.get("late_night_entity")
+        late_night_learn_prefs = bool(p.get(CONF_LATE_NIGHT_LEARN_PREFS, DEFAULT_LATE_NIGHT_LEARN_PREFS))
         late_night_start_time = str(p.get("late_night_start_time", DEFAULT_LATE_NIGHT_START_TIME))
         late_night_start_entity = p.get("late_night_start_entity")
         late_night_stop_time = str(p.get("late_night_stop_time", DEFAULT_LATE_NIGHT_STOP_TIME))
@@ -1441,7 +1447,11 @@ class PassableLightingEngine:
                     return
 
             self._media_daylight_suppressed[room_id] = False
-            target_pct = int(sum(media_prefs) / len(media_prefs)) if media_prefs else media_seed_pct
+            target_pct = (
+                int(sum(media_prefs) / len(media_prefs))
+                if (media_prefs and media_learn_prefs)
+                else media_seed_pct
+            )
             if target_pct <= 0:
                 if is_light_on and active_light_target:
                     await self.async_turn_off_light(room_id, active_light_target)
@@ -1470,7 +1480,9 @@ class PassableLightingEngine:
             late_night_stop_entity,
         ):
             target_pct = (
-                int(sum(late_night_prefs) / len(late_night_prefs)) if late_night_prefs else late_night_pct
+                int(sum(late_night_prefs) / len(late_night_prefs))
+                if (late_night_prefs and late_night_learn_prefs)
+                else late_night_pct
             )
             if target_pct <= 0:
                 if is_light_on and active_light_target:
@@ -1670,6 +1682,20 @@ class PassableLightingEngine:
             p.get("late_night_start_entity"),
             p.get("late_night_stop_entity"),
         )
+        if is_media and not bool(p.get(CONF_MEDIA_LEARN_PREFS, DEFAULT_MEDIA_LEARN_PREFS)):
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Skipping preference learning (media preference learning is disabled).",
+                room_id,
+            )
+            return
+
+        if is_late_night and not bool(p.get(CONF_LATE_NIGHT_LEARN_PREFS, DEFAULT_LATE_NIGHT_LEARN_PREFS)):
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Skipping preference learning (late night preference learning is disabled).",
+                room_id,
+            )
+            return
+
         mode_tag = "media" if is_media else ("late_night" if is_late_night else "general")
 
         @callback
@@ -1718,6 +1744,12 @@ class PassableLightingEngine:
 
             # Context-Aware Preference Commit Branching
             if mode_tag == "media":
+                if not bool(p.get(CONF_MEDIA_LEARN_PREFS, DEFAULT_MEDIA_LEARN_PREFS)):
+                    _LOGGER.debug(
+                        "PassableSmartLighting [%s]: Media preference learning disabled; discarding preference point.",
+                        room_id,
+                    )
+                    return
                 m_prefs = self.store.data.setdefault("media_prefs", {}).setdefault(room_id, [])
                 m_prefs.append(current_pct)
                 if len(m_prefs) > 20:
@@ -1732,6 +1764,12 @@ class PassableLightingEngine:
                 return
 
             if mode_tag == "late_night":
+                if not bool(p.get(CONF_LATE_NIGHT_LEARN_PREFS, DEFAULT_LATE_NIGHT_LEARN_PREFS)):
+                    _LOGGER.debug(
+                        "PassableSmartLighting [%s]: Late night preference learning disabled; discarding preference point.",
+                        room_id,
+                    )
+                    return
                 ln_prefs = self.store.data.setdefault("late_night_prefs", {}).setdefault(room_id, [])
                 ln_prefs.append(current_pct)
                 if len(ln_prefs) > 20:

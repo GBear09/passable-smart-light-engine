@@ -357,6 +357,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         engine: PassableLightingEngine = data["engine"]
         engine.unregister_controller(controller.room_id)
 
+    if data.get("system_sensor_entry_id") == entry.entry_id:
+        data["system_sensor_registered"] = False
+        data["system_sensor_entry_id"] = None
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return unload_ok
 

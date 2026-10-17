@@ -65,6 +65,7 @@
             "description": "Dim nighttime preset triggered by schedule or bedtime helper.",
             "data": {
               "late_night_enabled": "Enable Late Night Mode",
+              "late_night_learn_prefs": "Enable Late Night Preference Learning",
               "late_night_pct": "Late Night Brightness % (Seed)",
               "late_night_condition_type": "Late Night Trigger Mode",
               "late_night_entity": "Late Night Active Helper Entity / Group",
@@ -74,6 +75,7 @@
               "late_night_stop_entity": "Late Night Stop Entity (input_datetime)"
             },
             "data_description": {
+              "late_night_learn_prefs": "When enabled, manual brightness adjustments made during Late Night mode are learned and averaged over time. When disabled, brightness remains fixed to the seed percentage.",
               "late_night_pct": "Active when Late Night Mode is enabled. Target brightness during late night window.",
               "late_night_condition_type": "Choose between fixed clock time or an entity/group state helper.",
               "late_night_entity": "Binary sensor or boolean switch that triggers Late Night when ON.",
@@ -86,11 +88,13 @@
             "description": "Dim room lights automatically when media players are active.",
             "data": {
               "media_entities": "Media Player Entities",
+              "media_learn_prefs": "Enable Media Preference Learning",
               "media_seed_pct": "Media Brightness % (Seed)",
               "media_respect_ambient_lux": "Respect Natural Daylight (Keep / Turn Off in Daylight)"
             },
             "data_description": {
               "media_entities": "Select media players to watch. When playing, lights transition to media brightness.",
+              "media_learn_prefs": "When enabled, manual brightness adjustments made during Media playback are learned and averaged over time. When disabled, brightness remains fixed to the seed percentage.",
               "media_seed_pct": "Baseline brightness percentage applied when media is playing.",
               "media_respect_ambient_lux": "When enabled, media lighting only turns on when ambient lux is below the target threshold. If natural daylight is sufficient, lights remain off."
             }
@@ -152,8 +156,10 @@
           "min_color_temp": "Warmest Temp (Kelvin)",
           "max_color_temp": "Coolest Temp (Kelvin)",
           "media_entities": "Media Player Entities",
+          "media_learn_prefs": "Enable Media Preference Learning",
           "media_seed_pct": "Media Brightness % (Seed)",
           "late_night_enabled": "Enable Late Night Mode",
+          "late_night_learn_prefs": "Enable Late Night Preference Learning",
           "late_night_pct": "Late Night Brightness % (Seed)",
           "late_night_condition_type": "Late Night Trigger Mode",
           "late_night_entity": "Late Night Active Helper Entity / Group",
@@ -216,6 +222,7 @@
             "description": "Dim nighttime preset triggered by schedule or bedtime helper.",
             "data": {
               "late_night_enabled": "Enable Late Night Mode",
+              "late_night_learn_prefs": "Enable Late Night Preference Learning",
               "late_night_pct": "Late Night Brightness % (Seed)",
               "late_night_condition_type": "Late Night Trigger Mode",
               "late_night_entity": "Late Night Active Helper Entity / Group",
@@ -225,6 +232,7 @@
               "late_night_stop_entity": "Late Night Stop Entity (input_datetime)"
             },
             "data_description": {
+              "late_night_learn_prefs": "When enabled, manual brightness adjustments made during Late Night mode are learned and averaged over time. When disabled, brightness remains fixed to the seed percentage.",
               "late_night_pct": "Active when Late Night Mode is enabled. Target brightness during late night window.",
               "late_night_condition_type": "Choose between fixed clock time or an entity/group state helper.",
               "late_night_entity": "Binary sensor or boolean switch that triggers Late Night when ON.",
@@ -237,11 +245,13 @@
             "description": "Dim room lights automatically when media players are active.",
             "data": {
               "media_entities": "Media Player Entities",
+              "media_learn_prefs": "Enable Media Preference Learning",
               "media_seed_pct": "Media Brightness % (Seed)",
               "media_respect_ambient_lux": "Respect Natural Daylight (Keep / Turn Off in Daylight)"
             },
             "data_description": {
               "media_entities": "Select media players to watch. When playing, lights transition to media brightness.",
+              "media_learn_prefs": "When enabled, manual brightness adjustments made during Media playback are learned and averaged over time. When disabled, brightness remains fixed to the seed percentage.",
               "media_seed_pct": "Baseline brightness percentage applied when media is playing.",
               "media_respect_ambient_lux": "When enabled, media lighting only turns on when ambient lux is below the target threshold. If natural daylight is sufficient, lights remain off."
             }
@@ -310,8 +320,10 @@
           "min_color_temp": "Warmest Temp (Kelvin)",
           "max_color_temp": "Coolest Temp (Kelvin)",
           "media_entities": "Media Player Entities",
+          "media_learn_prefs": "Enable Media Preference Learning",
           "media_seed_pct": "Media Brightness % (Seed)",
           "late_night_enabled": "Enable Late Night Mode",
+          "late_night_learn_prefs": "Enable Late Night Preference Learning",
           "late_night_pct": "Late Night Brightness % (Seed)",
           "late_night_condition_type": "Late Night Trigger Mode",
           "late_night_entity": "Late Night Active Helper Entity / Group",
