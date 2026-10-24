@@ -24,6 +24,8 @@ async def async_setup_entry(
 class PassableLightingTargetLuxNumber(NumberEntity):
     """Interactive number entity to adjust baseline target lux directly from dashboard."""
 
+    _attr_should_poll = False
+
     def __init__(self, entry: ConfigEntry, controller: RoomController) -> None:
         """Initialize number entity."""
         self._entry = entry
@@ -40,6 +42,12 @@ class PassableLightingTargetLuxNumber(NumberEntity):
         self._attr_mode = NumberMode.BOX
         self._attr_icon = "mdi:tune"
 
+    async def async_added_to_hass(self) -> None:
+        """Register room controller listener for state updates."""
+        self.async_on_remove(
+            self._controller.register_entity_listener(self.async_write_ha_state)
+        )
+
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info linking this entity to the room device."""
@@ -48,7 +56,7 @@ class PassableLightingTargetLuxNumber(NumberEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.0.0",
+            sw_version="2.7.0",
         )
 
     @property
@@ -60,6 +68,9 @@ class PassableLightingTargetLuxNumber(NumberEntity):
         """Update target lux setting in config entry and trigger re-evaluation."""
         new_data = {**self._controller.entry_data, CONF_TARGET_LUX: int(value)}
         self._controller.entry_data = new_data
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            "skip_reload_entries", set()
+        ).add(self._entry.entry_id)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
         self.async_write_ha_state()
         await self._controller.async_evaluate("target_lux_adjusted")

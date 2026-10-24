@@ -10,6 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_PRESENCE_ENTITIES, CONF_ROOM_ID, DOMAIN
 from .engine import PassableLightingEngine, RoomController
@@ -35,6 +36,8 @@ async def async_setup_entry(
 class PassableLightingBaseBinarySensor(BinarySensorEntity):
     """Base class for room binary sensors."""
 
+    _attr_should_poll = False
+
     def __init__(self, entry: ConfigEntry, controller: RoomController, engine: PassableLightingEngine) -> None:
         """Initialize binary sensor."""
         self._entry = entry
@@ -42,6 +45,13 @@ class PassableLightingBaseBinarySensor(BinarySensorEntity):
         self._engine = engine
         self._room_id = entry.data[CONF_ROOM_ID]
         self._room_title = self._room_id.replace("_", " ").title()
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to room controller state updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._controller.register_entity_listener(self.async_write_ha_state)
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -51,7 +61,7 @@ class PassableLightingBaseBinarySensor(BinarySensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.0.0",
+            sw_version="2.7.0",
         )
 
 
@@ -74,7 +84,7 @@ class PassableLightingPresenceBinarySensor(PassableLightingBaseBinarySensor):
         return self._engine.check_presence(presence_entities)
 
 
-class PassableLightingOverrideBinarySensor(PassableLightingBaseBinarySensor):
+class PassableLightingOverrideBinarySensor(PassableLightingBaseBinarySensor, RestoreEntity):
     """Binary sensor indicating active manual override."""
 
     def __init__(self, entry: ConfigEntry, controller: RoomController, engine: PassableLightingEngine) -> None:
@@ -83,6 +93,22 @@ class PassableLightingOverrideBinarySensor(PassableLightingBaseBinarySensor):
         self._attr_unique_id = f"{DOMAIN}_{self._room_id}_override_active"
         self._attr_name = f"{self._room_title} Manual Override Active"
         self._attr_icon = "mdi:lock-outline"
+
+    async def async_added_to_hass(self) -> None:
+        """Restore active manual override across restarts."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if (
+            last_state
+            and last_state.state == "on"
+            and not self._engine.is_manual_override_active(self._room_id)
+        ):
+            rem_sec = last_state.attributes.get("remaining_seconds")
+            timeout_m = int(self._controller.entry_data.get("override_timeout_min", 60))
+            if isinstance(rem_sec, (int, float)) and rem_sec > 0:
+                timeout_m = max(1, int(round(rem_sec / 60.0)))
+            manual_override_entity = self._controller.entry_data.get("manual_override_entity")
+            self._engine.schedule_manual_override(self._room_id, timeout_m, manual_override_entity)
 
     @property
     def is_on(self) -> bool:

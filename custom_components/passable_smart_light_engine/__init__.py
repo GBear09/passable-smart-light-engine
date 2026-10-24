@@ -5,7 +5,7 @@ import logging
 import os
 import pathlib
 import shutil
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import voluptuous as vol
 
@@ -90,17 +90,19 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
     engine = PassableLightingEngine(hass, store)
     await engine.async_start()
 
-    @callback
-    def _on_hass_stop(_event: Event) -> None:
-        engine.stop()
-
-    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_hass_stop)
-
     coordinator = PresenceSimulationCoordinator(hass, engine)
     engine.presence_simulation = coordinator
 
     holiday_coordinator = HolidayLightingCoordinator(hass, engine, holiday_store)
     engine.holiday_lighting = holiday_coordinator
+
+    @callback
+    def _on_hass_stop(_event: Event) -> None:
+        engine.stop()
+        coordinator.stop()
+        holiday_coordinator.stop()
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_hass_stop)
 
     hass.data[DOMAIN] = {
         "store": store,
@@ -109,6 +111,7 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         "coordinator": coordinator,
         "holiday_coordinator": holiday_coordinator,
         "controllers": {},
+        "skip_reload_entries": set(),
         "system_sensor_registered": False,
         "system_switch_registered": False,
     }
@@ -285,6 +288,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "PassableSmartLighting: Updating config entry title from '%s' to 'Holiday & Exterior Lighting'",
                 entry.title,
             )
+            data.setdefault("skip_reload_entries", set()).add(entry.entry_id)
             hass.config_entries.async_update_entry(entry, title="Holiday & Exterior Lighting")
 
         holiday_coord: Optional[HolidayLightingCoordinator] = data.get("holiday_coordinator")
@@ -341,6 +345,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     data = hass.data[DOMAIN]
 
     if entry.data.get("entry_type") == "presence_simulation":
+        coordinator = data.get("coordinator")
+        if coordinator:
+            coordinator.stop()
         return await hass.config_entries.async_unload_platforms(entry, ["switch", "sensor"])
 
     if entry.data.get("entry_type") == "holiday_lighting":
@@ -366,5 +373,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_update_options_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload config entry when options are updated."""
+    """Reload config entry when options are updated, unless marked for in-memory skip."""
+    skip_set = hass.data.get(DOMAIN, {}).get("skip_reload_entries")
+    if isinstance(skip_set, set) and entry.entry_id in skip_set:
+        skip_set.discard(entry.entry_id)
+        return
     await hass.config_entries.async_reload(entry.entry_id)

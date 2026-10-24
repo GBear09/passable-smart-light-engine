@@ -91,6 +91,8 @@ async def async_setup_entry(
 class PassableLightingBaseSensor(SensorEntity):
     """Base class providing device info and live storage listeners for room sensors."""
 
+    _attr_should_poll = False
+
     def __init__(self, entry: ConfigEntry, controller: RoomController, engine: PassableLightingEngine) -> None:
         """Initialize base sensor."""
         self._entry = entry
@@ -100,8 +102,13 @@ class PassableLightingBaseSensor(SensorEntity):
         self._room_title = self._room_id.replace("_", " ").title()
 
     async def async_added_to_hass(self) -> None:
-        """Register storage update listener so attributes refresh live when learning data updates."""
-        self._engine.store.register_update_listener(self.async_write_ha_state)
+        """Register storage and controller update listeners so attributes refresh live."""
+        self.async_on_remove(
+            self._engine.store.register_update_listener(self.async_write_ha_state)
+        )
+        self.async_on_remove(
+            self._controller.register_entity_listener(self.async_write_ha_state)
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -111,7 +118,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.6.0",
+            sw_version="2.7.0",
         )
 
 
@@ -316,6 +323,8 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
 class PassableLightingEngineReadySensor(SensorEntity):
     """System-wide readiness and dataset synchronization sensor."""
 
+    _attr_should_poll = False
+
     def __init__(self, hass: HomeAssistant, store: LearningDataStore) -> None:
         """Initialize ready sensor."""
         self.hass = hass
@@ -327,7 +336,9 @@ class PassableLightingEngineReadySensor(SensorEntity):
 
     async def async_added_to_hass(self) -> None:
         """Register storage update listener."""
-        self._store.register_update_listener(self._on_store_updated)
+        self.async_on_remove(
+            self._store.register_update_listener(self._on_store_updated)
+        )
 
     def _on_store_updated(self) -> None:
         """Update HA state when storage data changes."""
@@ -368,7 +379,7 @@ class PassablePresenceSimulationStatusSensor(SensorEntity):
             name="Passable Smart Light Engine - Presence Simulation",
             manufacturer="Passable",
             model="Presence Simulation v1",
-            sw_version="2.0.0",
+            sw_version="2.7.0",
         )
 
     @property
@@ -404,6 +415,8 @@ class PassablePresenceSimulationStatusSensor(SensorEntity):
 class PassableActiveHolidaySensor(SensorEntity):
     """Sensor reporting active holiday status and legacy dashboard attributes."""
 
+    _attr_should_poll = False
+
     def __init__(self, entry: ConfigEntry, coordinator: Any) -> None:
         """Initialize active holiday sensor."""
         self._entry = entry
@@ -415,7 +428,9 @@ class PassableActiveHolidaySensor(SensorEntity):
 
     async def async_added_to_hass(self) -> None:
         """Register storage listener to refresh state when holiday settings change."""
-        self._coordinator.store.register_update_listener(self.async_write_ha_state)
+        self.async_on_remove(
+            self._coordinator.store.register_update_listener(self.async_write_ha_state)
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -425,7 +440,7 @@ class PassableActiveHolidaySensor(SensorEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.6.0",
+            sw_version="2.7.0",
         )
 
     @property

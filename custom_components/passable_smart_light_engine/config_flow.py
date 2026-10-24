@@ -180,6 +180,21 @@ class OptionalTimeSelector(selector.TimeSelector):
         return super().__call__(data)
 
 
+def _validate_mm_dd(val: Any) -> bool:
+    """Validate MM-DD date strings."""
+    if not isinstance(val, str):
+        return False
+    parts = val.strip().split("-")
+    if len(parts) != 2:
+        return False
+    try:
+        month = int(parts[0])
+        day = int(parts[1])
+    except ValueError:
+        return False
+    return 1 <= month <= 12 and 1 <= day <= 31
+
+
 def get_available_bulb_effects(
     hass: Optional[HomeAssistant] = None, current_values: Optional[List[str]] = None
 ) -> List[selector.SelectOptionDict]:
@@ -405,6 +420,11 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     flat_input.update(v)
                 else:
                     flat_input[k] = v
+            min_ct = int(flat_input.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP))
+            max_ct = int(flat_input.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP))
+            if min_ct > max_ct:
+                flat_input[CONF_MIN_COLOR_TEMP] = max_ct
+                flat_input[CONF_MAX_COLOR_TEMP] = min_ct
             full_data = {**self._step1_data, **flat_input}
             room_title = self._step1_data[CONF_ROOM_ID].replace("_", " ").title()
             return self.async_create_entry(title=f"Smart Lighting - {room_title}", data=full_data)
@@ -562,6 +582,11 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                     flat_input.update(v)
                 else:
                     flat_input[k] = v
+            min_ct = int(flat_input.get(CONF_MIN_COLOR_TEMP, self._entry.data.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP)))
+            max_ct = int(flat_input.get(CONF_MAX_COLOR_TEMP, self._entry.data.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP)))
+            if min_ct > max_ct:
+                flat_input[CONF_MIN_COLOR_TEMP] = max_ct
+                flat_input[CONF_MAX_COLOR_TEMP] = min_ct
             new_data = {**self._entry.data, **flat_input}
             self.hass.config_entries.async_update_entry(self._entry, data=new_data)
             return self.async_create_entry(title="", data={})
@@ -762,6 +787,9 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             new_data = {**self._entry.data, **user_input}
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(
+                "skip_reload_entries", set()
+            ).add(self._entry.entry_id)
             self.hass.config_entries.async_update_entry(self._entry, data=new_data)
             coordinator = self.hass.data.get(DOMAIN, {}).get("coordinator")
             if coordinator:
@@ -1074,6 +1102,7 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
 
         is_new = getattr(self, "_selected_holiday_id", "__add_new__") == "__add_new__"
         curr_holiday = {} if is_new else holiday_store.holidays.get(self._selected_holiday_id, {})
+        errors: Dict[str, str] = {}
 
         if user_input is not None:
             if user_input.get("delete_holiday") and not is_new:
@@ -1081,52 +1110,60 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                 await holiday_store.async_save()
                 return self.async_create_entry(title="", data={})
 
-            h_name = str(user_input.get("name", curr_holiday.get("name", "Custom Holiday"))).strip()
-            h_id = self._selected_holiday_id if not is_new else h_name.lower().replace(" ", "_").replace("'", "")
+            s_date_raw = str(user_input.get("start_date", "10-01")).strip()
+            e_date_raw = str(user_input.get("end_date", "10-31")).strip()
+            if not _validate_mm_dd(s_date_raw):
+                errors["start_date"] = "invalid_date"
+            if not _validate_mm_dd(e_date_raw):
+                errors["end_date"] = "invalid_date"
 
-            raw_rgb = user_input.get("rgb_color")
-            if isinstance(raw_rgb, (list, tuple)) and len(raw_rgb) >= 3:
-                rgb = [int(raw_rgb[0]), int(raw_rgb[1]), int(raw_rgb[2])]
-            elif "rgb_red" in user_input:
-                rgb = [
-                    int(user_input.get("rgb_red", 255)),
-                    int(user_input.get("rgb_green", 140)),
-                    int(user_input.get("rgb_blue", 0)),
-                ]
-            else:
-                rgb = curr_holiday.get("rgb_color", [255, 140, 0])
+            if not errors:
+                h_name = str(user_input.get("name", curr_holiday.get("name", "Custom Holiday"))).strip()
+                h_id = self._selected_holiday_id if not is_new else h_name.lower().replace(" ", "_").replace("'", "")
 
-            holiday_data = {
-                "id": h_id,
-                "name": h_name,
-                "enabled": bool(user_input.get("enabled", True)),
-                "start_date": str(user_input.get("start_date", "10-01")).strip(),
-                "end_date": str(user_input.get("end_date", "10-31")).strip(),
-                "icon": str(user_input.get("icon", "mdi:calendar-star")).strip(),
-                "phrase": str(user_input.get("phrase", "")).strip(),
-                "theme_color": str(user_input.get("theme_color", "#9c4600")).strip(),
-                "light_mode": user_input.get("light_mode", LIGHT_MODE_RGB),
-                "hue_scene": str(user_input.get("hue_scene") or "").strip(),
-                "dynamic_scene": bool(user_input.get("dynamic_scene", False)),
-                "effect": str(user_input.get("effect") or "").strip(),
-                "fallback_effect": str(user_input.get("fallback_effect") or "").strip(),
-                "rgb_color": rgb,
-                "color_temp_kelvin": int(user_input.get("color_temp_kelvin", 2500)),
-                "brightness_pct": int(user_input.get("brightness_pct", 100)),
-                "decorations_on": bool(user_input.get("decorations_on", True)),
-                "participating_lights": user_input.get("participating_lights") or [],
-                "participating_decorations": user_input.get("participating_decorations") or [],
-            }
+                raw_rgb = user_input.get("rgb_color")
+                if isinstance(raw_rgb, (list, tuple)) and len(raw_rgb) >= 3:
+                    rgb = [int(raw_rgb[0]), int(raw_rgb[1]), int(raw_rgb[2])]
+                elif "rgb_red" in user_input:
+                    rgb = [
+                        int(user_input.get("rgb_red", 255)),
+                        int(user_input.get("rgb_green", 140)),
+                        int(user_input.get("rgb_blue", 0)),
+                    ]
+                else:
+                    rgb = curr_holiday.get("rgb_color", [255, 140, 0])
 
-            holiday_store.set_holiday(h_id, holiday_data)
-            await holiday_store.async_save()
+                holiday_data = {
+                    "id": h_id,
+                    "name": h_name,
+                    "enabled": bool(user_input.get("enabled", True)),
+                    "start_date": s_date_raw,
+                    "end_date": e_date_raw,
+                    "icon": str(user_input.get("icon", "mdi:calendar-star")).strip(),
+                    "phrase": str(user_input.get("phrase", "")).strip(),
+                    "theme_color": str(user_input.get("theme_color", "#9c4600")).strip(),
+                    "light_mode": user_input.get("light_mode", LIGHT_MODE_RGB),
+                    "hue_scene": str(user_input.get("hue_scene") or "").strip(),
+                    "dynamic_scene": bool(user_input.get("dynamic_scene", False)),
+                    "effect": str(user_input.get("effect") or "").strip(),
+                    "fallback_effect": str(user_input.get("fallback_effect") or "").strip(),
+                    "rgb_color": rgb,
+                    "color_temp_kelvin": int(user_input.get("color_temp_kelvin", 2500)),
+                    "brightness_pct": int(user_input.get("brightness_pct", 100)),
+                    "decorations_on": bool(user_input.get("decorations_on", True)),
+                    "participating_lights": user_input.get("participating_lights") or [],
+                    "participating_decorations": user_input.get("participating_decorations") or [],
+                }
 
-            coordinator = self.hass.data.get(DOMAIN, {}).get("holiday_coordinator")
-            if coordinator:
-                coordinator._active_holiday = coordinator.evaluate_active_holiday()
-                self.hass.async_create_task(coordinator._async_evaluate_schedule_trigger())
+                holiday_store.set_holiday(h_id, holiday_data)
+                await holiday_store.async_save()
 
-            return self.async_create_entry(title="", data={})
+                coordinator = self.hass.data.get(DOMAIN, {}).get("holiday_coordinator")
+                if coordinator:
+                    coordinator._active_holiday = coordinator.evaluate_active_holiday()
+                    self.hass.async_create_task(coordinator._async_evaluate_schedule_trigger())
+
+                return self.async_create_entry(title="", data={})
 
         d_rgb = curr_holiday.get("rgb_color", [255, 140, 0])
         curr_effect = curr_holiday.get("effect") or ""
@@ -1195,7 +1232,7 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
             fields[vol.Optional("delete_holiday", default=False)] = selector.BooleanSelector()
 
         schema = vol.Schema(fields)
-        return self.async_show_form(step_id="holiday_edit", data_schema=schema)
+        return self.async_show_form(step_id="holiday_edit", data_schema=schema, errors=errors)
 
     async def async_step_holiday_reset(
         self, user_input: Optional[Dict[str, Any]] = None

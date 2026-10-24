@@ -428,6 +428,9 @@
           "confirm_reset": "Confirm Reset to Factory Defaults"
         }
       }
+    },
+    "error": {
+      "invalid_date": "Invalid date format. Please use MM-DD (e.g., 10-01)."
     }
   },
   "entity": {

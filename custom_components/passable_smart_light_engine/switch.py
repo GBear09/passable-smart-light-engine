@@ -1,12 +1,13 @@
 """Switch platform for Passable Adaptive Smart Lighting Controller."""
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
     CONF_CIRCADIAN_ENABLED,
@@ -80,12 +81,21 @@ async def async_setup_entry(
 class PassableLightingBaseEntity:
     """Base class providing device info for room entities."""
 
+    _attr_should_poll = False
+
     def __init__(self, entry: ConfigEntry, controller: RoomController) -> None:
         """Initialize base entity."""
         self._entry = entry
         self._controller = controller
         self._room_id = entry.data[CONF_ROOM_ID]
         self._room_title = self._room_id.replace("_", " ").title()
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to room controller state updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._controller.register_entity_listener(self.async_write_ha_state)
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -95,11 +105,11 @@ class PassableLightingBaseEntity:
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.0.0",
+            sw_version="2.7.0",
         )
 
 
-class PassableLightingRoomSwitch(PassableLightingBaseEntity, SwitchEntity):
+class PassableLightingRoomSwitch(PassableLightingBaseEntity, SwitchEntity, RestoreEntity):
     """Switch to toggle the automation engine on/off for this room."""
 
     def __init__(self, entry: ConfigEntry, controller: RoomController) -> None:
@@ -108,6 +118,13 @@ class PassableLightingRoomSwitch(PassableLightingBaseEntity, SwitchEntity):
         self._attr_unique_id = f"{DOMAIN}_{self._room_id}_automation_switch"
         self._attr_name = f"Smart Lighting {self._room_title}"
         self._attr_icon = "mdi:auto-fix"
+
+    async def async_added_to_hass(self) -> None:
+        """Restore room automation enabled state across restarts."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state in ("on", "off"):
+            self._controller.set_enabled(last_state.state == "on")
 
     @property
     def is_on(self) -> bool:
@@ -144,6 +161,9 @@ class PassableLightingCircadianSwitch(PassableLightingBaseEntity, SwitchEntity):
         """Enable circadian rhythm."""
         new_data = {**self._controller.entry_data, CONF_CIRCADIAN_ENABLED: True}
         self._controller.entry_data = new_data
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            "skip_reload_entries", set()
+        ).add(self._entry.entry_id)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
         self.async_write_ha_state()
         self.hass.async_create_task(
@@ -154,11 +174,14 @@ class PassableLightingCircadianSwitch(PassableLightingBaseEntity, SwitchEntity):
         """Disable circadian rhythm."""
         new_data = {**self._controller.entry_data, CONF_CIRCADIAN_ENABLED: False}
         self._controller.entry_data = new_data
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            "skip_reload_entries", set()
+        ).add(self._entry.entry_id)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
         self.async_write_ha_state()
 
 
-class PassableLightingOverrideSwitch(PassableLightingBaseEntity, SwitchEntity):
+class PassableLightingOverrideSwitch(PassableLightingBaseEntity, SwitchEntity, RestoreEntity):
     """Auto-created manual override switch."""
 
     def __init__(
@@ -170,6 +193,19 @@ class PassableLightingOverrideSwitch(PassableLightingBaseEntity, SwitchEntity):
         self._attr_unique_id = f"{DOMAIN}_{self._room_id}_manual_override_switch"
         self._attr_name = f"{self._room_title} Manual Override"
         self._attr_icon = "mdi:lock-clock"
+
+    async def async_added_to_hass(self) -> None:
+        """Restore active manual override across restarts."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if (
+            last_state
+            and last_state.state == "on"
+            and not self._engine.is_manual_override_active(self._room_id)
+        ):
+            timeout_m = int(self._controller.entry_data.get("override_timeout_min", 60))
+            manual_override_entity = self._controller.entry_data.get("manual_override_entity")
+            self._engine.schedule_manual_override(self._room_id, timeout_m, manual_override_entity)
 
     @property
     def is_on(self) -> bool:
@@ -194,7 +230,7 @@ class PassableLightingOverrideSwitch(PassableLightingBaseEntity, SwitchEntity):
         self.async_write_ha_state()
 
 
-class PassableLightingFreezeSwitch(PassableLightingBaseEntity, SwitchEntity):
+class PassableLightingFreezeSwitch(PassableLightingBaseEntity, SwitchEntity, RestoreEntity):
     """Auto-created dedicated freeze switch."""
 
     def __init__(self, entry: ConfigEntry, controller: RoomController) -> None:
@@ -203,6 +239,13 @@ class PassableLightingFreezeSwitch(PassableLightingBaseEntity, SwitchEntity):
         self._attr_unique_id = f"{DOMAIN}_{self._room_id}_freeze_switch"
         self._attr_name = f"{self._room_title} Freeze Bypass"
         self._attr_icon = "mdi:pause-circle"
+
+    async def async_added_to_hass(self) -> None:
+        """Restore freeze bypass state across restarts."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state and last_state.state in ("on", "off"):
+            self._controller.set_freeze_bypass(last_state.state == "on")
 
     @property
     def is_on(self) -> bool:
@@ -246,7 +289,7 @@ class PassablePresenceSimulationMasterSwitch(SwitchEntity):
             name="Passable Smart Light Engine - Presence Simulation",
             manufacturer="Passable",
             model="Presence Simulation v1",
-            sw_version="2.0.0",
+            sw_version="2.7.0",
         )
 
     @property
@@ -261,6 +304,9 @@ class PassablePresenceSimulationMasterSwitch(SwitchEntity):
         if self._coordinator:
             await self._coordinator.async_set_enabled(True)
         new_data = {**self._entry.data, CONF_SIMULATION_ENABLED: True}
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            "skip_reload_entries", set()
+        ).add(self._entry.entry_id)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
         self.async_write_ha_state()
 
@@ -269,11 +315,14 @@ class PassablePresenceSimulationMasterSwitch(SwitchEntity):
         if self._coordinator:
             await self._coordinator.async_set_enabled(False)
         new_data = {**self._entry.data, CONF_SIMULATION_ENABLED: False}
+        self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            "skip_reload_entries", set()
+        ).add(self._entry.entry_id)
         self.hass.config_entries.async_update_entry(self._entry, data=new_data)
         self.async_write_ha_state()
 
 
-class PassablePresenceSimulationSwitch(SwitchEntity):
+class PassablePresenceSimulationSwitch(SwitchEntity, RestoreEntity):
     """Presence simulation away mode trigger switch with drop-in compatibility."""
 
     def __init__(self, hass: HomeAssistant, engine: PassableLightingEngine) -> None:
@@ -288,6 +337,18 @@ class PassablePresenceSimulationSwitch(SwitchEntity):
         self.entity_id = PRESENCE_SIMULATION_SWITCH_ENTITY_ID
         self._attr_icon = "mdi:home-clock"
 
+    async def async_added_to_hass(self) -> None:
+        """Restore active presence simulation across restarts."""
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if (
+            last_state
+            and last_state.state == "on"
+            and self._coordinator
+            and not self._coordinator.is_on
+        ):
+            self.hass.async_create_task(self._coordinator.async_start())
+
     @property
     def device_info(self) -> DeviceInfo:
         """Return system device info."""
@@ -296,7 +357,7 @@ class PassablePresenceSimulationSwitch(SwitchEntity):
             name="Passable Smart Light Engine - Presence Simulation",
             manufacturer="Passable",
             model="Presence Simulation v1",
-            sw_version="2.0.0",
+            sw_version="2.7.0",
         )
 
     @property
@@ -359,7 +420,7 @@ class PassableHolidayLightingMasterSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.6.0",
+            sw_version="2.7.0",
         )
 
     @property
@@ -411,7 +472,7 @@ class PassableHolidayDecorationsSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.6.0",
+            sw_version="2.7.0",
         )
 
     @property
@@ -458,7 +519,7 @@ class PassableExteriorLightingSwitch(SwitchEntity):
             name="Holiday & Exterior Lighting",
             manufacturer="Passable",
             model="Holiday & Exterior Lighting Subsystem",
-            sw_version="2.6.0",
+            sw_version="2.7.0",
         )
 
     @property

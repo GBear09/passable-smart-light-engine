@@ -43,14 +43,20 @@ class LearningDataStore:
         """Return the in-memory learning data snapshot."""
         return self._data
 
-    def register_update_listener(self, listener: Callable[[], None]) -> None:
-        """Register a callback when learning data changes."""
+    def register_update_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Register a callback when learning data changes and return an unsubscribe callable."""
         if listener not in self._update_listeners:
             self._update_listeners.append(listener)
 
+        def _unsub() -> None:
+            if listener in self._update_listeners:
+                self._update_listeners.remove(listener)
+
+        return _unsub
+
     def _notify_listeners(self) -> None:
         """Notify registered listeners of updated learning data."""
-        for listener in self._update_listeners:
+        for listener in list(self._update_listeners):
             try:
                 listener()
             except Exception as err:

@@ -86,6 +86,7 @@ from .const import (
     MODE_EXTERIOR_BASELINE,
     MODE_HOLIDAY,
 )
+from .engine import clamp_kelvin_for_entity
 
 if TYPE_CHECKING:
     from .engine import PassableLightingEngine, RoomController
@@ -165,14 +166,20 @@ class HolidayStore:
         """Return all holiday definitions."""
         return self._data.get("holidays", {})
 
-    def register_update_listener(self, listener: Callable[[], None]) -> None:
-        """Register a callback for storage changes."""
+    def register_update_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        """Register a callback for storage changes and return an unsubscribe callable."""
         if listener not in self._update_listeners:
             self._update_listeners.append(listener)
 
+        def _unsub() -> None:
+            if listener in self._update_listeners:
+                self._update_listeners.remove(listener)
+
+        return _unsub
+
     def _notify_listeners(self) -> None:
         """Notify registered listeners."""
-        for listener in self._update_listeners:
+        for listener in list(self._update_listeners):
             try:
                 listener()
             except Exception as err:
@@ -247,11 +254,17 @@ class HolidayLightingCoordinator:
         self._unsub_listeners: List[CALLBACK_TYPE] = []
         self._midnight_unsub: Optional[CALLBACK_TYPE] = None
         self._solar_unsub: Optional[CALLBACK_TYPE] = None
+        self._preview_unsub: Optional[CALLBACK_TYPE] = None
 
         self._master_switch_entity: Any = None
         self._decorations_switch_entity: Any = None
         self._exterior_switch_entity: Any = None
         self._sensor_entity: Any = None
+
+    @property
+    def home_state_entity(self) -> str:
+        """Return configured home state entity ID."""
+        return str(self.store.options.get(CONF_HOLIDAY_HOME_STATE_ENTITY, DEFAULT_HOLIDAY_HOME_STATE_ENTITY))
 
     @property
     def enabled(self) -> bool:
@@ -656,7 +669,7 @@ class HolidayLightingCoordinator:
         return True
 
     def _schedule_next_solar_events(self) -> None:
-        """Schedule timer for next upcoming solar transition point."""
+        """Schedule timer for next upcoming solar or fixed-time transition point."""
         if self._solar_unsub:
             try:
                 self._solar_unsub()
@@ -665,36 +678,61 @@ class HolidayLightingCoordinator:
             self._solar_unsub = None
 
         now = dt_util.now()
-        sun_state = self.hass.states.get("sun.sun")
-        if not sun_state:
-            return
-
-        next_setting_str = sun_state.attributes.get("next_setting")
-        next_rising_str = sun_state.attributes.get("next_rising")
-        next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
-        next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
-
-        ext_sunset_offset = int(self.store.options.get(CONF_EXTERIOR_SUNSET_OFFSET_MIN, DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN))
-        ext_sunrise_offset = int(self.store.options.get(CONF_EXTERIOR_SUNRISE_OFFSET_MIN, DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN))
-        dec_sunset_offset = int(self.store.options.get(CONF_DECORATIONS_SUNSET_OFFSET_MIN, DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN))
-
         candidate_times: List[datetime] = []
-        if next_setting:
-            candidate_times.append(next_setting + timedelta(minutes=ext_sunset_offset))
-            candidate_times.append(next_setting + timedelta(minutes=dec_sunset_offset))
-            candidate_times.append(next_setting)
-        if next_rising:
-            candidate_times.append(next_rising + timedelta(minutes=ext_sunrise_offset))
-            candidate_times.append(next_rising)
 
-        # Also consider today's recent solar events if their offsets extend into the future
-        recent_setting = next_setting - timedelta(days=1) if next_setting else None
-        recent_rising = next_rising - timedelta(days=1) if next_rising else None
-        if recent_setting:
-            candidate_times.append(recent_setting + timedelta(minutes=ext_sunset_offset))
-            candidate_times.append(recent_setting + timedelta(minutes=dec_sunset_offset))
-        if recent_rising:
-            candidate_times.append(recent_rising + timedelta(minutes=ext_sunrise_offset))
+        # Include fixed-time triggers (today and tomorrow) so fixed-time schedules fire on time
+        for time_key, default_t in (
+            (CONF_EXTERIOR_ON_TIME, DEFAULT_EXTERIOR_ON_TIME),
+            (CONF_EXTERIOR_OFF_TIME, DEFAULT_EXTERIOR_OFF_TIME),
+            (CONF_DECORATIONS_OFF_TIME, DEFAULT_DECORATIONS_OFF_TIME),
+            (CONF_HOLIDAY_OFF_TIME, DEFAULT_HOLIDAY_OFF_TIME),
+        ):
+            t_str = self.store.options.get(time_key, default_t)
+            if t_str and isinstance(t_str, str):
+                try:
+                    parts = [int(p) for p in t_str.strip().split(":")]
+                    hr = parts[0] if len(parts) >= 1 else 0
+                    mn = parts[1] if len(parts) >= 2 else 0
+                    sc = parts[2] if len(parts) >= 3 else 0
+                    today_dt = now.replace(hour=hr, minute=mn, second=sc, microsecond=0)
+                    candidate_times.append(today_dt)
+                    candidate_times.append(today_dt + timedelta(days=1))
+                except Exception:
+                    pass
+
+        sun_state = self.hass.states.get("sun.sun")
+        if sun_state:
+            next_setting_str = sun_state.attributes.get("next_setting")
+            next_rising_str = sun_state.attributes.get("next_rising")
+            next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
+            next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
+
+            ext_sunset_offset = int(
+                self.store.options.get(CONF_EXTERIOR_SUNSET_OFFSET_MIN, DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN)
+            )
+            ext_sunrise_offset = int(
+                self.store.options.get(CONF_EXTERIOR_SUNRISE_OFFSET_MIN, DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN)
+            )
+            dec_sunset_offset = int(
+                self.store.options.get(CONF_DECORATIONS_SUNSET_OFFSET_MIN, DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN)
+            )
+
+            if next_setting:
+                candidate_times.append(next_setting + timedelta(minutes=ext_sunset_offset))
+                candidate_times.append(next_setting + timedelta(minutes=dec_sunset_offset))
+                candidate_times.append(next_setting)
+            if next_rising:
+                candidate_times.append(next_rising + timedelta(minutes=ext_sunrise_offset))
+                candidate_times.append(next_rising)
+
+            # Also consider today's recent solar events if their offsets extend into the future
+            recent_setting = next_setting - timedelta(days=1) if next_setting else None
+            recent_rising = next_rising - timedelta(days=1) if next_rising else None
+            if recent_setting:
+                candidate_times.append(recent_setting + timedelta(minutes=ext_sunset_offset))
+                candidate_times.append(recent_setting + timedelta(minutes=dec_sunset_offset))
+            if recent_rising:
+                candidate_times.append(recent_rising + timedelta(minutes=ext_sunrise_offset))
 
         future_times = [t for t in candidate_times if t > now]
         if not future_times:
@@ -747,15 +785,18 @@ class HolidayLightingCoordinator:
                     continue
 
             self._active_lights.add(light_id)
+            svc_data: Dict[str, Any] = {
+                ATTR_ENTITY_ID: light_id,
+                "brightness_pct": brightness_pct,
+            }
+            clamped_k = clamp_kelvin_for_entity(self.hass, light_id, kelvin)
+            if clamped_k is not None:
+                svc_data["color_temp_kelvin"] = clamped_k
             try:
                 await self.hass.services.async_call(
                     "light",
                     "turn_on",
-                    {
-                        ATTR_ENTITY_ID: light_id,
-                        "color_temp_kelvin": kelvin,
-                        "brightness_pct": brightness_pct,
-                    },
+                    svc_data,
                     context=ctx,
                 )
             except Exception as err:
@@ -864,6 +905,8 @@ class HolidayLightingCoordinator:
             mode,
         )
 
+        activated_scenes: Set[str] = set()
+
         for light_id in target_lights:
             # Check presence simulation arbitration
             if self.store.options.get(CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION, True):
@@ -877,33 +920,37 @@ class HolidayLightingCoordinator:
             self._active_lights.add(light_id)
             success = False
 
-            # Mode 1: Hue Dynamic Scene
+            # Mode 1: Hue Dynamic Scene (activated once per unique scene entity)
             if mode == LIGHT_MODE_HUE_SCENE and holiday.get("hue_scene"):
                 scene_id = holiday["hue_scene"].strip()
-                scene_state = self.hass.states.get(scene_id)
-                if scene_state:
-                    try:
-                        # Attempt native Hue activate_scene with dynamic=True
-                        if self.hass.services.has_service("hue", "activate_scene"):
-                            await self.hass.services.async_call(
-                                "hue",
-                                "activate_scene",
-                                {"dynamic": bool(holiday.get("dynamic_scene", True))},
-                                target={"entity_id": scene_id},
-                                context=ctx,
+                if scene_id in activated_scenes:
+                    success = True
+                else:
+                    scene_state = self.hass.states.get(scene_id)
+                    if scene_state:
+                        try:
+                            # Attempt native Hue activate_scene with dynamic=True
+                            if self.hass.services.has_service("hue", "activate_scene"):
+                                await self.hass.services.async_call(
+                                    "hue",
+                                    "activate_scene",
+                                    {"dynamic": bool(holiday.get("dynamic_scene", True))},
+                                    target={"entity_id": scene_id},
+                                    context=ctx,
+                                )
+                            else:
+                                await self.hass.services.async_call(
+                                    "scene", "turn_on", target={"entity_id": scene_id}, context=ctx
+                                )
+                            activated_scenes.add(scene_id)
+                            success = True
+                            _LOGGER.debug("PassableSmartLighting: Activated Hue scene '%s'.", scene_id)
+                        except Exception as err:
+                            _LOGGER.warning(
+                                "PassableSmartLighting: Failed to activate Hue scene '%s': %s. Falling back.",
+                                scene_id,
+                                err,
                             )
-                        else:
-                            await self.hass.services.async_call(
-                                "scene", "turn_on", target={"entity_id": scene_id}, context=ctx
-                            )
-                        success = True
-                        _LOGGER.debug("PassableSmartLighting: Activated Hue scene '%s' for '%s'.", scene_id, light_id)
-                    except Exception as err:
-                        _LOGGER.warning(
-                            "PassableSmartLighting: Failed to activate Hue scene '%s': %s. Falling back.",
-                            scene_id,
-                            err,
-                        )
 
             # Mode 2: Hardware Bulb Effect (e.g. fire, candle, prism)
             if not success and (
@@ -933,15 +980,18 @@ class HolidayLightingCoordinator:
             # Mode 3: Color Temp (Kelvin)
             if not success and mode == LIGHT_MODE_COLOR_TEMP:
                 kelvin = int(holiday.get("color_temp_kelvin", 2000))
+                clamped_k = clamp_kelvin_for_entity(self.hass, light_id, kelvin)
+                svc_data: Dict[str, Any] = {
+                    ATTR_ENTITY_ID: light_id,
+                    "brightness_pct": brightness_pct,
+                }
+                if clamped_k is not None:
+                    svc_data["color_temp_kelvin"] = clamped_k
                 try:
                     await self.hass.services.async_call(
                         "light",
                         "turn_on",
-                        {
-                            ATTR_ENTITY_ID: light_id,
-                            "color_temp_kelvin": kelvin,
-                            "brightness_pct": brightness_pct,
-                        },
+                        svc_data,
                         context=ctx,
                     )
                     success = True
@@ -1009,6 +1059,13 @@ class HolidayLightingCoordinator:
 
     async def async_turn_off_holiday_lighting(self) -> None:
         """Turn off all active holiday lights and decorations."""
+        if self._preview_unsub:
+            try:
+                self._preview_unsub()
+            except Exception:
+                pass
+            self._preview_unsub = None
+
         ctx = Context()
         self.engine.register_engine_context(ctx.id, ttl_sec=30.0)
 
@@ -1041,16 +1098,24 @@ class HolidayLightingCoordinator:
             _LOGGER.warning("PassableSmartLighting: Holiday '%s' not found for preview.", holiday_id)
             return
 
+        if self._preview_unsub:
+            try:
+                self._preview_unsub()
+            except Exception:
+                pass
+            self._preview_unsub = None
+
         _LOGGER.info("PassableSmartLighting: Previewing holiday '%s' for %ds.", holiday["name"], duration_sec)
         self._preview_holiday = holiday
         await self.async_turn_on_holiday_lighting(preview_holiday=holiday)
 
         @callback
         def _revert(_now: Any) -> None:
+            self._preview_unsub = None
             self._preview_holiday = None
             self.hass.async_create_task(self._async_evaluate_schedule_trigger())
 
-        async_call_later(self.hass, max(5, duration_sec), _revert)
+        self._preview_unsub = async_call_later(self.hass, max(5, duration_sec), _revert)
 
     def get_legacy_sensor_attributes(self) -> Dict[str, Any]:
         """Generate attributes matching the legacy template sensor for 100% backward compatibility."""
@@ -1126,3 +1191,9 @@ class HolidayLightingCoordinator:
             except Exception:
                 pass
             self._solar_unsub = None
+        if self._preview_unsub:
+            try:
+                self._preview_unsub()
+            except Exception:
+                pass
+            self._preview_unsub = None

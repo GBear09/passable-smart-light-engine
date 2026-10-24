@@ -15,6 +15,9 @@ from homeassistant.helpers.event import async_call_later, async_track_point_in_t
 import homeassistant.util.dt as dt_util
 
 from .const import (
+    CONF_HOLIDAY_HOME_STATE_ENTITY,
+    CONF_LIGHT_ENTITY,
+    CONF_SECONDARY_LIGHTS,
     CONF_SIMULATION_ARRIVAL_GRACE_MIN,
     CONF_SIMULATION_ENABLED,
     CONF_SIMULATION_JITTER_MIN,
@@ -22,6 +25,7 @@ from .const import (
     CONF_SIMULATION_LOOKBACK_DAYS,
     CONF_SIMULATION_MAX_BRIGHTNESS_PCT,
     CONF_SIMULATION_MODE,
+    DEFAULT_HOLIDAY_HOME_STATE_ENTITY,
     DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN,
     DEFAULT_SIMULATION_ENABLED,
     DEFAULT_SIMULATION_JITTER_MIN,
@@ -35,6 +39,7 @@ from .const import (
     SIMULATION_MODE_HYBRID,
     SIMULATION_MODE_SYNTHETIC,
 )
+from .engine import clamp_kelvin_for_entity, get_light_members
 
 if TYPE_CHECKING:
     from .engine import PassableLightingEngine, RoomController
@@ -73,6 +78,7 @@ class PresenceSimulationCoordinator:
         self._scheduled_events: List[SimulationEvent] = []
         self._next_event: Optional[Dict[str, Any]] = None
         self._plan_unsub: Optional[CALLBACK_TYPE] = None
+        self._grace_sweep_unsubs: List[CALLBACK_TYPE] = []
         self._switch_entity: Any = None
         self._master_switch_entity: Any = None
         self._listeners: List[CALLBACK_TYPE] = []
@@ -204,6 +210,13 @@ class PresenceSimulationCoordinator:
         if self._is_on:
             return
 
+        for unsub in self._grace_sweep_unsubs:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._grace_sweep_unsubs.clear()
+
         self._is_on = True
         self._status = "planning"
         _LOGGER.info("PresenceSimulation: Simulation activated. Resolving targets and building schedule.")
@@ -222,14 +235,19 @@ class PresenceSimulationCoordinator:
         _LOGGER.info("PresenceSimulation: Simulation deactivated. Assessing departure/arrival context.")
         self._clear_scheduled_timers()
 
-        # Check ambient context: Sun elevation & Home Mode
+        # Check ambient context: Sun elevation & Home Mode / Home State
         sun_state = self.hass.states.get("sun.sun")
         sun_is_down = sun_state is not None and sun_state.state == "below_horizon"
 
-        home_mode_state = self.hass.states.get("input_select.home_mode")
-        home_mode = home_mode_state.state if home_mode_state else "Home"
+        home_entity = DEFAULT_HOLIDAY_HOME_STATE_ENTITY
+        if self.engine.holiday_lighting and getattr(self.engine.holiday_lighting, "home_state_entity", None):
+            home_entity = self.engine.holiday_lighting.home_state_entity
 
-        is_arrival_at_night = sun_is_down and home_mode == "Home"
+        home_mode_state = self.hass.states.get(home_entity) or self.hass.states.get("input_select.home_mode")
+        home_mode = str(home_mode_state.state).strip() if home_mode_state and home_mode_state.state else "Home"
+        is_away = home_mode.lower() in ("away", "vacation", "extended_away", "not_home", "off")
+
+        is_arrival_at_night = sun_is_down and not is_away
 
         if is_arrival_at_night:
             # =========================================================================
@@ -268,7 +286,10 @@ class PresenceSimulationCoordinator:
                     def _delayed_sweep(entity: str = light_id) -> None:
                         self.hass.async_create_task(self._async_turn_off_simulated_light(entity))
 
-                    async_call_later(self.hass, grace_sec, lambda _now, ent=light_id: _delayed_sweep(ent))
+                    unsub_grace = async_call_later(
+                        self.hass, grace_sec, lambda _now, ent=light_id: _delayed_sweep(ent)
+                    )
+                    self._grace_sweep_unsubs.append(unsub_grace)
 
             self._active_simulated_lights.clear()
             self._status = "idle"
@@ -304,6 +325,13 @@ class PresenceSimulationCoordinator:
         self._scheduled_callbacks.clear()
         self._scheduled_events.clear()
 
+        for unsub in self._grace_sweep_unsubs:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._grace_sweep_unsubs.clear()
+
         if self._plan_unsub:
             try:
                 self._plan_unsub()
@@ -312,13 +340,22 @@ class PresenceSimulationCoordinator:
             self._plan_unsub = None
 
     def _find_room_controller_for_light(self, light_id: str) -> Optional["RoomController"]:
-        """Find the RoomController managing a specific light entity."""
+        """Find the RoomController managing a specific light entity or light group member."""
         for ctrl in self.engine.controllers.values():
-            if ctrl.entry_data.get("light_entity") == light_id:
+            main_light = ctrl.entry_data.get(CONF_LIGHT_ENTITY) or ctrl.entry_data.get("light_entity")
+            if main_light == light_id:
                 return ctrl
-            sec_lights = ctrl.entry_data.get("secondary_lights", [])
-            if isinstance(sec_lights, list) and light_id in sec_lights:
+            if main_light and light_id in get_light_members(self.hass, main_light):
                 return ctrl
+            sec_lights = ctrl.entry_data.get(CONF_SECONDARY_LIGHTS) or ctrl.entry_data.get("secondary_lights", [])
+            if isinstance(sec_lights, str):
+                sec_lights = [sec_lights]
+            if isinstance(sec_lights, list):
+                if light_id in sec_lights:
+                    return ctrl
+                for sec in sec_lights:
+                    if sec and light_id in get_light_members(self.hass, sec):
+                        return ctrl
         return None
 
     async def _async_build_and_queue_schedule(self) -> None:
@@ -346,22 +383,35 @@ class PresenceSimulationCoordinator:
         if not events:
             _LOGGER.warning("PresenceSimulation: Could not construct simulation schedule. Retrying next cycle.")
             self._status = "idle"
+            self._schedule_next_planning_cycle()
             return
 
-        # Sort chronologically and filter out past events
+        # Sort chronologically
         events.sort(key=lambda x: x.target_time)
+
+        # Mid-evening initial state catch-up: if simulation starts after an entity's scheduled turn-on
+        # and before its scheduled turn-off, actuate that initial ON state immediately
+        sun_state = self.hass.states.get("sun.sun")
+        sun_is_down = sun_state is not None and sun_state.state == "below_horizon"
+        if sun_is_down:
+            for ent in target_entities:
+                past_for_ent = [e for e in events if e.entity_id == ent and e.target_time <= now]
+                if past_for_ent and past_for_ent[-1].state == "on":
+                    await self._async_execute_event(past_for_ent[-1])
+
         upcoming_events = [e for e in events if e.target_time > now]
 
         _LOGGER.info(
-            "PresenceSimulation: Schedule constructed with %d total events (%d upcoming tonight).",
+            "PresenceSimulation: Schedule constructed with %d total events (%d upcoming tonight, %d currently active).",
             len(events),
             len(upcoming_events),
+            len(self._active_simulated_lights),
         )
 
         self._scheduled_events = upcoming_events
         self._schedule_upcoming_events()
 
-        # Also schedule next day plan rollover at sunrise/morning
+        # Also schedule next day plan rollover at afternoon planning window
         self._schedule_next_planning_cycle()
 
     async def _async_extract_history_events(self, entities: List[str]) -> List[SimulationEvent]:
@@ -369,8 +419,14 @@ class PresenceSimulationCoordinator:
         now = dt_util.now()
         lookback_delta = timedelta(days=self.lookback_days)
 
-        # Baseline window: same time of day, N days ago
-        base_start = (now - lookback_delta).replace(hour=16, minute=0, second=0, microsecond=0)
+        # Anchor to yesterday's date if started after midnight (00:00 - 05:59) so we replay the current night
+        anchor_date = (now - timedelta(days=1)).date() if now.hour < 6 else now.date()
+        tonight_start = datetime.combine(anchor_date, datetime.min.time(), tzinfo=now.tzinfo).replace(
+            hour=16, minute=0, second=0, microsecond=0
+        )
+
+        # Baseline window: same evening window, N days ago
+        base_start = tonight_start - lookback_delta
         base_end = base_start + timedelta(hours=14)  # 4:00 PM to 6:00 AM next morning
 
         def _fetch_history() -> Dict[str, List[State]]:
@@ -394,6 +450,7 @@ class PresenceSimulationCoordinator:
 
         for entity_id, state_list in hist_data.items():
             prev_state = None
+            last_event_time: Optional[datetime] = None
             for st in state_list:
                 state_val = st.state
                 if state_val not in ("on", "off"):
@@ -403,12 +460,14 @@ class PresenceSimulationCoordinator:
 
                 # Map historical timestamp to current night
                 hist_ts = dt_util.as_local(st.last_changed)
-                time_offset = hist_ts - base_start
-                projected_time = now.replace(hour=16, minute=0, second=0, microsecond=0) + time_offset
+                time_offset = max(timedelta(0), hist_ts - base_start)
+                projected_time = tonight_start + time_offset
 
-                # Apply humanized jitter
+                # Apply humanized jitter with pairwise monotonic ordering per entity
                 jitter = random.randint(-jitter_range_sec, jitter_range_sec)
                 final_time = projected_time + timedelta(seconds=jitter)
+                if last_event_time is not None and final_time <= last_event_time:
+                    final_time = last_event_time + timedelta(minutes=2)
 
                 # Brightness handling
                 brightness = None
@@ -421,6 +480,13 @@ class PresenceSimulationCoordinator:
 
                 events.append(SimulationEvent(final_time, entity_id, state_val, brightness))
                 prev_state = state_val
+                last_event_time = final_time
+
+            # Guarantee a morning/late-night turn-off if historical window ended with the light still ON
+            if prev_state == "on" and last_event_time is not None:
+                dawn_cutoff = tonight_start + timedelta(hours=13, minutes=30)
+                fallback_off = max(last_event_time + timedelta(minutes=15), min(dawn_cutoff, last_event_time + timedelta(hours=2)))
+                events.append(SimulationEvent(fallback_off, entity_id, "off"))
 
         return events
 
@@ -429,10 +495,31 @@ class PresenceSimulationCoordinator:
         now = dt_util.now()
         events: List[SimulationEvent] = []
 
-        # Today's reference evening anchor (approx. 5:30 PM / sunset anchor)
-        evening_start = now.replace(hour=17, minute=30, second=0, microsecond=0)
-        bedtime_start = now.replace(hour=22, minute=0, second=0, microsecond=0)
-        night_start = now.replace(hour=23, minute=30, second=0, microsecond=0)
+        anchor_date = (now - timedelta(days=1)).date() if now.hour < 6 else now.date()
+        base_day = datetime.combine(anchor_date, datetime.min.time(), tzinfo=now.tzinfo)
+
+        # Solar-aware evening start (local sunset minus 15 min, clamped between 17:00 and 21:00)
+        evening_start = base_day.replace(hour=17, minute=30, second=0, microsecond=0)
+        sun_state = self.hass.states.get("sun.sun")
+        if sun_state and sun_state.attributes.get("next_setting"):
+            try:
+                next_set = dt_util.parse_datetime(str(sun_state.attributes["next_setting"]))
+                if next_set:
+                    local_set = dt_util.as_local(next_set)
+                    candidate = base_day.replace(
+                        hour=local_set.hour, minute=local_set.minute, second=0, microsecond=0
+                    ) - timedelta(minutes=15)
+                    earliest = base_day.replace(hour=17, minute=0, second=0, microsecond=0)
+                    latest = base_day.replace(hour=21, minute=0, second=0, microsecond=0)
+                    evening_start = max(earliest, min(latest, candidate))
+            except Exception:
+                pass
+
+        bedtime_start = max(
+            base_day.replace(hour=22, minute=0, second=0, microsecond=0),
+            evening_start + timedelta(minutes=90),
+        )
+        night_start = base_day.replace(hour=23, minute=30, second=0, microsecond=0)
 
         # Categorize target entities based on typical household room roles
         living_lights: List[str] = []
@@ -550,11 +637,16 @@ class PresenceSimulationCoordinator:
             }
 
             # Set brightness
-            b_pct = event.brightness_pct or self.max_brightness_pct
-            service_data["brightness_pct"] = max(10, min(100, b_pct))
+            b_pct = max(10, min(100, event.brightness_pct or self.max_brightness_pct))
+            service_data["brightness_pct"] = b_pct
 
-            # Apply circadian warm color temperature (e.g. 2700K) if light supports color temp
-            service_data["color_temp_kelvin"] = 2700
+            # Apply circadian warm color temperature (e.g. 2700K) only if light supports color_temp
+            clamped_k = clamp_kelvin_for_entity(self.hass, event.entity_id, 2700)
+            if clamped_k is not None:
+                service_data["color_temp_kelvin"] = clamped_k
+
+            if room_ctrl:
+                self.engine.set_echo_guard(room_ctrl.room_id, b_pct, 0, 1.0)
 
             try:
                 await self.hass.services.async_call("light", "turn_on", service_data, context=ctx)
@@ -567,6 +659,9 @@ class PresenceSimulationCoordinator:
 
         else:
             self._active_simulated_lights.discard(event.entity_id)
+            room_ctrl = self._find_room_controller_for_light(event.entity_id)
+            if room_ctrl:
+                self.engine.set_echo_guard(room_ctrl.room_id, 0, 0, 1.0)
             try:
                 await self.hass.services.async_call(
                     "light", "turn_off", {ATTR_ENTITY_ID: event.entity_id}, context=ctx
@@ -574,7 +669,6 @@ class PresenceSimulationCoordinator:
             except Exception as err:
                 _LOGGER.error("PresenceSimulation: Failed to turn off light '%s': %s", event.entity_id, err)
 
-            room_ctrl = self._find_room_controller_for_light(event.entity_id)
             if room_ctrl:
                 room_ctrl.schedule_evaluation("presence_simulation_event", delay_sec=0.1)
 
@@ -605,14 +699,27 @@ class PresenceSimulationCoordinator:
 
     def _schedule_next_planning_cycle(self) -> None:
         """Schedule planning for next sunset/evening when simulation remains active across multiple days."""
+        if self._plan_unsub:
+            try:
+                self._plan_unsub()
+            except Exception:
+                pass
+            self._plan_unsub = None
+
         now = dt_util.now()
         # Next afternoon at 3:30 PM to compile next night's schedule
-        next_plan_time = (now + timedelta(days=1)).replace(hour=15, minute=30, second=0, microsecond=0)
+        today_plan = now.replace(hour=15, minute=30, second=0, microsecond=0)
+        next_plan_time = today_plan if now < today_plan else (today_plan + timedelta(days=1))
         delay = (next_plan_time - now).total_seconds()
 
         @callback
         def _plan_next(_now: Any) -> None:
+            self._plan_unsub = None
             if self._is_on:
                 self.hass.async_create_task(self._async_build_and_queue_schedule())
 
         self._plan_unsub = async_call_later(self.hass, max(60.0, delay), _plan_next)
+
+    def stop(self) -> None:
+        """Clean up scheduled timers on coordinator unload."""
+        self._clear_scheduled_timers()

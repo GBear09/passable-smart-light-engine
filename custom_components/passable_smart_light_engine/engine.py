@@ -5,13 +5,14 @@ from datetime import datetime, time as dtime, timedelta
 import logging
 import math
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from homeassistant.core import CALLBACK_TYPE, Context, Event, HomeAssistant, State, callback
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_point_in_time,
     async_track_state_change_event,
+    async_track_time_change,
     async_track_time_interval,
 )
 import homeassistant.util.dt as dt_util
@@ -130,16 +131,73 @@ def get_light_members(hass: HomeAssistant, light_entity: str) -> List[str]:
 def get_circadian_temp(
     hass: HomeAssistant, min_temp: int = DEFAULT_MIN_COLOR_TEMP, max_temp: int = DEFAULT_MAX_COLOR_TEMP
 ) -> int:
-    """Calculate circadian color temperature (Kelvin) based on sun elevation."""
+    """Calculate circadian color temperature (Kelvin) based on sun elevation with raised-cosine smoothing."""
     try:
         sun_state = hass.states.get("sun.sun")
         elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
     except Exception:
         elev = 0.0
 
-    elev = max(0.0, min(60.0, elev))
-    factor = elev / 60.0
-    return int(min_temp + factor * (max_temp - min_temp))
+    low_k = min(int(min_temp), int(max_temp))
+    high_k = max(int(min_temp), int(max_temp))
+
+    # Smooth raised-cosine curve across civil twilight (-6° to 60°)
+    norm = max(0.0, min(1.0, (elev + 6.0) / 66.0))
+    factor = 0.5 * (1.0 - math.cos(math.pi * norm))
+    return int(round(low_k + factor * (high_k - low_k)))
+
+
+def clamp_kelvin_for_entity(
+    hass: HomeAssistant, entity_id: Union[str, List[str]], target_kelvin: int
+) -> Optional[int]:
+    """Clamp target Kelvin to the physical limits of target light(s), or return None if color_temp unsupported."""
+    entities = [entity_id] if isinstance(entity_id, str) else list(entity_id)
+    expanded: List[str] = []
+    for ent in entities:
+        if ent:
+            expanded.extend(get_light_members(hass, ent))
+    if not expanded:
+        expanded = [e for e in entities if e]
+
+    any_supports_ct = False
+    any_state_found = False
+    low_bound = 1500
+    high_bound = 9000
+
+    for ent in expanded:
+        st = hass.states.get(ent)
+        if not st:
+            continue
+        any_state_found = True
+        attrs = st.attributes
+        modes = [str(m).lower() for m in (attrs.get("supported_color_modes") or [])]
+        if modes and "color_temp" not in modes:
+            continue
+        any_supports_ct = True
+
+        min_k = attrs.get("min_color_temp_kelvin")
+        max_k = attrs.get("max_color_temp_kelvin")
+        if min_k is None and attrs.get("max_mireds"):
+            try:
+                min_k = int(1000000 / float(attrs["max_mireds"]))
+            except (ValueError, TypeError, ZeroDivisionError):
+                min_k = None
+        if max_k is None and attrs.get("min_mireds"):
+            try:
+                max_k = int(1000000 / float(attrs["min_mireds"]))
+            except (ValueError, TypeError, ZeroDivisionError):
+                max_k = None
+
+        if min_k is not None:
+            low_bound = max(low_bound, int(min_k))
+        if max_k is not None:
+            high_bound = min(high_bound, int(max_k))
+
+    if any_state_found and not any_supports_ct:
+        return None
+    if low_bound > high_bound:
+        low_bound, high_bound = high_bound, low_bound
+    return max(low_bound, min(high_bound, int(target_kelvin)))
 
 
 def get_expected_lux(curve: Dict[str, Any], pct: float, default_lux_ratio: float = DEFAULT_LUX_RATIO) -> float:
@@ -247,9 +305,25 @@ def calculate_learned_target_lux(
         return float(seed_lux)
 
     learned_avg = weighted_lux / total_weight
-    # Blend with seed: 5 samples reach full weight
-    blend_factor = min(1.0, len(user_prefs) / 5.0)
+    # Blend with seed based on effective local kernel weight rather than global list length
+    blend_factor = min(1.0, total_weight / 3.0)
     return (learned_avg * blend_factor) + (float(seed_lux) * (1.0 - blend_factor))
+
+
+def _update_monotonic_curve_point(curves: Dict[str, Any], pct: int, lux_val: float) -> None:
+    """Update a single dimmer point on a yield curve while enforcing non-decreasing monotonicity."""
+    rounded_lux = round(max(0.1, float(lux_val)), 1)
+    curves[str(int(pct))] = rounded_lux
+    for k_str, existing_val in list(curves.items()):
+        try:
+            k_pct = int(float(k_str))
+            e_lux = float(existing_val)
+        except (ValueError, TypeError):
+            continue
+        if k_pct < pct and e_lux > rounded_lux:
+            curves[k_str] = rounded_lux
+        elif k_pct > pct and e_lux < rounded_lux:
+            curves[k_str] = rounded_lux
 
 
 class PassableLightingEngine:
@@ -278,6 +352,9 @@ class PassableLightingEngine:
         self._media_daylight_suppressed: Dict[str, bool] = {}
         self._circadian_unsub: Optional[CALLBACK_TYPE] = None
         self._sun_unsub: Optional[CALLBACK_TYPE] = None
+        self._calibrating_rooms: Set[str] = set()
+        self._last_circadian_eval: Dict[str, float] = {}
+        self._last_active_mode: Dict[str, str] = {}
 
     def is_notification_active(self, room_id: Optional[str] = None, entity_id: Optional[str] = None) -> bool:
         """Check if visual notification light is actively showing in a room or for an entity."""
@@ -317,10 +394,15 @@ class PassableLightingEngine:
         self._presence_simulation = coordinator
 
     def is_simulating_presence(self, entity_id: Optional[str]) -> bool:
-        """Check if an entity is currently actively simulating presence."""
+        """Check if an entity or any of its group members is currently actively simulating presence."""
         if not entity_id or not self._presence_simulation:
             return False
-        return self._presence_simulation.is_light_simulating(entity_id)
+        if self._presence_simulation.is_light_simulating(entity_id):
+            return True
+        for member in get_light_members(self.hass, entity_id):
+            if self._presence_simulation.is_light_simulating(member):
+                return True
+        return False
 
     @property
     def holiday_lighting(self) -> Optional[Any]:
@@ -333,10 +415,15 @@ class PassableLightingEngine:
         self._holiday_lighting = coordinator
 
     def is_holiday_active(self, entity_id: Optional[str]) -> bool:
-        """Check if an entity is currently actively controlled by holiday lighting."""
+        """Check if an entity or any of its group members is currently actively controlled by holiday lighting."""
         if not entity_id or not self._holiday_lighting:
             return False
-        return self._holiday_lighting.is_light_active(entity_id)
+        if self._holiday_lighting.is_light_active(entity_id):
+            return True
+        for member in get_light_members(self.hass, entity_id):
+            if self._holiday_lighting.is_light_active(member):
+                return True
+        return False
 
     def _cleanup_contexts(self) -> None:
         """Prune expired engine context IDs."""
@@ -372,24 +459,22 @@ class PassableLightingEngine:
             self.hass.async_create_task(self.async_evaluate_dynamic_circadian(room_id))
 
     def unregister_controller(self, room_id: str) -> None:
-        """Unregister an active native room controller."""
+        """Unregister an active native room controller and clean up pending room timers."""
         self._controllers.pop(room_id, None)
+        self.clear_manual_override(room_id)
+        self.cancel_pending_learning(room_id)
+        self._echo_guards.pop(room_id, None)
+        self._calibrating_rooms.discard(room_id)
 
     def clear_lux_history(self, room_id: str) -> None:
         """Clear smoothed lux history buffer and last update timestamp for a room."""
         self._lux_history.pop(room_id, None)
         self._lux_last_updated.pop(room_id, None)
 
-    def get_smoothed_lux(
+    def get_smoothed_lux_optional(
         self, room_id: str, lux_sensor: str, max_readings: int = 5, ttl_sec: float = 180.0
-    ) -> float:
-        """Compute spike-smoothed ambient lux reading with TTL sample aging."""
-        raw_val = safe_get_state(self.hass, lux_sensor, 0.0)
-        try:
-            current_lux = float(raw_val)
-        except (ValueError, TypeError):
-            current_lux = 0.0
-
+    ) -> Optional[float]:
+        """Compute spike-smoothed ambient lux reading, or None if sensor is unavailable and history is empty."""
         now = time.time()
 
         # Prune expired samples older than ttl_sec (default: 180s)
@@ -399,20 +484,29 @@ class PassableLightingEngine:
             if (now - ts) <= ttl_sec
         ]
 
-        # Only append when sensor actually updated to prevent buffer duplication during loops
-        sensor_st = self.hass.states.get(lux_sensor)
-        st_updated = (
-            dt_util.as_utc(sensor_st.last_updated).timestamp()
-            if sensor_st and sensor_st.last_updated
-            else 0.0
-        )
-        last_recorded_ts = self._lux_last_updated.get(room_id, 0.0)
+        sensor_st = self.hass.states.get(lux_sensor) if lux_sensor else None
+        valid_reading: Optional[float] = None
+        if sensor_st and sensor_st.state not in (None, "unknown", "unavailable"):
+            try:
+                parsed = float(sensor_st.state)
+                if math.isfinite(parsed) and parsed >= 0.0:
+                    valid_reading = parsed
+            except (ValueError, TypeError):
+                valid_reading = None
 
-        if not history or st_updated > last_recorded_ts:
-            history.append((now, current_lux))
-            self._lux_last_updated[room_id] = st_updated
-            if len(history) > max_readings:
-                history.pop(0)
+        if valid_reading is not None and sensor_st is not None:
+            st_updated = (
+                dt_util.as_utc(sensor_st.last_updated).timestamp()
+                if sensor_st.last_updated
+                else now
+            )
+            last_recorded_ts = self._lux_last_updated.get(room_id, 0.0)
+
+            if not history or st_updated > last_recorded_ts:
+                history.append((now, valid_reading))
+                self._lux_last_updated[room_id] = st_updated
+                if len(history) > max_readings:
+                    history.pop(0)
 
         self._lux_history[room_id] = history
 
@@ -423,7 +517,14 @@ class PassableLightingEngine:
             return sum(trimmed) / len(trimmed)
         if values:
             return sum(values) / len(values)
-        return current_lux
+        return valid_reading
+
+    def get_smoothed_lux(
+        self, room_id: str, lux_sensor: str, max_readings: int = 5, ttl_sec: float = 180.0
+    ) -> float:
+        """Compute spike-smoothed ambient lux reading with TTL sample aging (0.0 fallback)."""
+        val = self.get_smoothed_lux_optional(room_id, lux_sensor, max_readings=max_readings, ttl_sec=ttl_sec)
+        return val if val is not None else 0.0
 
     def set_echo_guard(
         self, room_id: str, target_pct: int, start_pct: int, transition_sec: float = 1.0
@@ -440,6 +541,7 @@ class PassableLightingEngine:
             "direction": direction,
             "settled_since": None,
             "timestamp": now,
+            "transition_sec": float(transition_sec),
         }
 
     def check_echo_guard(self, room_id: str, current_pct: int) -> bool:
@@ -464,9 +566,12 @@ class PassableLightingEngine:
                     if abs(current_pct - target_pct) <= 3:
                         if guard["settled_since"] is None:
                             guard["settled_since"] = now
-                        elif (now - guard["settled_since"]) >= ECHO_CONVERGENCE_SETTLE_SEC:
+                        elif (
+                            (now - guard["timestamp"]) >= guard.get("transition_sec", 1.0)
+                            and (now - guard["settled_since"]) >= ECHO_CONVERGENCE_SETTLE_SEC
+                        ):
                             _LOGGER.debug(
-                                "PassableSmartLighting [%s]: Hardware reached target %s%% and settled. Closing echo guard early.",
+                                "PassableSmartLighting [%s]: Hardware reached target %s%% and settled after transition. Closing echo guard early.",
                                 room_id,
                                 target_pct,
                             )
@@ -509,14 +614,18 @@ class PassableLightingEngine:
         manual_override_entity: Optional[str] = None,
     ) -> None:
         """Activate manual override for a room with thread-safe timer and helper synchronization."""
+        now = time.time()
         prev = self._override_timers.get(room_id)
+        was_recently_activated = bool(
+            prev and (now - prev.get("activated_at", 0.0)) < 5.0 and now < prev.get("expires_at", 0.0)
+        )
         if prev and prev.get("cancel_cb"):
             try:
                 prev["cancel_cb"]()
             except Exception:
                 pass
 
-        expires_at = time.time() + (timeout_min * 60)
+        expires_at = now + (timeout_min * 60)
 
         @callback
         def _on_override_expired(_now: Any) -> None:
@@ -540,15 +649,27 @@ class PassableLightingEngine:
         )
         self._override_timers[room_id] = {
             "expires_at": expires_at,
+            "activated_at": now,
             "cancel_cb": cancel_listener,
             "helper_entity": manual_override_entity,
         }
-        _LOGGER.info("PassableSmartLighting [%s]: 🔒 Manual override ACTIVE for %s min", room_id, timeout_min)
+        if was_recently_activated:
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Refreshed manual override timer (%s min) on staggered group report",
+                room_id,
+                timeout_min,
+            )
+        else:
+            _LOGGER.info("PassableSmartLighting [%s]: 🔒 Manual override ACTIVE for %s min", room_id, timeout_min)
+        ctrl = self._controllers.get(room_id)
+        if ctrl:
+            ctrl.notify_entities()
 
     def set_manual_override(
         self, room_id: str, timeout_min: int, cancel_cb: Optional[CALLBACK_TYPE] = None
     ) -> None:
         """Activate manual override for a room."""
+        now = time.time()
         prev = self._override_timers.get(room_id)
         if prev and prev.get("cancel_cb"):
             try:
@@ -556,12 +677,16 @@ class PassableLightingEngine:
             except Exception:
                 pass
 
-        expires_at = time.time() + (timeout_min * 60)
+        expires_at = now + (timeout_min * 60)
         self._override_timers[room_id] = {
             "expires_at": expires_at,
+            "activated_at": now,
             "cancel_cb": cancel_cb,
         }
         _LOGGER.info("PassableSmartLighting [%s]: 🔒 Manual override ACTIVE for %s min", room_id, timeout_min)
+        ctrl = self._controllers.get(room_id)
+        if ctrl:
+            ctrl.notify_entities()
 
     def clear_manual_override(self, room_id: str) -> None:
         """Clear manual override for a room."""
@@ -573,6 +698,9 @@ class PassableLightingEngine:
                 pass
         if prev:
             _LOGGER.info("PassableSmartLighting [%s]: 🔓 Manual override CLEARED", room_id)
+            ctrl = self._controllers.get(room_id)
+            if ctrl:
+                ctrl.notify_entities()
 
     async def async_turn_on_light(
         self,
@@ -601,8 +729,10 @@ class PassableLightingEngine:
         }
 
         if circadian_enabled:
-            kelvin = get_circadian_temp(self.hass, min_temp, max_temp)
-            service_data["color_temp_kelvin"] = kelvin
+            raw_kelvin = get_circadian_temp(self.hass, min_temp, max_temp)
+            clamped_kelvin = clamp_kelvin_for_entity(self.hass, light_entity, raw_kelvin)
+            if clamped_kelvin is not None:
+                service_data["color_temp_kelvin"] = clamped_kelvin
 
         # Track HA Context and engine targets
         engine_context = Context()
@@ -701,6 +831,15 @@ class PassableLightingEngine:
             except Exception:
                 pass
             self._sun_unsub = None
+        for r_id in list(self._override_timers.keys()):
+            self.clear_manual_override(r_id)
+        all_learning_rooms = (
+            set(self._pending_learning_handles.keys())
+            | set(self._automated_learning_handles.keys())
+            | set(self._stabilizing_tasks.keys())
+        )
+        for r_id in all_learning_rooms:
+            self.cancel_pending_learning(r_id)
 
     async def async_apply_circadian_to_entity(
         self,
@@ -729,14 +868,10 @@ class PassableLightingEngine:
         if color_mode and str(color_mode).lower() not in ("color_temp", "white", "unknown"):
             return False
 
-        # Clamp target kelvin to hardware fixture limits if exposed
-        min_k = attrs.get("min_color_temp_kelvin")
-        max_k = attrs.get("max_color_temp_kelvin")
-        effective_target = target_kelvin
-        if min_k is not None:
-            effective_target = max(int(min_k), effective_target)
-        if max_k is not None:
-            effective_target = min(int(max_k), effective_target)
+        # Clamp target kelvin to hardware fixture limits (including group member limits)
+        effective_target = clamp_kelvin_for_entity(self.hass, entity_id, target_kelvin)
+        if effective_target is None:
+            return False
 
         current_kelvin = attrs.get("color_temp_kelvin")
         if not current_kelvin and attrs.get("color_temp"):
@@ -750,22 +885,31 @@ class PassableLightingEngine:
             if delta < DEFAULT_CIRCADIAN_MIN_DELTA_KELVIN:
                 return False
 
-        # Send color-only command with engine context
+        current_pct = int(round((attrs.get("brightness", 0) / 255.0) * 100))
+        target_pct = max(1, min(100, self._last_engine_target.get(room_id) or current_pct or 1))
+
+        # Include explicit brightness_pct and arm echo guard so Hue bulbs in prior XY scenes
+        # never revert to cached scene brightness or trigger false manual overrides during the 15s fade
         service_data: Dict[str, Any] = {
             "entity_id": entity_id,
             "color_temp_kelvin": effective_target,
+            "brightness_pct": target_pct,
             "transition": transition,
         }
         engine_context = Context()
         ttl = transition + DEFAULT_MESH_SETTLE_SEC + 5.0
         self.register_engine_context(engine_context.id, ttl)
+        self._last_engine_target[room_id] = target_pct
+        self._last_engine_command[room_id] = time.time()
+        self.set_echo_guard(room_id, target_pct, current_pct, transition)
 
         _LOGGER.info(
-            "PassableSmartLighting [%s]: Dynamic circadian transition: shifting %s from %sK to %sK (trans: %.1fs)",
+            "PassableSmartLighting [%s]: Dynamic circadian transition: shifting %s from %sK to %sK at %s%% (trans: %.1fs)",
             room_id,
             entity_id,
             current_kelvin or "unknown",
             effective_target,
+            target_pct,
             transition,
         )
         try:
@@ -797,53 +941,61 @@ class PassableLightingEngine:
                 continue
 
             r_id = ctrl.room_id
-
-            # Skip if manual override is active
-            if self.is_manual_override_active(r_id):
+            if r_id in self._calibrating_rooms:
                 continue
 
-            # Skip if freeze bypass or force-off bypass is active
-            is_frozen, is_forced_off = self.check_bypasses(
-                entry_data.get(CONF_BYPASS_FREEZE_ENTITIES),
-                entry_data.get(CONF_BYPASS_OFF_ENTITIES),
-                entry_data.get(CONF_MANUAL_OVERRIDE_ENTITY),
-            )
-            if is_frozen or is_forced_off or ctrl.freeze_bypass_active:
+            now = time.time()
+            if room_id is None and (now - self._last_circadian_eval.get(r_id, 0.0)) < 30.0:
                 continue
 
-            light_entity = entry_data.get(CONF_LIGHT_ENTITY)
-            if not light_entity:
-                continue
+            async with self.get_lock(r_id):
+                # Skip if manual override is active
+                if self.is_manual_override_active(r_id):
+                    continue
 
-            # Skip if simulating presence or holiday lighting active on this fixture
-            if self.is_simulating_presence(light_entity) or self.is_holiday_active(light_entity):
-                continue
+                # Skip if freeze bypass or force-off bypass is active
+                is_frozen, is_forced_off = self.check_bypasses(
+                    entry_data.get(CONF_BYPASS_FREEZE_ENTITIES) or [],
+                    entry_data.get(CONF_BYPASS_OFF_ENTITIES) or [],
+                    entry_data.get(CONF_MANUAL_OVERRIDE_ENTITY),
+                )
+                if is_frozen or is_forced_off or ctrl.freeze_bypass_active:
+                    continue
 
-            min_temp = int(entry_data.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP))
-            max_temp = int(entry_data.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP))
-            target_kelvin = get_circadian_temp(self.hass, min_temp, max_temp)
+                light_entity = entry_data.get(CONF_LIGHT_ENTITY)
+                if not light_entity:
+                    continue
 
-            # Apply to primary light entity (or non-claimed members if notification is active)
-            notif_showing = ctrl.is_notification_showing
-            notif_light = ctrl.notification_light_entity
-            if notif_showing and notif_light:
-                all_members = get_light_members(self.hass, light_entity)
-                remaining_members = [m for m in all_members if m != notif_light]
-                for member_ent in remaining_members:
-                    await self.async_apply_circadian_to_entity(r_id, member_ent, target_kelvin)
-            else:
-                await self.async_apply_circadian_to_entity(r_id, light_entity, target_kelvin)
+                # Skip if simulating presence or holiday lighting active on this fixture
+                if self.is_simulating_presence(light_entity) or self.is_holiday_active(light_entity):
+                    continue
 
-            # Also apply to secondary lights if on and supported
-            sec_lights = entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS) or []
-            if isinstance(sec_lights, str):
-                sec_lights = [sec_lights]
-            for sec_ent in sec_lights:
-                if sec_ent:
-                    await self.async_apply_circadian_to_entity(r_id, sec_ent, target_kelvin)
+                self._last_circadian_eval[r_id] = time.time()
+                min_temp = int(entry_data.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP))
+                max_temp = int(entry_data.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP))
+                target_kelvin = get_circadian_temp(self.hass, min_temp, max_temp)
+
+                # Apply to primary light entity (or non-claimed members if notification is active)
+                notif_showing = ctrl.is_notification_showing
+                notif_light = ctrl.notification_light_entity
+                if notif_showing and notif_light:
+                    all_members = get_light_members(self.hass, light_entity)
+                    remaining_members = [m for m in all_members if m != notif_light]
+                    for member_ent in remaining_members:
+                        await self.async_apply_circadian_to_entity(r_id, member_ent, target_kelvin)
+                else:
+                    await self.async_apply_circadian_to_entity(r_id, light_entity, target_kelvin)
+
+                # Also apply to secondary lights if on and supported
+                sec_lights = entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS) or []
+                if isinstance(sec_lights, str):
+                    sec_lights = [sec_lights]
+                for sec_ent in sec_lights:
+                    if sec_ent:
+                        await self.async_apply_circadian_to_entity(r_id, sec_ent, target_kelvin)
 
     async def async_sync_helper(self, entity_id: Optional[str], target_state: bool) -> None:
-        """Synchronize an existing helper entity (e.g. input_boolean)."""
+        """Synchronize an existing helper entity (e.g. input_boolean) with engine context."""
         if not entity_id or not isinstance(entity_id, str):
             return
         domain = entity_id.split(".")[0]
@@ -852,7 +1004,9 @@ class PassableLightingEngine:
             curr = safe_get_state(self.hass, entity_id, "unknown")
             expected = "on" if target_state else "off"
             if curr != expected:
-                await self.hass.services.async_call(domain, svc, {"entity_id": entity_id})
+                ctx = Context()
+                self.register_engine_context(ctx.id, 10.0)
+                await self.hass.services.async_call(domain, svc, {"entity_id": entity_id}, context=ctx)
         except Exception as err:
             _LOGGER.debug("Could not sync helper entity %s: %s", entity_id, err)
 
@@ -948,8 +1102,12 @@ class PassableLightingEngine:
 
     async def async_handle_engine_cycle(self, params: Dict[str, Any]) -> None:
         """Execute one complete evaluation cycle for a room."""
-        room_id = params.get("room_id", "default_room")
+        room_id = str(params.get("room_id", "default_room"))
+        if room_id in self._calibrating_rooms:
+            return
         async with self.get_lock(room_id):
+            if room_id in self._calibrating_rooms:
+                return
             await self._async_execute_cycle(params)
 
     async def _async_execute_cycle(self, p: Dict[str, Any]) -> None:
@@ -959,7 +1117,7 @@ class PassableLightingEngine:
         lux_sensor = str(p.get("lux_sensor", ""))
         trigger_id = str(p.get("trigger_id", "none"))
 
-        if not light_entity:
+        if not light_entity or room_id in self._calibrating_rooms:
             return
 
         # Configuration unpacking
@@ -1079,6 +1237,8 @@ class PassableLightingEngine:
         is_frozen, is_forced_off = self.check_bypasses(
             bypass_freeze_entities, bypass_off_entities, manual_override_entity
         )
+        if p.get("internal_freeze") or (ctrl and ctrl.freeze_bypass_active):
+            is_frozen = True
         if self.is_simulating_presence(light_entity) or self.is_holiday_active(light_entity):
             is_forced_off = False
 
@@ -1135,8 +1295,8 @@ class PassableLightingEngine:
                 )
                 return
 
-            # A000. Active visual notification match
-            if self.is_notification_active(room_id, light_entity):
+            # A000. Active visual notification match (only absorb if the entire light target is the notification bulb)
+            if notif_showing and notif_light and notif_light == light_entity:
                 _LOGGER.debug(
                     "PassableSmartLighting [%s]: Light change event absorbed by active visual notification.",
                     room_id,
@@ -1200,9 +1360,10 @@ class PassableLightingEngine:
                 and is_light_on
                 and abs(current_pct - from_pct) >= BRIGHTNESS_HYSTERESIS_PCT
             )
+            is_color_change = bool(p.get("trigger_color_changed", False)) and from_st == "on" and is_light_on
 
-            # If not UI, not physical toggle from off, not physical dimmer adjustment, and not turned off: ignore
-            if not (is_user_ui or is_physical_turn_on or is_physical_dim or not is_light_on):
+            # If not UI, not physical toggle from off, not physical dimmer/color adjustment, and not turned off: ignore
+            if not (is_user_ui or is_physical_turn_on or is_physical_dim or is_color_change or not is_light_on):
                 _LOGGER.debug(
                     "PassableSmartLighting [%s]: Ignoring minor fluctuation or attribute report (pct=%s%%, from=%s%%)",
                     room_id,
@@ -1242,10 +1403,20 @@ class PassableLightingEngine:
                 return
 
             if not is_light_on:
-                # Turned off manually
-                self.clear_manual_override(room_id)
+                # Turned off manually: if room is currently occupied, lock manual override so lights stay OFF
                 self.cancel_pending_learning(room_id)
-                await self.async_sync_helper(manual_override_entity, False)
+                is_currently_occupied = self.check_presence(presence_entities) if presence_entities else True
+                if is_currently_occupied:
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: Light turned OFF manually while room is occupied; locking manual override for %s min.",
+                        room_id,
+                        override_timeout_min,
+                    )
+                    self.schedule_manual_override(room_id, override_timeout_min, manual_override_entity)
+                    await self.async_sync_helper(manual_override_entity, True)
+                else:
+                    self.clear_manual_override(room_id)
+                    await self.async_sync_helper(manual_override_entity, False)
                 return
 
         # 4. Check if manual override is currently locked via helper entity
@@ -1260,7 +1431,7 @@ class PassableLightingEngine:
                     # Helper was turned OFF externally (e.g. from dashboard)
                     self.clear_manual_override(room_id)
 
-        if self.is_manual_override_active(room_id):
+        if self.is_manual_override_active(room_id) and trigger_id != "presence_off_timeout":
             _LOGGER.debug("PassableSmartLighting [%s]: Manual override active. Skipping auto-adjustment.", room_id)
             return
 
@@ -1403,48 +1574,58 @@ class PassableLightingEngine:
         user_prefs = learning_data.get("user_prefs", {}).get(room_id, [])
         media_prefs = learning_data.get("media_prefs", {}).get(room_id, [])
         late_night_prefs = learning_data.get("late_night_prefs", {}).get(room_id, [])
+        cmd_transition = float(p.get("transition", 1.0))
 
         # Mode A: Media Playing
         if self.check_media(media_entities):
+            self._last_active_mode[room_id] = "media"
             media_respect_ambient = bool(
                 p.get(CONF_MEDIA_RESPECT_AMBIENT_LUX, DEFAULT_MEDIA_RESPECT_AMBIENT_LUX)
             )
             if media_respect_ambient and lux_sensor:
-                sun_state = self.hass.states.get("sun.sun")
-                elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
-                azim = (
-                    float(sun_state.attributes.get("azimuth", 0))
-                    if sun_state and "azimuth" in sun_state.attributes
-                    else None
-                )
-                target_lux = calculate_learned_target_lux(target_lux_seed, user_prefs, elev, azim)
-                current_lux = self.get_smoothed_lux(room_id, lux_sensor)
+                opt_lux = self.get_smoothed_lux_optional(room_id, lux_sensor)
+                if opt_lux is not None:
+                    sun_state = self.hass.states.get("sun.sun")
+                    elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
+                    azim = (
+                        float(sun_state.attributes.get("azimuth", 0))
+                        if sun_state and "azimuth" in sun_state.attributes
+                        else None
+                    )
+                    target_lux = calculate_learned_target_lux(target_lux_seed, user_prefs, elev, azim)
+                    lux_deadband = max(MIN_LUX_DEADBAND, target_lux * LUX_DEADBAND_PCT)
 
-                # Bulb separation: determine natural ambient daylight without bulb contribution
-                if is_light_on and current_pct > 0:
-                    current_bulb_lux = get_expected_lux(room_curves, float(current_pct), default_lux_ratio)
-                    natural_ambient = max(0.0, current_lux - current_bulb_lux)
-                else:
-                    natural_ambient = max(0.0, current_lux)
-
-                if natural_ambient >= target_lux:
-                    self._media_daylight_suppressed[room_id] = True
-                    if is_light_on and active_light_target:
-                        _LOGGER.info(
-                            "PassableSmartLighting [%s]: Media active but natural daylight sufficient (%.1f >= %.1f). Turning lights OFF.",
-                            room_id,
-                            natural_ambient,
-                            target_lux,
-                        )
-                        await self.async_turn_off_light(room_id, active_light_target)
+                    # Bulb separation: determine natural ambient daylight without bulb contribution
+                    if is_light_on and current_pct > 0:
+                        current_bulb_lux = get_expected_lux(room_curves, float(current_pct), default_lux_ratio)
+                        natural_ambient = max(0.0, opt_lux - current_bulb_lux)
                     else:
-                        _LOGGER.debug(
-                            "PassableSmartLighting [%s]: Media active but natural daylight sufficient (%.1f >= %.1f). Keeping lights OFF.",
-                            room_id,
-                            natural_ambient,
-                            target_lux,
-                        )
-                    return
+                        natural_ambient = max(0.0, opt_lux)
+
+                    was_suppressed = self._media_daylight_suppressed.get(room_id, False)
+                    should_suppress = (
+                        natural_ambient >= (target_lux - lux_deadband)
+                        if was_suppressed
+                        else natural_ambient >= (target_lux + lux_deadband)
+                    )
+                    if should_suppress:
+                        self._media_daylight_suppressed[room_id] = True
+                        if is_light_on and active_light_target:
+                            _LOGGER.info(
+                                "PassableSmartLighting [%s]: Media active but natural daylight sufficient (%.1f >= %.1f). Turning lights OFF.",
+                                room_id,
+                                natural_ambient,
+                                target_lux,
+                            )
+                            await self.async_turn_off_light(room_id, active_light_target)
+                        else:
+                            _LOGGER.debug(
+                                "PassableSmartLighting [%s]: Media active but natural daylight sufficient (%.1f >= %.1f). Keeping lights OFF.",
+                                room_id,
+                                natural_ambient,
+                                target_lux,
+                            )
+                        return
 
             self._media_daylight_suppressed[room_id] = False
             target_pct = (
@@ -1463,7 +1644,13 @@ class PassableLightingEngine:
                     target_pct,
                 )
                 await self.async_turn_on_light(
-                    room_id, active_light_target, target_pct, circadian_enabled, min_color_temp, max_color_temp
+                    room_id,
+                    active_light_target,
+                    target_pct,
+                    circadian_enabled,
+                    min_color_temp,
+                    max_color_temp,
+                    transition=cmd_transition,
                 )
             return
         else:
@@ -1479,6 +1666,7 @@ class PassableLightingEngine:
             late_night_start_entity,
             late_night_stop_entity,
         ):
+            self._last_active_mode[room_id] = "late_night"
             target_pct = (
                 int(sum(late_night_prefs) / len(late_night_prefs))
                 if (late_night_prefs and late_night_learn_prefs)
@@ -1495,16 +1683,63 @@ class PassableLightingEngine:
                     target_pct,
                 )
                 await self.async_turn_on_light(
-                    room_id, active_light_target, target_pct, circadian_enabled, min_color_temp, max_color_temp
+                    room_id,
+                    active_light_target,
+                    target_pct,
+                    circadian_enabled,
+                    min_color_temp,
+                    max_color_temp,
+                    transition=cmd_transition,
                 )
             return
 
         # Mode C: Daytime Ambient Lux Targeting
+        prev_mode = self._last_active_mode.get(room_id)
+        self._last_active_mode[room_id] = "occupied"
+        mode_just_changed = prev_mode in ("media", "late_night") or trigger_id in (
+            "media_change",
+            "late_night_change",
+            "override_expired",
+        )
+
         sun_state = self.hass.states.get("sun.sun")
         elev = float(sun_state.attributes.get("elevation", 0)) if sun_state else 0.0
         azim = float(sun_state.attributes.get("azimuth", 0)) if sun_state and "azimuth" in sun_state.attributes else None
         target_lux = calculate_learned_target_lux(target_lux_seed, user_prefs, elev, azim)
-        current_lux = self.get_smoothed_lux(room_id, lux_sensor)
+
+        opt_lux = self.get_smoothed_lux_optional(room_id, lux_sensor) if lux_sensor else None
+        if opt_lux is None:
+            if not is_light_on and (elev <= 0.0 or min_occupied_pct > 0):
+                fallback_pct = max(MIN_VISIBLE_PCT, int(min_occupied_pct) if min_occupied_pct > 0 else 50)
+                _LOGGER.info(
+                    "PassableSmartLighting [%s]: Lux sensor unavailable/unknown on occupancy; applying fallback brightness %s%%.",
+                    room_id,
+                    fallback_pct,
+                )
+                self._last_ambient_adjust[room_id] = time.time()
+                if active_light_target:
+                    await self.async_turn_on_light(
+                        room_id,
+                        active_light_target,
+                        fallback_pct,
+                        circadian_enabled,
+                        min_color_temp,
+                        max_color_temp,
+                        transition=cmd_transition,
+                    )
+            else:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Lux sensor unavailable/unknown; holding current light state.",
+                    room_id,
+                )
+            return
+
+        current_lux = opt_lux
+        if is_light_on and current_pct > 0:
+            current_bulb_lux = get_expected_lux(room_curves, float(current_pct), default_lux_ratio)
+            natural_ambient = max(0.0, current_lux - current_bulb_lux)
+        else:
+            natural_ambient = max(0.0, current_lux)
 
         needed_pct = calculate_required_pct(
             target_lux, current_lux, room_curves, default_lux_ratio, min_occupied_pct, active_pct=current_pct
@@ -1530,24 +1765,19 @@ class PassableLightingEngine:
             self._last_ambient_adjust[room_id] = now_ts
             if active_light_target:
                 await self.async_turn_on_light(
-                    room_id, active_light_target, needed_pct, circadian_enabled, min_color_temp, max_color_temp
+                    room_id,
+                    active_light_target,
+                    needed_pct,
+                    circadian_enabled,
+                    min_color_temp,
+                    max_color_temp,
+                    transition=cmd_transition,
                 )
             # Schedule automated yield calibration if dark outside (sun elev < -4°) and no secondary lights on
             if elev < -4.0 and not any_secondary_on and not notif_showing:
                 self._schedule_automated_yield_learning(room_id, lux_sensor, needed_pct, current_lux, p)
         elif is_light_on:
-            # Ambient shut-off should ONLY occur during gradual ambient changes, NEVER immediately following a manual turn-on action
-            if needed_pct == 0 and min_occupied_pct == 0 and trigger_id in ("lux_change", "heartbeat", "time_pattern"):
-                _LOGGER.info(
-                    "PassableSmartLighting [%s]: Ambient lux sufficient (%.1f >= %.1f). Turning lights OFF.",
-                    room_id,
-                    current_lux,
-                    target_lux,
-                )
-                self._last_ambient_adjust[room_id] = now_ts
-                if active_light_target:
-                    await self.async_turn_off_light(room_id, active_light_target)
-            elif needed_pct == 0 and trigger_id in ("light_change", "manual_turn_on"):
+            if needed_pct == 0 and trigger_id in ("light_change", "manual_turn_on"):
                 # User just turned on the switch; maintain comfortable floor rather than plunging room into darkness
                 effective_floor = max(MIN_VISIBLE_PCT, int(min_occupied_pct or 0))
                 if abs(current_pct - effective_floor) >= 5:
@@ -1565,28 +1795,75 @@ class PassableLightingEngine:
                             circadian_enabled,
                             min_color_temp,
                             max_color_temp,
+                            transition=cmd_transition,
                         )
             else:
                 # 1. Staleness & Settling Cooldown Check for slow sensors (e.g. Matter/Zigbee)
-                cooldown_sec = float(p.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC))
-                last_cmd_ts = self._last_engine_command.get(room_id, 0.0)
-                time_since_last_cmd = now_ts - last_cmd_ts
+                if not mode_just_changed:
+                    cooldown_sec = float(p.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC))
+                    last_cmd_ts = self._last_engine_command.get(room_id, 0.0)
+                    time_since_last_cmd = now_ts - last_cmd_ts
 
-                sensor_st = self.hass.states.get(lux_sensor)
-                is_sensor_stale = False
-                if sensor_st and sensor_st.last_updated:
-                    sensor_ts = dt_util.as_utc(sensor_st.last_updated).timestamp()
-                    if sensor_ts <= (last_cmd_ts + ECHO_CONVERGENCE_SETTLE_SEC):
-                        is_sensor_stale = True
+                    sensor_st = self.hass.states.get(lux_sensor)
+                    is_sensor_stale = False
+                    if sensor_st and sensor_st.last_updated:
+                        sensor_ts = dt_util.as_utc(sensor_st.last_updated).timestamp()
+                        if sensor_ts <= (last_cmd_ts + ECHO_CONVERGENCE_SETTLE_SEC):
+                            is_sensor_stale = True
 
-                if (is_sensor_stale or time_since_last_cmd < cooldown_sec) and trigger_id in ("lux_change", "heartbeat", "time_pattern"):
-                    _LOGGER.debug(
-                        "PassableSmartLighting [%s]: Skipping closed-loop trim — sensor settling/stale (stale=%s, elapsed=%.1fs < %.1fs cooldown).",
-                        room_id,
-                        is_sensor_stale,
-                        time_since_last_cmd,
-                        cooldown_sec,
-                    )
+                    if (is_sensor_stale or time_since_last_cmd < cooldown_sec) and trigger_id in (
+                        "lux_change",
+                        "heartbeat",
+                        "time_pattern",
+                    ):
+                        _LOGGER.debug(
+                            "PassableSmartLighting [%s]: Skipping closed-loop trim — sensor settling/stale (stale=%s, elapsed=%.1fs < %.1fs cooldown).",
+                            room_id,
+                            is_sensor_stale,
+                            time_since_last_cmd,
+                            cooldown_sec,
+                        )
+                        return
+
+                # Ambient daylight shut-off with Schmitt-trigger deadband and rate-limit guard
+                if needed_pct == 0 and min_occupied_pct == 0:
+                    if mode_just_changed or (
+                        trigger_id in ("lux_change", "heartbeat", "time_pattern")
+                        and natural_ambient >= (target_lux + lux_deadband)
+                        and time_since_last_adj >= LUX_ADJUST_RATE_LIMIT_SEC
+                    ):
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Natural ambient lux sufficient (%.1f >= %.1f). Turning lights OFF.",
+                            room_id,
+                            natural_ambient,
+                            target_lux,
+                        )
+                        self._last_ambient_adjust[room_id] = now_ts
+                        if active_light_target:
+                            await self.async_turn_off_light(room_id, active_light_target)
+                    return
+
+                # Direct transition when exiting Media / Late Night / Manual Override mode
+                if mode_just_changed:
+                    if pct_diff >= BRIGHTNESS_HYSTERESIS_PCT and needed_pct > 0:
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Mode transition to occupied ambient target: setting brightness from %s%% to %s%% (Trans: %.1fs)",
+                            room_id,
+                            current_pct,
+                            needed_pct,
+                            cmd_transition,
+                        )
+                        self._last_ambient_adjust[room_id] = now_ts
+                        if active_light_target:
+                            await self.async_turn_on_light(
+                                room_id,
+                                active_light_target,
+                                needed_pct,
+                                circadian_enabled,
+                                min_color_temp,
+                                max_color_temp,
+                                transition=cmd_transition,
+                            )
                     return
 
                 # 2. Severe lux deficit & hysteresis evaluation
@@ -1596,6 +1873,9 @@ class PassableLightingEngine:
                 )
 
                 if should_adjust:
+                    if needed_pct == current_pct:
+                        return
+
                     # Rate limit to prevent hunting during rapid outdoor fluctuations
                     if time_since_last_adj < LUX_ADJUST_RATE_LIMIT_SEC and trigger_id == "lux_change" and not is_severe_deficit:
                         _LOGGER.debug(
@@ -1615,7 +1895,10 @@ class PassableLightingEngine:
                         step = min(MAX_CLOSED_LOOP_TRIM_PCT, current_pct - needed_pct)
                         target_trim_pct = max(effective_floor, current_pct - max(5, step))
 
-                    transition = float(p.get("transition", 1.0))
+                    if target_trim_pct == current_pct:
+                        return
+
+                    transition = cmd_transition
                     _LOGGER.info(
                         "PassableSmartLighting [%s]: Adjusting brightness from %s%% to %s%% (Target Lux: %.1f, Current: %.1f, Needed: %s%%, Trans: %.1fs)",
                         room_id,
@@ -1742,6 +2025,27 @@ class PassableLightingEngine:
                 _LOGGER.debug("PassableSmartLighting [%s]: Light brightness altered during dwell; discarding preference.", room_id)
                 return
 
+            # 1b. Verify active operating mode at dwell completion still matches mode_tag
+            now_media = self.check_media(p.get("media_entities", []))
+            now_late_night = self.is_late_night_active(
+                bool(p.get("late_night_enabled", False)),
+                str(p.get("late_night_condition_type", "time")),
+                p.get("late_night_entity"),
+                str(p.get("late_night_start_time", "22:00:00")),
+                str(p.get("late_night_stop_time", "06:00:00")),
+                p.get("late_night_start_entity"),
+                p.get("late_night_stop_entity"),
+            )
+            now_mode_tag = "media" if now_media else ("late_night" if now_late_night else "general")
+            if now_mode_tag != mode_tag:
+                _LOGGER.debug(
+                    "PassableSmartLighting [%s]: Operating mode changed during dwell (%s -> %s); discarding preference.",
+                    room_id,
+                    mode_tag,
+                    now_mode_tag,
+                )
+                return
+
             # Context-Aware Preference Commit Branching
             if mode_tag == "media":
                 if not bool(p.get(CONF_MEDIA_LEARN_PREFS, DEFAULT_MEDIA_LEARN_PREFS)):
@@ -1823,7 +2127,7 @@ class PassableLightingEngine:
                     )
                 else:
                     curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
-                    curves[str(current_pct)] = round(lux_now, 1)
+                    _update_monotonic_curve_point(curves, current_pct, lux_now)
                     _LOGGER.info(
                         "PassableSmartLighting [%s]: 🌙 Dark hours yield curve updated: %s%% = %.1f lx",
                         room_id,
@@ -1965,7 +2269,7 @@ class PassableLightingEngine:
 
             net_yield_lux = max(0.5, round(settled_lux, 1))
             curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
-            curves[str(target_pct)] = net_yield_lux
+            _update_monotonic_curve_point(curves, target_pct, net_yield_lux)
 
             self.store.schedule_save(delay=30.0)
             _LOGGER.info(
@@ -2064,139 +2368,165 @@ class PassableLightingEngine:
                 _LOGGER.debug("Could not create persistent notification: %s", notify_err)
             return
 
-        async with self.get_lock(room_id):
-            _LOGGER.info("PassableSmartLighting [%s]: 🚀 Starting automated yield calibration routine...", room_id)
-            test_levels = [25, 50, 75, 100]
-            cooldown = float(p.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC))
-            max_wait_sec = max(cooldown, 90.0)
-            calibrated_points: Dict[str, float] = {}
+        self._calibrating_rooms.add(room_id)
+        try:
+            async with self.get_lock(room_id):
+                _LOGGER.info("PassableSmartLighting [%s]: 🚀 Starting automated yield calibration routine...", room_id)
+                test_levels = [25, 50, 75, 100]
+                cooldown = float(p.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC))
+                max_wait_sec = max(cooldown, 90.0)
+                calibrated_points: Dict[str, float] = {}
 
-            # Ensure light starts from off so 25% represents a clean step change
-            light_st = self.hass.states.get(light_entity)
-            if light_st and light_st.state == "on":
-                await self.async_turn_off_light(room_id, light_entity, transition=1.0)
-                await asyncio.sleep(2.0)
+                # Ensure light starts from off so 25% represents a clean step change
+                light_st = self.hass.states.get(light_entity)
+                if light_st and light_st.state == "on":
+                    await self.async_turn_off_light(room_id, light_entity, transition=1.0)
+                    await asyncio.sleep(2.0)
 
-            for lvl in test_levels:
-                _LOGGER.info(
-                    "PassableSmartLighting [%s]: Calibrating at %s%% (waiting for fresh sensor update, max %.0fs)...",
-                    room_id,
-                    lvl,
-                    max_wait_sec,
-                )
-                cmd_ts = time.time()
-                fresh_event = asyncio.Event()
-
-                @callback
-                def _on_sensor_update(evt: Event) -> None:
-                    new_st = evt.data.get("new_state")
-                    if not new_st:
-                        return
-                    ts = getattr(new_st, "last_updated_timestamp", None)
-                    if ts is None:
-                        dt = getattr(new_st, "last_updated", None)
-                        ts = dt.timestamp() if dt else 0.0
-                    if ts >= cmd_ts:
-                        try:
-                            val = float(new_st.state)
-                            if val >= 0:
-                                fresh_event.set()
-                        except (ValueError, TypeError):
-                            pass
-
-                unsub = async_track_state_change_event(self.hass, [lux_sensor], _on_sensor_update)
-                try:
-                    cmd_ts = time.time()
-                    await self.async_turn_on_light(
-                        room_id, light_entity, lvl, False, DEFAULT_MIN_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP, transition=1.0
+                for lvl in test_levels:
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: Calibrating at %s%% (waiting for fresh sensor update, max %.0fs)...",
+                        room_id,
+                        lvl,
+                        max_wait_sec,
                     )
-                    # Check if sensor already updated right after command
-                    cur_st = self.hass.states.get(lux_sensor)
-                    if cur_st:
-                        cur_ts = getattr(cur_st, "last_updated_timestamp", None)
-                        if cur_ts is None and getattr(cur_st, "last_updated", None):
-                            cur_ts = cur_st.last_updated.timestamp()
-                        if cur_ts and cur_ts >= cmd_ts:
+                    self.clear_lux_history(room_id)
+                    fresh_event = asyncio.Event()
+                    fresh_lux_val: Optional[float] = None
+                    cmd_ts = time.time()
+
+                    @callback
+                    def _on_sensor_update(evt: Event) -> None:
+                        nonlocal fresh_lux_val
+                        new_st = evt.data.get("new_state")
+                        if not new_st or new_st.state in (None, "unknown", "unavailable"):
+                            return
+                        ts = getattr(new_st, "last_updated_timestamp", None)
+                        if ts is None:
+                            dt = getattr(new_st, "last_updated", None)
+                            ts = dt.timestamp() if dt else 0.0
+                        if ts >= cmd_ts:
                             try:
-                                if float(cur_st.state) >= 0:
+                                val = float(new_st.state)
+                                if val >= 0:
+                                    fresh_lux_val = val
                                     fresh_event.set()
                             except (ValueError, TypeError):
                                 pass
 
-                    await asyncio.wait_for(fresh_event.wait(), timeout=max_wait_sec)
-                    await asyncio.sleep(2.0)  # Settling buffer
-                except asyncio.TimeoutError:
-                    _LOGGER.warning(
-                        "PassableSmartLighting [%s]: Lux sensor %s failed to report fresh reading within %.0fs at %s%% brightness. Aborting calibration to prevent saving stale data.",
-                        room_id,
-                        lux_sensor,
-                        max_wait_sec,
-                        lvl,
+                    await self.async_turn_on_light(
+                        room_id, light_entity, lvl, False, DEFAULT_MIN_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP, transition=1.0
                     )
-                    await self.async_turn_off_light(room_id, light_entity, transition=1.0)
+                    # Wait for hardware transition (1.0s) to finish before accepting sensor samples
+                    await asyncio.sleep(1.2)
+                    cmd_ts = time.time()
+
+                    unsub = async_track_state_change_event(self.hass, [lux_sensor], _on_sensor_update)
+                    try:
+                        # Check if sensor updated after the hardware ramp completed
+                        cur_st = self.hass.states.get(lux_sensor)
+                        if cur_st and cur_st.state not in (None, "unknown", "unavailable"):
+                            cur_ts = getattr(cur_st, "last_updated_timestamp", None)
+                            if cur_ts is None and getattr(cur_st, "last_updated", None):
+                                cur_ts = cur_st.last_updated.timestamp()
+                            if cur_ts and cur_ts >= cmd_ts:
+                                try:
+                                    val = float(cur_st.state)
+                                    if val >= 0:
+                                        fresh_lux_val = val
+                                        fresh_event.set()
+                                except (ValueError, TypeError):
+                                    pass
+
+                        await asyncio.wait_for(fresh_event.wait(), timeout=max_wait_sec)
+                        await asyncio.sleep(2.0)  # Settling buffer
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning(
+                            "PassableSmartLighting [%s]: Lux sensor %s failed to report fresh reading within %.0fs at %s%% brightness. Aborting calibration to prevent saving stale data.",
+                            room_id,
+                            lux_sensor,
+                            max_wait_sec,
+                            lvl,
+                        )
+                        await self.async_turn_off_light(room_id, light_entity, transition=1.0)
+                        try:
+                            await self.hass.services.async_call(
+                                "persistent_notification",
+                                "create",
+                                {
+                                    "notification_id": f"passable_lighting_calibrate_{room_id}",
+                                    "title": f"Calibration Incomplete: {room_id.replace('_', ' ').title()}",
+                                    "message": (
+                                        f"Automated yield calibration for **{room_id.replace('_', ' ').title()}** was aborted at **{lvl}%** brightness.\n\n"
+                                        f"The illuminance sensor (`{lux_sensor}`) did not report a new reading within {int(max_wait_sec)} seconds.\n\n"
+                                        "**Why did this happen?**\n"
+                                        "Many battery-powered sensors (such as Aqara Matter-over-Thread) enter deep sleep to save power and only report illuminance changes when motion is detected or after extended reporting intervals.\n\n"
+                                        "**Recommendations:**\n"
+                                        "- Wave your hand or walk past the sensor during calibration to wake it up, or\n"
+                                        "- Increase the settling cooldown in the room settings."
+                                    ),
+                                },
+                            )
+                        except Exception as notify_err:
+                            _LOGGER.debug("Could not create persistent notification: %s", notify_err)
+                        return
+                    finally:
+                        unsub()
+
+                    self.clear_lux_history(room_id)
+                    lux_val = fresh_lux_val if fresh_lux_val is not None else self.get_smoothed_lux(room_id, lux_sensor)
+                    calibrated_points[str(lvl)] = round(max(0.1, lux_val), 1)
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: Recorded yield: %s%% = %.1f lx",
+                        room_id,
+                        lvl,
+                        calibrated_points[str(lvl)],
+                    )
+
+                # Monotonicity & validity check across all points
+                vals = [calibrated_points[str(l)] for l in test_levels]
+                if vals[-1] <= vals[0] or len(set(vals)) == 1:
+                    _LOGGER.warning(
+                        "PassableSmartLighting [%s]: Calibration curve failed validity check (non-increasing or flat: %s). Aborting save to protect curve integrity.",
+                        room_id,
+                        calibrated_points,
+                    )
+                    await self.async_turn_off_light(room_id, light_entity, transition=2.0)
                     try:
                         await self.hass.services.async_call(
                             "persistent_notification",
                             "create",
                             {
                                 "notification_id": f"passable_lighting_calibrate_{room_id}",
-                                "title": f"Calibration Incomplete: {room_id.replace('_', ' ').title()}",
+                                "title": f"Calibration Invalid: {room_id.replace('_', ' ').title()}",
                                 "message": (
-                                    f"Automated yield calibration for **{room_id.replace('_', ' ').title()}** was aborted at **{lvl}%** brightness.\n\n"
-                                    f"The illuminance sensor (`{lux_sensor}`) did not report a new reading within {int(max_wait_sec)} seconds.\n\n"
-                                    "**Why did this happen?**\n"
-                                    "Many battery-powered sensors (such as Aqara Matter-over-Thread) enter deep sleep to save power and only report illuminance changes when motion is detected or after extended reporting intervals.\n\n"
-                                    "**Recommendations:**\n"
-                                    "- Wave your hand or walk past the sensor during calibration to wake it up, or\n"
-                                    "- Increase the settling cooldown in the room settings."
+                                    f"Automated yield calibration for **{room_id.replace('_', ' ').title()}** produced flat or non-increasing readings: `{calibrated_points}`.\n\n"
+                                    f"The illuminance sensor (`{lux_sensor}`) did not detect a distinct increase in light level from 25% to 100%.\n\n"
+                                    "Calibration data was discarded to protect room curve integrity."
                                 ),
                             },
                         )
                     except Exception as notify_err:
                         _LOGGER.debug("Could not create persistent notification: %s", notify_err)
                     return
-                finally:
-                    unsub()
 
-                lux_val = self.get_smoothed_lux(room_id, lux_sensor)
-                calibrated_points[str(lvl)] = round(max(0.1, lux_val), 1)
-                _LOGGER.info("PassableSmartLighting [%s]: Recorded yield: %s%% = %.1f lx", room_id, lvl, calibrated_points[str(lvl)])
-
-            # Monotonicity & validity check across all points
-            vals = [calibrated_points[str(l)] for l in test_levels]
-            if vals[-1] <= vals[0] or len(set(vals)) == 1:
-                _LOGGER.warning(
-                    "PassableSmartLighting [%s]: Calibration curve failed validity check (non-increasing or flat: %s). Aborting save to protect curve integrity.",
-                    room_id,
-                    calibrated_points,
-                )
+                curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
+                curves.update(calibrated_points)
                 await self.async_turn_off_light(room_id, light_entity, transition=2.0)
-                try:
-                    await self.hass.services.async_call(
-                        "persistent_notification",
-                        "create",
-                        {
-                            "notification_id": f"passable_lighting_calibrate_{room_id}",
-                            "title": f"Calibration Invalid: {room_id.replace('_', ' ').title()}",
-                            "message": (
-                                f"Automated yield calibration for **{room_id.replace('_', ' ').title()}** produced flat or non-increasing readings: `{calibrated_points}`.\n\n"
-                                f"The illuminance sensor (`{lux_sensor}`) did not detect a distinct increase in light level from 25% to 100%.\n\n"
-                                "Calibration data was discarded to protect room curve integrity."
-                            ),
-                        },
-                    )
-                except Exception as notify_err:
-                    _LOGGER.debug("Could not create persistent notification: %s", notify_err)
-                return
-
-            curves = self.store.data.setdefault("room_curves", {}).setdefault(room_id, {})
-            curves.update(calibrated_points)
-            await self.async_turn_off_light(room_id, light_entity, transition=2.0)
-            await self.store.async_save()
-            _LOGGER.info("PassableSmartLighting [%s]: ✅ Automated yield calibration complete! Saved curve: %s", room_id, curves)
-            ready_sensor = self.hass.data.get(DOMAIN, {}).get("ready_sensor")
-            if ready_sensor:
-                ready_sensor.async_write_ha_state()
+                await self.store.async_save()
+                _LOGGER.info(
+                    "PassableSmartLighting [%s]: ✅ Automated yield calibration complete! Saved curve: %s",
+                    room_id,
+                    curves,
+                )
+                ready_sensor = self.hass.data.get(DOMAIN, {}).get("ready_sensor")
+                if ready_sensor:
+                    ready_sensor.async_write_ha_state()
+        finally:
+            self._calibrating_rooms.discard(room_id)
+            self.clear_lux_history(room_id)
+            if ctrl.is_enabled:
+                ctrl.schedule_evaluation("calibration_complete", delay_sec=1.0)
 
 
 class RoomController:
@@ -2209,12 +2539,32 @@ class RoomController:
         self.entry_data = entry_data
         self.room_id = entry_data[CONF_ROOM_ID]
         self._unsub_listeners: List[CALLBACK_TYPE] = []
+        self._entity_listeners: List[Callable[[], None]] = []
         self._is_enabled = True
         self._freeze_bypass_active = False
         self._vacancy_cancel: Optional[CALLBACK_TYPE] = None
-        self._debounce_cancel: Optional[CALLBACK_TYPE] = None
+        self._debounce_cancels: Dict[str, CALLBACK_TYPE] = {}
         self.selected_reset_target: str = "all"
         self.started_at: float = time.time()
+
+    def register_entity_listener(self, cb: Callable[[], None]) -> Callable[[], None]:
+        """Register a callback to notify room entities on state changes and return an unsubscribe function."""
+        if cb not in self._entity_listeners:
+            self._entity_listeners.append(cb)
+
+        def _unsub() -> None:
+            if cb in self._entity_listeners:
+                self._entity_listeners.remove(cb)
+
+        return _unsub
+
+    def notify_entities(self) -> None:
+        """Notify all registered room entities to write their state."""
+        for cb in list(self._entity_listeners):
+            try:
+                cb()
+            except Exception as err:
+                _LOGGER.debug("Error notifying room entity listener: %s", err)
 
     @property
     def is_enabled(self) -> bool:
@@ -2229,6 +2579,7 @@ class RoomController:
             self.engine.clear_manual_override(self.room_id)
         else:
             self.schedule_evaluation("enabled_toggle", delay_sec=0.0)
+        self.notify_entities()
 
     @property
     def vacancy_cancel(self) -> Optional[CALLBACK_TYPE]:
@@ -2282,7 +2633,7 @@ class RoomController:
             if st.state in ("on", "home", "true", "active"):
                 # Room is occupied
                 return timeout_sec
-            if st.last_changed:
+            if st.state in ("off", "not_home", "false") and st.last_changed:
                 lc = st.last_changed
                 if lc.tzinfo is None:
                     lc = dt_util.as_utc(lc)
@@ -2316,6 +2667,7 @@ class RoomController:
     def set_freeze_bypass(self, active: bool) -> None:
         """Set dedicated freeze switch state."""
         self._freeze_bypass_active = active
+        self.notify_entities()
 
     @property
     def is_notification_enabled(self) -> bool:
@@ -2406,20 +2758,25 @@ class RoomController:
     def schedule_evaluation(
         self, trigger_id: str, extra_params: Optional[Dict[str, Any]] = None, delay_sec: float = SENSOR_DEBOUNCE_SEC
     ) -> None:
-        """Debounce room evaluations to coalesce bursts of sensor events and prevent mesh flooding."""
-        if self._debounce_cancel:
-            self._debounce_cancel()
-            self._debounce_cancel = None
+        """Debounce room evaluations by trigger bucket so sensor updates never cancel light_change or vacancy events."""
+        bucket = (
+            "light"
+            if trigger_id in ("light_change", "secondary_light_change")
+            else ("vacancy" if trigger_id == "presence_off_timeout" else "eval")
+        )
+        prev_cancel = self._debounce_cancels.pop(bucket, None)
+        if prev_cancel:
+            prev_cancel()
 
         @callback
         def _execute(_now: Any) -> None:
-            self._debounce_cancel = None
+            self._debounce_cancels.pop(bucket, None)
             self.hass.async_create_task(self.async_evaluate(trigger_id, extra_params))
 
         if delay_sec <= 0:
             _execute(None)
         else:
-            self._debounce_cancel = async_call_later(self.hass, delay_sec, _execute)
+            self._debounce_cancels[bucket] = async_call_later(self.hass, delay_sec, _execute)
 
     async def async_start(self) -> None:
         """Start tracking state changes for this room."""
@@ -2452,10 +2809,13 @@ class RoomController:
                 if not new_st:
                     return
                 if new_st.state in ("on", "home", "true", "active"):
+                    was_vacant_or_counting = self._vacancy_cancel is not None
                     self.cancel_vacancy_timer()
-                    self.engine.clear_lux_history(self.room_id)
+                    light_st = self.hass.states.get(light_entity) if light_entity else None
+                    if was_vacant_or_counting or not light_st or light_st.state != "on":
+                        self.engine.clear_lux_history(self.room_id)
                     self.schedule_evaluation("presence_on", delay_sec=0.1)
-                elif new_st.state in ("off", "not_home", "false"):
+                elif new_st.state in ("off", "not_home", "false", "unavailable", "unknown"):
                     if not self.engine.check_presence(presence_entities):
                         self.schedule_vacancy_timer()
 
@@ -2463,7 +2823,7 @@ class RoomController:
                 async_track_state_change_event(self.hass, presence_entities, _on_presence_change)
             )
 
-        # Track light changes (with context forwarding)
+        # Track light changes (with context forwarding and color change detection)
         if light_entity:
             @callback
             def _on_light_change(evt: Event) -> None:
@@ -2476,16 +2836,20 @@ class RoomController:
                 if old_st.state in ("unavailable", "unknown") or new_st.state in ("unavailable", "unknown"):
                     return
 
-                # Ignore duplicate / no-op events
                 old_b = old_st.attributes.get("brightness", 0) if old_st else 0
                 new_b = new_st.attributes.get("brightness", 0) if new_st else 0
-                if old_st.state == new_st.state and old_b == new_b:
+                color_attrs = ("color_temp_kelvin", "color_temp", "rgb_color", "hs_color", "xy_color", "effect")
+                color_changed = any(old_st.attributes.get(k) != new_st.attributes.get(k) for k in color_attrs)
+
+                # Ignore duplicate / no-op events
+                if old_st.state == new_st.state and old_b == new_b and not color_changed:
                     return
 
                 params = {
                     "trigger_id": "light_change",
                     "trigger_from_state": old_st.state,
                     "trigger_from_brightness": old_b,
+                    "trigger_color_changed": color_changed,
                     "context": evt.context,
                 }
                 # Minimal debounce to capture rapid multi-bulb Zigbee reports
@@ -2548,14 +2912,73 @@ class RoomController:
                 async_track_state_change_event(self.hass, media_entities, _on_media_change)
             )
 
-        # Track bypasses
+        # Track bypasses (ignoring engine-originated helper sync calls)
         if bypasses:
             @callback
             def _on_bypass_change(evt: Event) -> None:
+                if self.engine.is_engine_context(evt.context):
+                    return
                 self.schedule_evaluation("bypass_change", delay_sec=0.1)
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, bypasses, _on_bypass_change)
+            )
+
+        # Track late night mode entities and scheduled times
+        late_night_enabled = bool(self.entry_data.get("late_night_enabled", DEFAULT_LATE_NIGHT_ENABLED))
+        if late_night_enabled:
+            ln_entities = [
+                e
+                for e in (
+                    self.entry_data.get("late_night_entity"),
+                    self.entry_data.get("late_night_start_entity"),
+                    self.entry_data.get("late_night_stop_entity"),
+                )
+                if e and isinstance(e, str)
+            ]
+            if ln_entities:
+                @callback
+                def _on_late_night_entity_change(_evt: Event) -> None:
+                    self.schedule_evaluation("late_night_change", delay_sec=0.1)
+
+                self._unsub_listeners.append(
+                    async_track_state_change_event(self.hass, ln_entities, _on_late_night_entity_change)
+                )
+
+            ln_cond_type = str(self.entry_data.get("late_night_condition_type", DEFAULT_LATE_NIGHT_CONDITION_TYPE))
+            if ln_cond_type == "time":
+                for t_key, t_def in (
+                    ("late_night_start_time", DEFAULT_LATE_NIGHT_START_TIME),
+                    ("late_night_stop_time", DEFAULT_LATE_NIGHT_STOP_TIME),
+                ):
+                    t_str = str(self.entry_data.get(t_key, t_def))
+                    try:
+                        parts = [int(x) for x in t_str.strip().split(":")]
+                        hr = parts[0] if len(parts) >= 1 else 0
+                        mn = parts[1] if len(parts) >= 2 else 0
+                        sc = parts[2] if len(parts) >= 3 else 0
+
+                        @callback
+                        def _on_late_night_time(_now: Any) -> None:
+                            self.schedule_evaluation("late_night_change", delay_sec=0.1)
+
+                        self._unsub_listeners.append(
+                            async_track_time_change(self.hass, _on_late_night_time, hour=hr, minute=mn, second=sc)
+                        )
+                    except Exception:
+                        pass
+
+        # Track power grid entity restoration
+        grid_ent = self.entry_data.get(CONF_POWER_GRID_ENTITY)
+        if grid_ent and isinstance(grid_ent, str) and grid_ent.strip().lower() != "none":
+            @callback
+            def _on_grid_change(evt: Event) -> None:
+                new_st = evt.data.get("new_state")
+                if new_st and str(new_st.state).lower() not in ("off", "unavailable", "unknown"):
+                    self.schedule_evaluation("grid_restored", delay_sec=1.0)
+
+            self._unsub_listeners.append(
+                async_track_state_change_event(self.hass, [grid_ent.strip()], _on_grid_change)
             )
 
         # Track notification trigger entity
@@ -2603,6 +3026,7 @@ class RoomController:
     async def async_evaluate(self, trigger_id: str, extra_params: Optional[Dict[str, Any]] = None) -> None:
         """Evaluate room state and dispatch to engine."""
         if not self._is_enabled:
+            self.notify_entities()
             return
 
         params = dict(self.entry_data)
@@ -2615,13 +3039,17 @@ class RoomController:
             params["internal_freeze"] = True
 
         await self.engine.async_handle_engine_cycle(params)
+        self.notify_entities()
 
     def stop(self) -> None:
         """Unsubscribe all active listeners and cancel pending timers."""
         self.cancel_vacancy_timer()
-        if self._debounce_cancel:
-            self._debounce_cancel()
-            self._debounce_cancel = None
+        for cancel_cb in list(self._debounce_cancels.values()):
+            try:
+                cancel_cb()
+            except Exception:
+                pass
+        self._debounce_cancels.clear()
         for unsub in self._unsub_listeners:
             try:
                 unsub()
