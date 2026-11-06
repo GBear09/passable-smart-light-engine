@@ -348,6 +348,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator = data.get("coordinator")
         if coordinator:
             coordinator.stop()
+        data["system_simulation_sensor_registered"] = False
+        data["system_switch_registered"] = False
         return await hass.config_entries.async_unload_platforms(entry, ["switch", "sensor"])
 
     if entry.data.get("entry_type") == "holiday_lighting":

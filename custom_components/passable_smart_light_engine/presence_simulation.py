@@ -283,11 +283,11 @@ class PresenceSimulationCoordinator:
                     )
                     # Schedule delayed sweep for standalone lights
                     @callback
-                    def _delayed_sweep(entity: str = light_id) -> None:
+                    def _delayed_sweep(_now: Any, entity: str = light_id) -> None:
                         self.hass.async_create_task(self._async_turn_off_simulated_light(entity))
 
                     unsub_grace = async_call_later(
-                        self.hass, grace_sec, lambda _now, ent=light_id: _delayed_sweep(ent)
+                        self.hass, grace_sec, _delayed_sweep
                     )
                     self._grace_sweep_unsubs.append(unsub_grace)
 
@@ -609,11 +609,11 @@ class PresenceSimulationCoordinator:
 
         for event in upcoming:
             @callback
-            def _fire(target_event: SimulationEvent = event) -> None:
+            def _fire(_now: Any, target_event: SimulationEvent = event) -> None:
                 self.hass.async_create_task(self._async_execute_event(target_event))
 
             delay = (event.target_time - now).total_seconds()
-            unsub = async_call_later(self.hass, max(0.5, delay), lambda _now, ev=event: _fire(ev))
+            unsub = async_call_later(self.hass, max(0.5, delay), _fire)
             self._scheduled_callbacks.append(unsub)
 
     async def _async_execute_event(self, event: SimulationEvent) -> None:

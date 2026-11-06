@@ -417,6 +417,7 @@ class HolidayLightingCoordinator:
 
     async def async_start(self) -> None:
         """Start holiday coordinator listeners and evaluate initial state."""
+        self.stop()
         self._active_holiday = self.evaluate_active_holiday()
         _LOGGER.info(
             "PassableSmartLighting: Holiday coordinator started. Active Holiday: %s",
