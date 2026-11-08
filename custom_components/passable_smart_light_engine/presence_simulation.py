@@ -97,12 +97,30 @@ class PresenceSimulationCoordinator:
         _LOGGER.info("PresenceSimulation: Feature enabled status changed to %s", enabled)
         if not enabled and self._is_on:
             await self.async_stop()
+        self._notify_state()
+
+    def register_listener(self, cb: CALLBACK_TYPE) -> CALLBACK_TYPE:
+        """Register a callback listener for coordinator state updates."""
+        self._listeners.append(cb)
+
+        @callback
+        def _unsub() -> None:
+            if cb in self._listeners:
+                self._listeners.remove(cb)
+
+        return _unsub
+
+    def _notify_state(self) -> None:
+        """Push updated coordinator state to switches and status sensors."""
         if self._switch_entity:
             self._switch_entity.async_write_ha_state()
         if self._master_switch_entity:
             self._master_switch_entity.async_write_ha_state()
-        for listener in self._listeners:
-            listener()
+        for listener in list(self._listeners):
+            try:
+                listener()
+            except Exception:
+                pass
 
     @property
     def is_on(self) -> bool:
@@ -221,8 +239,7 @@ class PresenceSimulationCoordinator:
         self._status = "planning"
         _LOGGER.info("PresenceSimulation: Simulation activated. Resolving targets and building schedule.")
 
-        if self._switch_entity:
-            self._switch_entity.async_write_ha_state()
+        self._notify_state()
 
         await self._async_build_and_queue_schedule()
 
@@ -243,9 +260,28 @@ class PresenceSimulationCoordinator:
         if self.engine.holiday_lighting and getattr(self.engine.holiday_lighting, "home_state_entity", None):
             home_entity = self.engine.holiday_lighting.home_state_entity
 
-        home_mode_state = self.hass.states.get(home_entity) or self.hass.states.get("input_select.home_mode")
-        home_mode = str(home_mode_state.state).strip() if home_mode_state and home_mode_state.state else "Home"
-        is_away = home_mode.lower() in ("away", "vacation", "extended_away", "not_home", "off")
+        away_states = ("away", "vacation", "extended_away", "not_home", "off", "unoccupied")
+        home_mode_st = self.hass.states.get("input_select.home_mode")
+        home_state_st = self.hass.states.get(home_entity) if home_entity else None
+
+        if home_mode_st and home_mode_st.state and home_mode_st.state not in ("unknown", "unavailable"):
+            home_mode = str(home_mode_st.state).strip()
+            is_away = home_mode.lower() in away_states
+            if (
+                not is_away
+                and home_entity != DEFAULT_HOLIDAY_HOME_STATE_ENTITY
+                and home_state_st
+                and home_state_st.state
+                and str(home_state_st.state).strip().lower() in away_states
+            ):
+                home_mode = str(home_state_st.state).strip()
+                is_away = True
+        elif home_state_st and home_state_st.state and home_state_st.state not in ("unknown", "unavailable"):
+            home_mode = str(home_state_st.state).strip()
+            is_away = home_mode.lower() in away_states
+        else:
+            home_mode = "Home"
+            is_away = False
 
         is_arrival_at_night = sun_is_down and not is_away
 
@@ -256,13 +292,15 @@ class PresenceSimulationCoordinator:
             # Instead, hand them over to RoomControllers and vacancy timers.
             # =========================================================================
             self._status = "handover"
+            active_lights = list(self._active_simulated_lights)
+            self._active_simulated_lights.clear()
             _LOGGER.info(
                 "PresenceSimulation [Graceful Handover]: Arrived home at night with %d active simulated lights. Handing over to room controllers without blackout.",
-                len(self._active_simulated_lights),
+                len(active_lights),
             )
 
             grace_sec = float(self.arrival_grace_min * 60)
-            for light_id in list(self._active_simulated_lights):
+            for light_id in active_lights:
                 # Check if this light belongs to a room controller
                 room_ctrl = self._find_room_controller_for_light(light_id)
                 if room_ctrl:
@@ -274,6 +312,7 @@ class PresenceSimulationCoordinator:
                     )
                     # Trigger room evaluation: if occupied, stays on; if vacant, starts countdown
                     room_ctrl.schedule_vacancy_timer(delay_sec=grace_sec)
+                    room_ctrl.notify_entities()
                     room_ctrl.schedule_evaluation("handover_arrival", delay_sec=0.1)
                 else:
                     _LOGGER.info(
@@ -291,7 +330,6 @@ class PresenceSimulationCoordinator:
                     )
                     self._grace_sweep_unsubs.append(unsub_grace)
 
-            self._active_simulated_lights.clear()
             self._status = "idle"
 
         else:
@@ -301,19 +339,22 @@ class PresenceSimulationCoordinator:
             # Turn off all active simulated lights.
             # =========================================================================
             self._status = "idle"
+            active_lights = list(self._active_simulated_lights)
+            self._active_simulated_lights.clear()
             _LOGGER.info(
                 "PresenceSimulation [Cleanup]: Simulation stopped (Sun down: %s, Home mode: %s). Sweeping off %d active lights.",
                 sun_is_down,
                 home_mode,
-                len(self._active_simulated_lights),
+                len(active_lights),
             )
-            for light_id in list(self._active_simulated_lights):
+            for light_id in active_lights:
                 await self._async_turn_off_simulated_light(light_id)
-            self._active_simulated_lights.clear()
+                room_ctrl = self._find_room_controller_for_light(light_id)
+                if room_ctrl:
+                    room_ctrl.notify_entities()
 
         self._next_event = None
-        if self._switch_entity:
-            self._switch_entity.async_write_ha_state()
+        self._notify_state()
 
     def _clear_scheduled_timers(self) -> None:
         """Cancel all pending transition callbacks and planning timers."""
@@ -364,8 +405,7 @@ class PresenceSimulationCoordinator:
         if not target_entities:
             _LOGGER.warning("PresenceSimulation: No light entities found with label '%s'. Simulation idle.", self.label)
             self._status = "idle"
-            if self._switch_entity:
-                self._switch_entity.async_write_ha_state()
+            self._notify_state()
             return
 
         now = dt_util.now()
@@ -417,78 +457,143 @@ class PresenceSimulationCoordinator:
     async def _async_extract_history_events(self, entities: List[str]) -> List[SimulationEvent]:
         """Extract state transitions from Home Assistant recorder history with vacation lookback."""
         now = dt_util.now()
-        lookback_delta = timedelta(days=self.lookback_days)
 
         # Anchor to yesterday's date if started after midnight (00:00 - 05:59) so we replay the current night
         anchor_date = (now - timedelta(days=1)).date() if now.hour < 6 else now.date()
-        tonight_start = datetime.combine(anchor_date, datetime.min.time(), tzinfo=now.tzinfo).replace(
-            hour=16, minute=0, second=0, microsecond=0
-        )
+        tonight_start = dt_util.start_of_local_day(
+            datetime.combine(anchor_date, datetime.min.time())
+        ).replace(hour=16, minute=0, second=0, microsecond=0)
 
-        # Baseline window: same evening window, N days ago
-        base_start = tonight_start - lookback_delta
-        base_end = base_start + timedelta(hours=14)  # 4:00 PM to 6:00 AM next morning
-
-        def _fetch_history() -> Dict[str, List[State]]:
-            return history.get_significant_states(
-                self.hass,
-                start_time=base_start,
-                end_time=base_end,
-                entity_ids=entities,
-                include_start_time_state=True,
-                significant_changes_only=True,
-            )
-
-        try:
-            hist_data = await recorder.get_instance(self.hass).async_add_executor_job(_fetch_history)
-        except Exception as err:
-            _LOGGER.error("PresenceSimulation: Recorder history query failed: %s", err)
-            return []
-
-        events: List[SimulationEvent] = []
         jitter_range_sec = self.jitter_min * 60
+        best_events: List[SimulationEvent] = []
 
-        for entity_id, state_list in hist_data.items():
-            prev_state = None
-            last_event_time: Optional[datetime] = None
-            for st in state_list:
-                state_val = st.state
-                if state_val not in ("on", "off"):
+        # Try up to 3 lookback multiples (e.g. 7, 14, 21 days) so if a prior lookback night had
+        # insufficient genuine sessions, we step back one additional week automatically.
+        for mult in (1, 2, 3):
+            lookback_delta = timedelta(days=self.lookback_days * mult)
+            base_date = anchor_date - lookback_delta
+            base_start = dt_util.start_of_local_day(
+                datetime.combine(base_date, datetime.min.time())
+            ).replace(hour=16, minute=0, second=0, microsecond=0)
+            base_end = base_start + timedelta(hours=14)  # 4:00 PM to 6:00 AM next morning
+
+            def _fetch_history(
+                start_t: datetime = base_start, end_t: datetime = base_end
+            ) -> Dict[str, List[State]]:
+                return history.get_significant_states(
+                    self.hass,
+                    start_time=start_t,
+                    end_time=end_t,
+                    entity_ids=entities,
+                    include_start_time_state=True,
+                    significant_changes_only=True,
+                )
+
+            try:
+                hist_data = await recorder.get_instance(self.hass).async_add_executor_job(_fetch_history)
+            except Exception as err:
+                _LOGGER.error("PresenceSimulation: Recorder history query failed: %s", err)
+                return []
+
+            candidate_events: List[SimulationEvent] = []
+            active_entity_count = 0
+
+            for entity_id, state_list in hist_data.items():
+                raw_sessions: List[Tuple[datetime, datetime, int]] = []
+                prev_state: Optional[str] = None
+                current_on_ts: Optional[datetime] = None
+                current_brightness: int = self.max_brightness_pct
+
+                for st in state_list:
+                    state_val = st.state
+                    if state_val not in ("on", "off"):
+                        continue
+                    if state_val == prev_state:
+                        continue
+
+                    # Skip initial 'off' boundary state at 4:00 PM so we don't schedule redundant off events
+                    if prev_state is None and state_val == "off":
+                        prev_state = "off"
+                        continue
+
+                    hist_ts = max(base_start, dt_util.as_local(st.last_changed))
+
+                    if state_val == "on":
+                        current_on_ts = hist_ts
+                        raw_b = st.attributes.get("brightness")
+                        if raw_b is not None:
+                            current_brightness = max(
+                                10, min(100, int(round((raw_b / 255.0) * 100)))
+                            )
+                        else:
+                            current_brightness = self.max_brightness_pct
+                        prev_state = "on"
+                    elif state_val == "off" and prev_state == "on" and current_on_ts is not None:
+                        off_ts = max(current_on_ts, hist_ts)
+                        duration_sec = (off_ts - current_on_ts).total_seconds()
+                        prev_state = "off"
+                        # Ignore transient sub-5s switch bounces or aborted pulses
+                        if duration_sec < 5.0:
+                            current_on_ts = None
+                            continue
+                        raw_sessions.append((current_on_ts, off_ts, current_brightness))
+                        current_on_ts = None
+
+                # Guarantee a morning/late-night turn-off if historical window ended with the light still ON
+                if prev_state == "on" and current_on_ts is not None:
+                    dawn_cutoff = base_start + timedelta(hours=13, minutes=30)
+                    fallback_off = max(
+                        current_on_ts + timedelta(minutes=15),
+                        min(dawn_cutoff, current_on_ts + timedelta(hours=2)),
+                    )
+                    raw_sessions.append((current_on_ts, fallback_off, current_brightness))
+
+                if not raw_sessions:
                     continue
-                if state_val == prev_state:
-                    continue
 
-                # Map historical timestamp to current night
-                hist_ts = dt_util.as_local(st.last_changed)
-                time_offset = max(timedelta(0), hist_ts - base_start)
-                projected_time = tonight_start + time_offset
-
-                # Apply humanized jitter with pairwise monotonic ordering per entity
-                jitter = random.randint(-jitter_range_sec, jitter_range_sec)
-                final_time = projected_time + timedelta(seconds=jitter)
-                if last_event_time is not None and final_time <= last_event_time:
-                    final_time = last_event_time + timedelta(minutes=2)
-
-                # Brightness handling
-                brightness = None
-                if state_val == "on":
-                    raw_b = st.attributes.get("brightness")
-                    if raw_b is not None:
-                        brightness = int(round((raw_b / 255.0) * 100))
+                # Merge sessions separated by brief <60s off gaps
+                merged_sessions: List[Tuple[datetime, datetime, int]] = [raw_sessions[0]]
+                for s_on, s_off, s_b in raw_sessions[1:]:
+                    prev_on, prev_off, prev_b = merged_sessions[-1]
+                    if (s_on - prev_off).total_seconds() < 60.0:
+                        merged_sessions[-1] = (prev_on, max(prev_off, s_off), prev_b)
                     else:
-                        brightness = self.max_brightness_pct
+                        merged_sessions.append((s_on, s_off, s_b))
 
-                events.append(SimulationEvent(final_time, entity_id, state_val, brightness))
-                prev_state = state_val
-                last_event_time = final_time
+                active_entity_count += 1
+                last_event_time: Optional[datetime] = None
 
-            # Guarantee a morning/late-night turn-off if historical window ended with the light still ON
-            if prev_state == "on" and last_event_time is not None:
-                dawn_cutoff = tonight_start + timedelta(hours=13, minutes=30)
-                fallback_off = max(last_event_time + timedelta(minutes=15), min(dawn_cutoff, last_event_time + timedelta(hours=2)))
-                events.append(SimulationEvent(fallback_off, entity_id, "off"))
+                for hist_on, hist_off, brightness in merged_sessions:
+                    time_offset = max(timedelta(0), hist_on - base_start)
+                    projected_on = tonight_start + time_offset
+                    hist_duration = max(timedelta(minutes=2), hist_off - hist_on)
 
-        return events
+                    # Shift session start by humanized jitter while preserving session duration
+                    start_jitter = random.randint(-jitter_range_sec, jitter_range_sec)
+                    final_on = projected_on + timedelta(seconds=start_jitter)
+                    if last_event_time is not None and final_on <= last_event_time + timedelta(minutes=2):
+                        final_on = last_event_time + timedelta(minutes=random.randint(3, 6))
+
+                    max_dur_jitter = min(jitter_range_sec // 2, int(hist_duration.total_seconds() * 0.2))
+                    dur_jitter = (
+                        random.randint(-max_dur_jitter, max_dur_jitter) if max_dur_jitter > 0 else 0
+                    )
+                    final_duration = max(
+                        timedelta(minutes=2), hist_duration + timedelta(seconds=dur_jitter)
+                    )
+                    final_off = final_on + final_duration
+
+                    candidate_events.append(SimulationEvent(final_on, entity_id, "on", brightness))
+                    candidate_events.append(SimulationEvent(final_off, entity_id, "off"))
+                    last_event_time = final_off
+
+            if len(candidate_events) > len(best_events):
+                best_events = candidate_events
+
+            if active_entity_count >= min(2, len(entities)):
+                return candidate_events
+
+        return best_events
 
     def _generate_synthetic_routine(self, entities: List[str]) -> List[SimulationEvent]:
         """Generate a realistic, humanized evening lighting routine without requiring recorder DB."""
@@ -604,8 +709,7 @@ class PresenceSimulationCoordinator:
             self._next_event = None
             self._status = "idle"
 
-        if self._switch_entity:
-            self._switch_entity.async_write_ha_state()
+        self._notify_state()
 
         for event in upcoming:
             @callback
@@ -646,6 +750,7 @@ class PresenceSimulationCoordinator:
                 service_data["color_temp_kelvin"] = clamped_k
 
             if room_ctrl:
+                room_ctrl.cancel_vacancy_timer()
                 self.engine.set_echo_guard(room_ctrl.room_id, b_pct, 0, 1.0)
 
             try:
@@ -653,12 +758,11 @@ class PresenceSimulationCoordinator:
             except Exception as err:
                 _LOGGER.error("PresenceSimulation: Failed to turn on light '%s': %s", event.entity_id, err)
 
-            # Update room controller active mode if registered
+            # Update room controller active mode sensor if registered
             if room_ctrl:
-                room_ctrl.schedule_evaluation("presence_simulation_event", delay_sec=0.1)
+                room_ctrl.notify_entities()
 
         else:
-            self._active_simulated_lights.discard(event.entity_id)
             room_ctrl = self._find_room_controller_for_light(event.entity_id)
             if room_ctrl:
                 self.engine.set_echo_guard(room_ctrl.room_id, 0, 0, 1.0)
@@ -668,9 +772,11 @@ class PresenceSimulationCoordinator:
                 )
             except Exception as err:
                 _LOGGER.error("PresenceSimulation: Failed to turn off light '%s': %s", event.entity_id, err)
+            finally:
+                self._active_simulated_lights.discard(event.entity_id)
 
             if room_ctrl:
-                room_ctrl.schedule_evaluation("presence_simulation_event", delay_sec=0.1)
+                room_ctrl.notify_entities()
 
         # Update next event display
         now = dt_util.now()
@@ -685,8 +791,7 @@ class PresenceSimulationCoordinator:
         else:
             self._next_event = None
 
-        if self._switch_entity:
-            self._switch_entity.async_write_ha_state()
+        self._notify_state()
 
     async def _async_turn_off_simulated_light(self, entity_id: str) -> None:
         """Safely turn off an actively simulated light with engine context."""

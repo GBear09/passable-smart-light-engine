@@ -363,6 +363,8 @@ class PassableLightingEngineReadySensor(SensorEntity):
 class PassablePresenceSimulationStatusSensor(SensorEntity):
     """Sensor reporting presence simulation status and active lights."""
 
+    _attr_should_poll = False
+
     def __init__(self, hass: HomeAssistant, engine: PassableLightingEngine) -> None:
         """Initialize simulation status sensor."""
         self.hass = hass
@@ -370,6 +372,12 @@ class PassablePresenceSimulationStatusSensor(SensorEntity):
         self._attr_unique_id = f"{DOMAIN}_presence_simulation_status"
         self._attr_name = "Presence Simulation Status"
         self._attr_icon = "mdi:shield-home"
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to presence simulation coordinator updates."""
+        coord = self._engine.presence_simulation
+        if coord and hasattr(coord, "register_listener"):
+            self.async_on_remove(coord.register_listener(self.async_write_ha_state))
 
     @property
     def device_info(self) -> DeviceInfo:

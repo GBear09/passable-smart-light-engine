@@ -991,7 +991,7 @@ class PassableLightingEngine:
                 if isinstance(sec_lights, str):
                     sec_lights = [sec_lights]
                 for sec_ent in sec_lights:
-                    if sec_ent:
+                    if sec_ent and not self.is_simulating_presence(sec_ent) and not self.is_holiday_active(sec_ent):
                         await self.async_apply_circadian_to_entity(r_id, sec_ent, target_kelvin)
 
     async def async_sync_helper(self, entity_id: Optional[str], target_state: bool) -> None:
@@ -1234,12 +1234,19 @@ class PassableLightingEngine:
                     return
 
         # 2. Bypass check
+        is_simulating = self.is_simulating_presence(light_entity) or any(
+            self.is_simulating_presence(s) for s in secondary_lights if s
+        )
+        is_holiday = self.is_holiday_active(light_entity) or any(
+            self.is_holiday_active(s) for s in secondary_lights if s
+        )
+
         is_frozen, is_forced_off = self.check_bypasses(
             bypass_freeze_entities, bypass_off_entities, manual_override_entity
         )
         if p.get("internal_freeze") or (ctrl and ctrl.freeze_bypass_active):
             is_frozen = True
-        if self.is_simulating_presence(light_entity) or self.is_holiday_active(light_entity):
+        if is_simulating or is_holiday:
             is_forced_off = False
 
         if is_forced_off:
@@ -1276,11 +1283,18 @@ class PassableLightingEngine:
             return
 
         # 3. Hardware Echo Guard & Manual Override Detection
+        if trigger_id == "secondary_light_change" and (is_simulating or is_holiday):
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Secondary light change absorbed by active presence simulation or holiday lighting.",
+                room_id,
+            )
+            return
+
         if trigger_id == "light_change":
             evt_context = p.get("context")
 
             # A0. Active presence simulation match
-            if self.is_simulating_presence(light_entity):
+            if is_simulating:
                 _LOGGER.debug(
                     "PassableSmartLighting [%s]: Light change event absorbed by active presence simulation.",
                     room_id,
@@ -1288,7 +1302,7 @@ class PassableLightingEngine:
                 return
 
             # A00. Active holiday lighting match
-            if self.is_holiday_active(light_entity):
+            if is_holiday:
                 _LOGGER.debug(
                     "PassableSmartLighting [%s]: Light change event absorbed by active holiday lighting.",
                     room_id,
@@ -1435,6 +1449,28 @@ class PassableLightingEngine:
             _LOGGER.debug("PassableSmartLighting [%s]: Manual override active. Skipping auto-adjustment.", room_id)
             return
 
+        # Presence Simulation Check (Yields control to PresenceSimulationCoordinator)
+        if is_simulating:
+            if ctrl and ctrl.vacancy_cancel is not None:
+                ctrl.cancel_vacancy_timer()
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Light '%s' is actively managed by Presence Simulation. Holding state.",
+                room_id,
+                light_entity,
+            )
+            return
+
+        # Holiday Lighting Check (Yields control to HolidayLightingCoordinator)
+        if is_holiday:
+            if ctrl and ctrl.vacancy_cancel is not None:
+                ctrl.cancel_vacancy_timer()
+            _LOGGER.debug(
+                "PassableSmartLighting [%s]: Light '%s' is actively managed by Holiday Lighting. Holding state.",
+                room_id,
+                light_entity,
+            )
+            return
+
         # 5. Presence & Vacancy Evaluation
         is_occupied = self.check_presence(presence_entities) if presence_entities else True
 
@@ -1531,15 +1567,6 @@ class PassableLightingEngine:
             _LOGGER.debug(
                 "PassableSmartLighting [%s]: Room occupied with secondary light(s) active. Suppressing main lights.",
                 room_id,
-            )
-            return
-
-        # Holiday Lighting Check (Yields control to HolidayLightingCoordinator)
-        if self.is_holiday_active(light_entity):
-            _LOGGER.debug(
-                "PassableSmartLighting [%s]: Light '%s' is actively managed by Holiday Lighting. Holding state.",
-                room_id,
-                light_entity,
             )
             return
 
@@ -2656,13 +2683,23 @@ class RoomController:
     def is_simulating_presence(self) -> bool:
         """Check if this room's light is actively simulating presence."""
         light_entity = self.entry_data.get(CONF_LIGHT_ENTITY)
-        return self.engine.is_simulating_presence(light_entity)
+        if self.engine.is_simulating_presence(light_entity):
+            return True
+        sec_lights = self.entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS) or []
+        if isinstance(sec_lights, str):
+            sec_lights = [sec_lights]
+        return any(self.engine.is_simulating_presence(s) for s in sec_lights if s)
 
     @property
     def is_holiday_active(self) -> bool:
         """Check if this room's light is actively managed by holiday lighting."""
         light_entity = self.entry_data.get(CONF_LIGHT_ENTITY)
-        return self.engine.is_holiday_active(light_entity)
+        if self.engine.is_holiday_active(light_entity):
+            return True
+        sec_lights = self.entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS) or []
+        if isinstance(sec_lights, str):
+            sec_lights = [sec_lights]
+        return any(self.engine.is_holiday_active(s) for s in sec_lights if s)
 
     def set_freeze_bypass(self, active: bool) -> None:
         """Set dedicated freeze switch state."""
@@ -2817,7 +2854,8 @@ class RoomController:
                     self.schedule_evaluation("presence_on", delay_sec=0.1)
                 elif new_st.state in ("off", "not_home", "false", "unavailable", "unknown"):
                     if not self.engine.check_presence(presence_entities):
-                        self.schedule_vacancy_timer()
+                        if not self.is_simulating_presence and not self.is_holiday_active:
+                            self.schedule_vacancy_timer()
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, presence_entities, _on_presence_change)
