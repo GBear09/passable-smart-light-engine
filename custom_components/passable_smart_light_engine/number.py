@@ -56,7 +56,7 @@ class PassableLightingTargetLuxNumber(NumberEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.7.0",
+            sw_version="2.8.0",
         )
 
     @property

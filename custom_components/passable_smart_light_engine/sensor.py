@@ -20,19 +20,25 @@ from .const import (
     CONF_LATE_NIGHT_LEARN_PREFS,
     CONF_MEDIA_LEARN_PREFS,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
+    CONF_PRESENCE_TIMEOUT_MIN,
     CONF_ROOM_ID,
     CONF_SECONDARY_LIGHTS,
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
+    CONF_TIMEOUT_SCALE_ENTITIES,
+    CONF_TIMEOUT_SCALE_FACTOR,
     DEFAULT_LATE_NIGHT_LEARN_PREFS,
     DEFAULT_LATE_NIGHT_PCT,
     DEFAULT_LUX_RATIO,
     DEFAULT_MEDIA_LEARN_PREFS,
     DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
+    DEFAULT_PRESENCE_TIMEOUT_MIN,
     DEFAULT_SECONDARY_LIGHTS,
     DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
+    DEFAULT_TIMEOUT_SCALE_ENTITIES,
+    DEFAULT_TIMEOUT_SCALE_FACTOR,
     DOMAIN,
     MODE_HOLIDAY,
     MODE_NOTIFICATION,
@@ -118,7 +124,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.7.0",
+            sw_version="2.8.0",
         )
 
 
@@ -296,6 +302,23 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
             self._controller.entry_data.get(CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON)
         )
 
+        scale_entities = self._controller.entry_data.get(
+            CONF_TIMEOUT_SCALE_ENTITIES, DEFAULT_TIMEOUT_SCALE_ENTITIES
+        )
+        if isinstance(scale_entities, str):
+            scale_entities = [scale_entities] if scale_entities else []
+        elif scale_entities is None:
+            scale_entities = []
+        base_timeout = int(
+            self._controller.entry_data.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN)
+        )
+        try:
+            scale_factor = float(
+                self._controller.entry_data.get(CONF_TIMEOUT_SCALE_FACTOR, DEFAULT_TIMEOUT_SCALE_FACTOR)
+            )
+        except (TypeError, ValueError):
+            scale_factor = DEFAULT_TIMEOUT_SCALE_FACTOR
+
         return {
             "notification_light_enabled": self._controller.is_notification_enabled,
             "notification_pending": self._controller.is_notification_pending,
@@ -317,6 +340,13 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
             "active_secondary_lights": active_sec,
             "secondary_lights_active": len(active_sec) > 0,
             "suppress_main_when_secondary_on": suppress_main,
+            "base_presence_timeout_min": base_timeout,
+            "effective_presence_timeout_min": self._engine.get_effective_presence_timeout_min(
+                self._controller.entry_data
+            ),
+            "timeout_scaling_active": self._engine.is_timeout_scaling_active(scale_entities),
+            "timeout_scale_factor": scale_factor,
+            "timeout_scale_entities": list(scale_entities),
         }
 
 

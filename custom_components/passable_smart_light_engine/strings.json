@@ -27,6 +27,8 @@
           "target_lux": "Target Ambient Lux (Seed)",
           "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
           "presence_timeout_min": "Vacancy Timeout (Minutes)",
+          "timeout_scale_entities": "Timeout Scaling Entities (e.g. Guest Mode)",
+          "timeout_scale_factor": "Vacancy Timeout Multiplier (When Scaling Active)",
           "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)"
         }
       },
@@ -193,6 +195,8 @@
               "target_lux": "Target Ambient Lux (Seed)",
               "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
               "presence_timeout_min": "Vacancy Timeout (Minutes)",
+              "timeout_scale_entities": "Timeout Scaling Entities (e.g. Guest Mode)",
+              "timeout_scale_factor": "Vacancy Timeout Multiplier (When Scaling Active)",
               "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)"
             },
             "data_description": {
@@ -201,6 +205,8 @@
               "target_lux": "The baseline lux level the room maintains when occupied.",
               "default_lux_ratio": "Lux produced per 1% brightness before learning completes (e.g. 1.0).",
               "presence_timeout_min": "Minutes of no motion before turning lights off.",
+              "timeout_scale_entities": "Optional entities (e.g. input_boolean.guest_mode) that scale the vacancy timeout when ON.",
+              "timeout_scale_factor": "Multiplier applied to the vacancy timeout when any Timeout Scaling Entity is active (e.g. 3.0x).",
               "min_occupied_pct": "Minimum brightness floor while occupied, even on bright sunny days."
             }
           },
@@ -308,6 +314,8 @@
           "target_lux": "Target Ambient Lux (Seed)",
           "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
           "presence_timeout_min": "Vacancy Timeout (Minutes)",
+          "timeout_scale_entities": "Timeout Scaling Entities (e.g. Guest Mode)",
+          "timeout_scale_factor": "Vacancy Timeout Multiplier (When Scaling Active)",
           "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)",
           "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
           "create_override_switch": "Create Dedicated Native Manual Override Switch",

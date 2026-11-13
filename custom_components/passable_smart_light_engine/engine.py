@@ -46,6 +46,8 @@ from .const import (
     CONF_SECONDARY_LIGHTS,
     CONF_SETTLING_COOLDOWN_SEC,
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
+    CONF_TIMEOUT_SCALE_ENTITIES,
+    CONF_TIMEOUT_SCALE_FACTOR,
     DEFAULT_CIRCADIAN_ENABLED,
     DEFAULT_CIRCADIAN_MIN_DELTA_KELVIN,
     DEFAULT_CIRCADIAN_TRANSITION_SEC,
@@ -77,6 +79,8 @@ from .const import (
     DEFAULT_SETTLING_COOLDOWN_SEC,
     DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
+    DEFAULT_TIMEOUT_SCALE_ENTITIES,
+    DEFAULT_TIMEOUT_SCALE_FACTOR,
     DOMAIN,
     DWELL_TIME_SEC,
     ECHO_CONVERGENCE_SETTLE_SEC,
@@ -1100,6 +1104,34 @@ class PassableLightingEngine:
                 return True
         return False
 
+    def is_timeout_scaling_active(self, scale_entities: Optional[Union[str, List[str]]]) -> bool:
+        """Return True if any configured timeout scaling entity is active."""
+        if scale_entities is None:
+            entities = DEFAULT_TIMEOUT_SCALE_ENTITIES
+        elif isinstance(scale_entities, str):
+            entities = [scale_entities] if scale_entities else []
+        else:
+            entities = list(scale_entities)
+
+        for ent in entities:
+            val = str(safe_get_state(self.hass, ent, "off")).lower()
+            if val in ACTIVE_STATES:
+                return True
+        return False
+
+    def get_effective_presence_timeout_min(self, config: Dict[str, Any]) -> float:
+        """Calculate effective vacancy timeout in minutes, applying scaling if active."""
+        base_min = float(config.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN))
+        scale_entities = config.get(CONF_TIMEOUT_SCALE_ENTITIES, DEFAULT_TIMEOUT_SCALE_ENTITIES)
+        try:
+            scale_factor = float(config.get(CONF_TIMEOUT_SCALE_FACTOR, DEFAULT_TIMEOUT_SCALE_FACTOR))
+        except (TypeError, ValueError):
+            scale_factor = DEFAULT_TIMEOUT_SCALE_FACTOR
+
+        if scale_factor > 1.0 and self.is_timeout_scaling_active(scale_entities):
+            return max(1.0, base_min * scale_factor)
+        return max(1.0, base_min)
+
     async def async_handle_engine_cycle(self, params: Dict[str, Any]) -> None:
         """Execute one complete evaluation cycle for a room."""
         room_id = str(params.get("room_id", "default_room"))
@@ -1149,7 +1181,7 @@ class PassableLightingEngine:
 
         target_lux_seed = float(p.get("target_lux", DEFAULT_TARGET_LUX))
         default_lux_ratio = float(p.get("default_lux_ratio", DEFAULT_LUX_RATIO))
-        presence_timeout_min = int(p.get("presence_timeout_min", DEFAULT_PRESENCE_TIMEOUT_MIN))
+        presence_timeout_min = self.get_effective_presence_timeout_min(p)
         min_occupied_pct = int(p.get("min_occupied_pct", DEFAULT_MIN_OCCUPIED_PCT))
         circadian_enabled = bool(p.get("circadian_enabled", DEFAULT_CIRCADIAN_ENABLED))
         min_color_temp = int(p.get("min_color_temp", DEFAULT_MIN_COLOR_TEMP))
@@ -2621,8 +2653,8 @@ class RoomController:
         elif presence_entities is None:
             presence_entities = []
 
-        timeout_m = int(self.entry_data.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN))
-        default_delay = max(1.0, float(timeout_m * 60))
+        timeout_m = self.engine.get_effective_presence_timeout_min(self.entry_data)
+        default_delay = max(1.0, float(timeout_m * 60.0))
 
         if delay_sec is None:
             delay_sec = default_delay
@@ -2859,6 +2891,34 @@ class RoomController:
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, presence_entities, _on_presence_change)
+            )
+
+        scale_entities = self.entry_data.get(CONF_TIMEOUT_SCALE_ENTITIES, DEFAULT_TIMEOUT_SCALE_ENTITIES)
+        if isinstance(scale_entities, str):
+            scale_entities = [scale_entities] if scale_entities else []
+        elif scale_entities is None:
+            scale_entities = []
+
+        if scale_entities:
+            @callback
+            def _on_timeout_scale_change(evt: Event) -> None:
+                self.notify_entities()
+                if self._vacancy_cancel and not self.engine.check_presence(presence_entities):
+                    effective_min = self.engine.get_effective_presence_timeout_min(self.entry_data)
+                    timeout_sec = float(effective_min * 60.0)
+                    remaining_sec = self.get_vacancy_remaining_sec(presence_entities, timeout_sec)
+                    if self.engine.is_timeout_scaling_active(scale_entities):
+                        self.schedule_vacancy_timer(
+                            delay_sec=remaining_sec if remaining_sec > 0.0 else timeout_sec
+                        )
+                    elif remaining_sec <= 0.0:
+                        self.cancel_vacancy_timer()
+                        self.schedule_evaluation("presence_off_timeout", delay_sec=0.0)
+                    else:
+                        self.schedule_vacancy_timer(delay_sec=remaining_sec)
+
+            self._unsub_listeners.append(
+                async_track_state_change_event(self.hass, scale_entities, _on_timeout_scale_change)
             )
 
         # Track light changes (with context forwarding and color change detection)

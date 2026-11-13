@@ -84,6 +84,8 @@ from .const import (
     CONF_SIMULATION_MODE,
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
+    CONF_TIMEOUT_SCALE_ENTITIES,
+    CONF_TIMEOUT_SCALE_FACTOR,
     DEFAULT_CIRCADIAN_ENABLED,
     DEFAULT_DECORATIONS_OFF_TIME,
     DEFAULT_DECORATIONS_OFF_TRIGGER,
@@ -142,6 +144,8 @@ from .const import (
     DEFAULT_SIMULATION_MODE,
     DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
+    DEFAULT_TIMEOUT_SCALE_ENTITIES,
+    DEFAULT_TIMEOUT_SCALE_FACTOR,
     DOMAIN,
     LIGHT_MODE_COLOR_TEMP,
     LIGHT_MODE_EFFECT,
@@ -300,6 +304,12 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
                 vol.Required(CONF_PRESENCE_TIMEOUT_MIN, default=DEFAULT_PRESENCE_TIMEOUT_MIN): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=1, max=120, step=1, mode=selector.NumberSelectorMode.BOX)
+                ),
+                vol.Optional(CONF_TIMEOUT_SCALE_ENTITIES, default=DEFAULT_TIMEOUT_SCALE_ENTITIES): OptionalEntitySelector(
+                    selector.EntitySelectorConfig(multiple=True)
+                ),
+                vol.Optional(CONF_TIMEOUT_SCALE_FACTOR, default=DEFAULT_TIMEOUT_SCALE_FACTOR): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=1.0, max=10.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
                 ),
                 vol.Optional(CONF_MIN_OCCUPIED_PCT, default=DEFAULT_MIN_OCCUPIED_PCT): selector.NumberSelector(
                     selector.NumberSelectorConfig(min=0, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
@@ -619,6 +629,16 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
                             ),
                             vol.Required(CONF_PRESENCE_TIMEOUT_MIN, default=d.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN)): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=1, max=120, step=1, mode=selector.NumberSelectorMode.BOX)
+                            ),
+                            vol.Optional(
+                                CONF_TIMEOUT_SCALE_ENTITIES,
+                                default=d.get(CONF_TIMEOUT_SCALE_ENTITIES, DEFAULT_TIMEOUT_SCALE_ENTITIES),
+                            ): OptionalEntitySelector(selector.EntitySelectorConfig(multiple=True)),
+                            vol.Optional(
+                                CONF_TIMEOUT_SCALE_FACTOR,
+                                default=d.get(CONF_TIMEOUT_SCALE_FACTOR, DEFAULT_TIMEOUT_SCALE_FACTOR),
+                            ): selector.NumberSelector(
+                                selector.NumberSelectorConfig(min=1.0, max=10.0, step=0.5, mode=selector.NumberSelectorMode.BOX)
                             ),
                             vol.Optional(CONF_MIN_OCCUPIED_PCT, default=d.get(CONF_MIN_OCCUPIED_PCT, DEFAULT_MIN_OCCUPIED_PCT)): selector.NumberSelector(
                                 selector.NumberSelectorConfig(min=0, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
