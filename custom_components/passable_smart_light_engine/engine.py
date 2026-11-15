@@ -851,6 +851,7 @@ class PassableLightingEngine:
         entity_id: str,
         target_kelvin: int,
         transition: float = DEFAULT_CIRCADIAN_TRANSITION_SEC,
+        force_color_mode: bool = False,
     ) -> bool:
         """Apply circadian color temperature to an active light entity if eligible and delta threshold exceeded."""
         st = self.hass.states.get(entity_id)
@@ -867,9 +868,12 @@ class PassableLightingEngine:
         if effect and str(effect).lower() not in ("off", "none"):
             return False
 
-        # Guard against disrupting explicit color modes (e.g. RGB / HS / XY)
+        # Guard against disrupting explicit color modes (e.g. RGB / HS / XY) unless restoring after notification
         color_mode = attrs.get("color_mode")
-        if color_mode and str(color_mode).lower() not in ("color_temp", "white", "unknown"):
+        is_explicit_color_mode = bool(
+            color_mode and str(color_mode).lower() not in ("color_temp", "white", "unknown")
+        )
+        if is_explicit_color_mode and not force_color_mode:
             return False
 
         # Clamp target kelvin to hardware fixture limits (including group member limits)
@@ -884,7 +888,8 @@ class PassableLightingEngine:
             except (ZeroDivisionError, ValueError, TypeError):
                 current_kelvin = None
 
-        if current_kelvin is not None:
+        # Skip delta check when forcing exit from an explicit color mode so a stale kelvin attribute cannot block restore
+        if current_kelvin is not None and not (force_color_mode and is_explicit_color_mode):
             delta = abs(effective_target - current_kelvin)
             if delta < DEFAULT_CIRCADIAN_MIN_DELTA_KELVIN:
                 return False
@@ -1623,6 +1628,7 @@ class PassableLightingEngine:
                         room_id,
                         notif_light,
                         get_circadian_temp(self.hass, min_temp, max_temp),
+                        force_color_mode=True,
                     )
                 else:
                     await self.async_turn_off_light(room_id, notif_light)
