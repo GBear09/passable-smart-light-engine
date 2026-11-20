@@ -1,6 +1,7 @@
 """Passable Smart Light Engine integration setup."""
 
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -10,7 +11,7 @@ from typing import Any, Dict, Optional
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_registry as er
 
@@ -20,11 +21,13 @@ from .const import (
     ATTR_CALIBRATE_ROOM_ID,
     ATTR_DURATION_SEC,
     ATTR_HOLIDAY_NAME,
+    ATTR_OVERRIDE_ROOM_ID,
     ATTR_RESET_ROOM_ID,
     ATTR_RESET_TYPE,
     DOMAIN,
     EVENT_PASSABLE_SMART_LIGHT_ENGINE,
     EVENT_SMART_LIGHT_ENGINE,
+    FRONTEND_URL_PATH,
     HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID,
     HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID,
     LEGACY_DOMAIN,
@@ -34,6 +37,7 @@ from .const import (
     RESET_TYPES,
     SERVICE_APPLY_HOLIDAY_LIGHTING,
     SERVICE_CALIBRATE_ROOM_CURVE,
+    SERVICE_CLEAR_MANUAL_OVERRIDE,
     SERVICE_PREVIEW_HOLIDAY,
     SERVICE_RESET_LEARNING_DATA,
     SERVICE_START_PRESENCE_SIMULATION,
@@ -43,6 +47,7 @@ from .engine import PassableLightingEngine, RoomController
 from .holiday_lighting import HolidayLightingCoordinator, HolidayStore
 from .presence_simulation import PresenceSimulationCoordinator
 from .storage import LearningDataStore
+from .websocket import async_register_websocket_commands
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -74,6 +79,113 @@ PREVIEW_HOLIDAY_SCHEMA = vol.Schema(
         vol.Optional(ATTR_DURATION_SEC, default=60): cv.positive_int,
     }
 )
+
+CLEAR_OVERRIDE_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_OVERRIDE_ROOM_ID): vol.Any(cv.string, None),
+    }
+)
+
+
+def _get_integration_version() -> str:
+    """Read integration version from manifest.json."""
+    try:
+        manifest_path = pathlib.Path(__file__).parent / "manifest.json"
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return str(data.get("version", "2.9.0"))
+    except Exception:
+        return "2.9.0"
+
+
+async def _async_register_lovelace_resource(
+    hass: HomeAssistant, version: str
+) -> None:
+    """Register or version-bump the bundled card as a Lovelace module resource."""
+    try:
+        lovelace = hass.data.get("lovelace")
+        if not lovelace:
+            domain_data = hass.data.setdefault(DOMAIN, {})
+            if not domain_data.get("lovelace_listener_scheduled"):
+                domain_data["lovelace_listener_scheduled"] = True
+
+                @callback
+                def _on_started(_event: Event) -> None:
+                    hass.async_create_task(
+                        _async_register_lovelace_resource(hass, version)
+                    )
+
+                hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_started)
+            return
+
+        resources = getattr(lovelace, "resources", None)
+        if not resources or not hasattr(resources, "async_create_item"):
+            return
+
+        if not resources.loaded:
+            await resources.async_load()
+
+        url_path = f"{FRONTEND_URL_PATH}?v={version}"
+        for resource in resources.async_items():
+            existing_url = str(resource.get("url", ""))
+            if existing_url.startswith(FRONTEND_URL_PATH):
+                if (
+                    existing_url != url_path
+                    and resource.get("id") is not None
+                    and hasattr(resources, "async_update_item")
+                ):
+                    await resources.async_update_item(
+                        resource["id"], {"res_type": "module", "url": url_path}
+                    )
+                    _LOGGER.info(
+                        "Updated Lovelace resource for cache busting: %s", url_path
+                    )
+                return
+
+        await resources.async_create_item(
+            {"res_type": "module", "url": url_path}
+        )
+        _LOGGER.info("Automatically registered Lovelace resource: %s", url_path)
+    except Exception as err:
+        _LOGGER.debug(
+            "Could not automatically register Lovelace resource: %s", err
+        )
+
+
+async def _async_register_frontend(hass: HomeAssistant) -> None:
+    """Register static frontend path and Lovelace resource for the bundled lighting card."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    if domain_data.get("frontend_registered"):
+        return
+
+    card_path = pathlib.Path(__file__).parent / "frontend" / "passable-lighting-card.js"
+    if not await hass.async_add_executor_job(card_path.is_file):
+        _LOGGER.warning("Passable Lighting Card file not found at %s", card_path)
+        return
+
+    try:
+        from homeassistant.components.http import StaticPathConfig
+
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig(FRONTEND_URL_PATH, str(card_path), cache_headers=False)]
+        )
+        domain_data["frontend_registered"] = True
+        _LOGGER.info("Passable Lighting Card registered at %s", FRONTEND_URL_PATH)
+    except Exception:
+        try:
+            hass.http.register_static_path(
+                FRONTEND_URL_PATH, str(card_path), cache_headers=False
+            )
+            domain_data["frontend_registered"] = True
+            _LOGGER.info(
+                "Passable Lighting Card registered at %s (legacy)", FRONTEND_URL_PATH
+            )
+        except Exception as legacy_err:
+            _LOGGER.error("Failed to register static path: %s", legacy_err)
+            return
+
+    version = await hass.async_add_executor_job(_get_integration_version)
+    domain_data["version"] = version
+    hass.async_create_task(_async_register_lovelace_resource(hass, version))
 
 
 
@@ -115,6 +227,9 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         "system_sensor_registered": False,
         "system_switch_registered": False,
     }
+
+    await _async_register_frontend(hass)
+    async_register_websocket_commands(hass)
 
     # ==============================================================
     # 1. BLUEPRINT EVENT BRIDGE (Backward Compatibility)
@@ -204,6 +319,18 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         DOMAIN, SERVICE_PREVIEW_HOLIDAY, _async_handle_preview_holiday, schema=PREVIEW_HOLIDAY_SCHEMA
     )
 
+    async def _async_handle_clear_manual_override(call: ServiceCall) -> None:
+        """Clear manual override for a specific room or all rooms."""
+        room_id = call.data.get(ATTR_OVERRIDE_ROOM_ID)
+        await engine.async_clear_manual_override(room_id)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CLEAR_MANUAL_OVERRIDE,
+        _async_handle_clear_manual_override,
+        schema=CLEAR_OVERRIDE_SERVICE_SCHEMA,
+    )
+
     # Ensure dedicated presence simulation entry is created
     async def _async_ensure_simulation_entry() -> None:
         sim_entries = [
@@ -242,6 +369,9 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a room, presence simulation, or holiday lighting from a config entry."""
+    await _async_register_frontend(hass)
+    async_register_websocket_commands(hass)
+
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
 

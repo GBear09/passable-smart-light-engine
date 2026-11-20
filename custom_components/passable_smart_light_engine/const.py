@@ -7,6 +7,10 @@ LEGACY_DOMAIN = "smart_light_engine"
 
 PLATFORMS = ["switch", "sensor", "binary_sensor", "number", "button", "select"]
 
+FRONTEND_URL_PATH = "/passable_smart_light_frontend/passable-lighting-card.js"
+SUMMARY_SENSOR_ENTITY_ID = "sensor.passable_smart_light_engine_summary"
+SUMMARY_SENSOR_UNIQUE_ID = f"{DOMAIN}_summary"
+
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}_learning_data"
 LEGACY_DATA_PATHS = [
@@ -150,6 +154,9 @@ RESET_TYPES = ["all", "user_prefs", "room_curves", "media_prefs", "late_night_pr
 SERVICE_CALIBRATE_ROOM_CURVE = "calibrate_room_curve"
 ATTR_CALIBRATE_ROOM_ID = "room_id"
 ATTR_CALIBRATE_FORCE = "force"
+
+SERVICE_CLEAR_MANUAL_OVERRIDE = "clear_manual_override"
+ATTR_OVERRIDE_ROOM_ID = "room_id"
 
 # Presence Simulation configuration keys
 CONF_SIMULATION_ENABLED = "simulation_enabled"

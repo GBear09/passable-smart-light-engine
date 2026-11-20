@@ -91,7 +91,9 @@ from .const import (
     MAX_CLOSED_LOOP_TRIM_PCT,
     MIN_LUX_DEADBAND,
     MIN_VISIBLE_PCT,
+    MODE_HOLIDAY,
     MODE_NOTIFICATION,
+    MODE_PRESENCE_SIMULATION,
     OVERRIDE_FADE_TRANSITION_SEC,
     SENSOR_DEBOUNCE_SEC,
     SEVERE_LUX_DEFICIT_THRESHOLD,
@@ -330,6 +332,146 @@ def _update_monotonic_curve_point(curves: Dict[str, Any], pct: int, lux_val: flo
             curves[k_str] = rounded_lux
 
 
+def compute_room_active_mode(
+    hass: HomeAssistant, engine: "PassableLightingEngine", controller: "RoomController"
+) -> str:
+    """Determine and return current active operating mode for a room controller."""
+    if not controller.is_enabled:
+        return "disabled"
+
+    room_id = controller.room_id
+    if engine.is_manual_override_active(room_id):
+        return "manual_override"
+
+    if controller.is_holiday_active:
+        return MODE_HOLIDAY
+
+    if controller.is_simulating_presence:
+        return MODE_PRESENCE_SIMULATION
+
+    freezes = controller.entry_data.get(CONF_BYPASS_FREEZE_ENTITIES, [])
+    offs = controller.entry_data.get(CONF_BYPASS_OFF_ENTITIES, [])
+    manual_override_entity = controller.entry_data.get(CONF_MANUAL_OVERRIDE_ENTITY)
+    is_frozen, is_off = engine.check_bypasses(freezes, offs, manual_override_entity)
+    if controller.freeze_bypass_active:
+        is_frozen = True
+
+    if is_off:
+        return "forced_off"
+    if is_frozen:
+        return "frozen"
+
+    if controller.is_notification_showing:
+        return MODE_NOTIFICATION
+
+    media = controller.entry_data.get(CONF_MEDIA_ENTITIES, [])
+    if engine.check_media(media):
+        return "media"
+
+    is_night = engine.is_late_night_active(
+        bool(controller.entry_data.get("late_night_enabled", False)),
+        str(controller.entry_data.get("late_night_condition_type", DEFAULT_LATE_NIGHT_CONDITION_TYPE)),
+        controller.entry_data.get("late_night_entity"),
+        str(controller.entry_data.get("late_night_start_time", DEFAULT_LATE_NIGHT_START_TIME)),
+        str(controller.entry_data.get("late_night_stop_time", DEFAULT_LATE_NIGHT_STOP_TIME)),
+        controller.entry_data.get("late_night_start_entity"),
+        controller.entry_data.get("late_night_stop_entity"),
+    )
+    if is_night:
+        return "late_night"
+
+    presence = controller.entry_data.get(CONF_PRESENCE_ENTITIES, [])
+    is_occupied = engine.check_presence(presence)
+
+    sec_lights = controller.entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
+    if isinstance(sec_lights, str):
+        sec_lights = [sec_lights] if sec_lights else []
+    any_sec_on = any(safe_get_state(hass, s, "off") == "on" for s in (sec_lights or []))
+    suppress_main = bool(
+        controller.entry_data.get(
+            CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON
+        )
+    )
+
+    if suppress_main and any_sec_on and is_occupied:
+        return "secondary_active"
+
+    if is_occupied:
+        return "occupied"
+
+    return "vacant"
+
+
+def compute_engine_summary(
+    hass: HomeAssistant, engine: "PassableLightingEngine"
+) -> Dict[str, Any]:
+    """Compute cross-room and subsystem summary metrics for sensors and WebSocket snapshots."""
+    controllers = dict(sorted(engine.controllers.items()))
+    total_rooms = len(controllers)
+    rooms_auto_enabled = 0
+    overridden_rooms: List[str] = []
+    circadian_rooms_count = 0
+    frozen_rooms_count = 0
+    occupied_rooms_count = 0
+    notification_active_rooms: List[str] = []
+    room_modes: Dict[str, str] = {}
+
+    for room_id, ctrl in controllers.items():
+        mode = compute_room_active_mode(hass, engine, ctrl)
+        room_modes[room_id] = mode
+        if ctrl.is_enabled:
+            rooms_auto_enabled += 1
+        if engine.is_manual_override_active(room_id):
+            overridden_rooms.append(room_id)
+        if bool(ctrl.entry_data.get(CONF_CIRCADIAN_ENABLED, DEFAULT_CIRCADIAN_ENABLED)):
+            circadian_rooms_count += 1
+        if mode == "frozen":
+            frozen_rooms_count += 1
+        presence = ctrl.entry_data.get(CONF_PRESENCE_ENTITIES, [])
+        if isinstance(presence, str):
+            presence = [presence] if presence else []
+        if engine.check_presence(presence):
+            occupied_rooms_count += 1
+        if ctrl.is_notification_showing:
+            notification_active_rooms.append(room_id)
+
+    sun_state = hass.states.get("sun.sun")
+    sun_elevation: Optional[float] = None
+    if sun_state and "elevation" in sun_state.attributes:
+        try:
+            sun_elevation = round(float(sun_state.attributes["elevation"]), 2)
+        except (TypeError, ValueError):
+            sun_elevation = None
+
+    holiday_coord = engine.holiday_lighting
+    active_holiday_obj = holiday_coord.active_holiday if holiday_coord else None
+    sim_coord = engine.presence_simulation
+
+    return {
+        "total_rooms": total_rooms,
+        "rooms_auto_enabled": rooms_auto_enabled,
+        "rooms_disabled": total_rooms - rooms_auto_enabled,
+        "manual_overrides_count": len(overridden_rooms),
+        "overridden_rooms": overridden_rooms,
+        "circadian_rooms_count": circadian_rooms_count,
+        "frozen_rooms_count": frozen_rooms_count,
+        "occupied_rooms_count": occupied_rooms_count,
+        "notification_active_rooms": notification_active_rooms,
+        "current_circadian_kelvin": get_circadian_temp(hass),
+        "sun_elevation": sun_elevation,
+        "holiday_enabled": bool(holiday_coord.enabled) if holiday_coord else False,
+        "holiday_active": bool(holiday_coord.is_holiday_active_now) if holiday_coord else False,
+        "active_holiday": active_holiday_obj.get("name") if active_holiday_obj else None,
+        "exterior_enabled": bool(holiday_coord.exterior_enabled) if holiday_coord else False,
+        "exterior_active": bool(holiday_coord.is_exterior_active) if holiday_coord else False,
+        "decorations_enabled": bool(holiday_coord.decorations_enabled) if holiday_coord else False,
+        "presence_simulation_enabled": bool(sim_coord.enabled) if sim_coord else False,
+        "presence_simulation_active": bool(sim_coord.is_on) if sim_coord else False,
+        "presence_simulation_status": str(sim_coord.status) if sim_coord else "idle",
+        "room_modes": room_modes,
+    }
+
+
 class PassableLightingEngine:
     """Central engine managing memory, echo guards, timers, and execution."""
 
@@ -359,6 +501,27 @@ class PassableLightingEngine:
         self._calibrating_rooms: Set[str] = set()
         self._last_circadian_eval: Dict[str, float] = {}
         self._last_active_mode: Dict[str, str] = {}
+        self._summary_listeners: List[Callable[[], None]] = []
+        self._last_circadian_kelvin: Optional[int] = None
+
+    def register_summary_listener(self, cb: Callable[[], None]) -> Callable[[], None]:
+        """Register a callback notified whenever engine-wide summary state changes."""
+        if cb not in self._summary_listeners:
+            self._summary_listeners.append(cb)
+
+        def _unsub() -> None:
+            if cb in self._summary_listeners:
+                self._summary_listeners.remove(cb)
+
+        return _unsub
+
+    def notify_summary_listeners(self) -> None:
+        """Notify registered summary listeners of state updates."""
+        for cb in list(self._summary_listeners):
+            try:
+                cb()
+            except Exception as err:
+                _LOGGER.debug("Error notifying summary listener: %s", err)
 
     def is_notification_active(self, room_id: Optional[str] = None, entity_id: Optional[str] = None) -> bool:
         """Check if visual notification light is actively showing in a room or for an entity."""
@@ -459,6 +622,7 @@ class PassableLightingEngine:
     def register_controller(self, room_id: str, controller: "RoomController") -> None:
         """Register an active native room controller."""
         self._controllers[room_id] = controller
+        self.notify_summary_listeners()
         if self._circadian_unsub or self._sun_unsub:
             self.hass.async_create_task(self.async_evaluate_dynamic_circadian(room_id))
 
@@ -469,6 +633,7 @@ class PassableLightingEngine:
         self.cancel_pending_learning(room_id)
         self._echo_guards.pop(room_id, None)
         self._calibrating_rooms.discard(room_id)
+        self.notify_summary_listeners()
 
     def clear_lux_history(self, room_id: str) -> None:
         """Clear smoothed lux history buffer and last update timestamp for a room."""
@@ -668,6 +833,7 @@ class PassableLightingEngine:
         ctrl = self._controllers.get(room_id)
         if ctrl:
             ctrl.notify_entities()
+        self.notify_summary_listeners()
 
     def set_manual_override(
         self, room_id: str, timeout_min: int, cancel_cb: Optional[CALLBACK_TYPE] = None
@@ -691,6 +857,7 @@ class PassableLightingEngine:
         ctrl = self._controllers.get(room_id)
         if ctrl:
             ctrl.notify_entities()
+        self.notify_summary_listeners()
 
     def clear_manual_override(self, room_id: str) -> None:
         """Clear manual override for a room."""
@@ -705,6 +872,51 @@ class PassableLightingEngine:
             ctrl = self._controllers.get(room_id)
             if ctrl:
                 ctrl.notify_entities()
+            self.notify_summary_listeners()
+
+    async def async_clear_manual_override(
+        self, room_id: Optional[str] = None, reevaluate: bool = True
+    ) -> List[str]:
+        """Clear manual override for a specific room or all rooms and smoothly re-evaluate."""
+        if room_id and room_id not in ("all", "*", ""):
+            targets = (
+                [room_id]
+                if room_id in self._controllers or room_id in self._override_timers
+                else []
+            )
+        else:
+            targets = list(set(self._controllers.keys()) | set(self._override_timers.keys()))
+
+        cleared: List[str] = []
+        for rid in targets:
+            ctrl = self._controllers.get(rid)
+            helper_entity = (
+                ctrl.entry_data.get(CONF_MANUAL_OVERRIDE_ENTITY)
+                if ctrl
+                else (self._override_timers.get(rid) or {}).get("helper_entity")
+            )
+            was_active = self.is_manual_override_active(rid) or rid in self._override_timers
+            helper_is_on = bool(
+                helper_entity and safe_get_state(self.hass, helper_entity, "off") == "on"
+            )
+            if not was_active and not helper_is_on:
+                continue
+
+            if was_active:
+                self.clear_manual_override(rid)
+            if helper_entity:
+                await self.async_sync_helper(helper_entity, False)
+            if ctrl and reevaluate:
+                self.hass.async_create_task(
+                    ctrl.async_evaluate(
+                        "override_cleared", {"transition": OVERRIDE_FADE_TRANSITION_SEC}
+                    )
+                )
+            elif ctrl:
+                ctrl.notify_entities()
+            cleared.append(rid)
+
+        return cleared
 
     async def async_turn_on_light(
         self,
@@ -935,6 +1147,11 @@ class PassableLightingEngine:
 
     async def async_evaluate_dynamic_circadian(self, room_id: Optional[str] = None) -> None:
         """Evaluate and apply dynamic circadian color temperature for active rooms."""
+        cur_k = get_circadian_temp(self.hass)
+        if cur_k != self._last_circadian_kelvin:
+            self._last_circadian_kelvin = cur_k
+            self.notify_summary_listeners()
+
         target_controllers = (
             [self._controllers[room_id]]
             if room_id and room_id in self._controllers
@@ -2630,6 +2847,7 @@ class RoomController:
                 cb()
             except Exception as err:
                 _LOGGER.debug("Error notifying room entity listener: %s", err)
+        self.engine.notify_summary_listeners()
 
     @property
     def is_enabled(self) -> bool:

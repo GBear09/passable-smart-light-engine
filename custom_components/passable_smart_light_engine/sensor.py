@@ -44,11 +44,15 @@ from .const import (
     MODE_NOTIFICATION,
     MODE_PRESENCE_SIMULATION,
     RESET_TYPES,
+    SUMMARY_SENSOR_ENTITY_ID,
+    SUMMARY_SENSOR_UNIQUE_ID,
 )
 from .engine import (
     PassableLightingEngine,
     RoomController,
     calculate_learned_target_lux,
+    compute_engine_summary,
+    compute_room_active_mode,
     get_expected_lux,
     safe_get_state,
 )
@@ -85,9 +89,14 @@ async def async_setup_entry(
         PassableLightingActiveModeSensor(entry, controller, engine),
     ]
 
-    # Add the system-wide ready sensor once if not already added
+    # Add the system-wide ready and summary sensors once if not already added
     if not data.get("system_sensor_registered"):
-        entities.append(PassableLightingEngineReadySensor(hass, engine.store))
+        entities.extend(
+            [
+                PassableLightingEngineReadySensor(hass, engine.store),
+                PassableLightingSummarySensor(hass, engine),
+            ]
+        )
         data["system_sensor_registered"] = True
         data["system_sensor_entry_id"] = entry.entry_id
 
@@ -208,67 +217,7 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
     @property
     def native_value(self) -> str:
         """Determine and return current mode."""
-        if not self._controller.is_enabled:
-            return "disabled"
-
-        if self._engine.is_manual_override_active(self._room_id):
-            return "manual_override"
-
-        if self._controller.is_holiday_active:
-            return MODE_HOLIDAY
-
-        if self._controller.is_simulating_presence:
-            return MODE_PRESENCE_SIMULATION
-
-        freezes = self._controller.entry_data.get("bypass_freeze_entities", [])
-        offs = self._controller.entry_data.get("bypass_off_entities", [])
-        manual_override_entity = self._controller.entry_data.get("manual_override_entity")
-        is_frozen, is_off = self._engine.check_bypasses(freezes, offs, manual_override_entity)
-        if self._controller.freeze_bypass_active:
-            is_frozen = True
-
-        if is_off:
-            return "forced_off"
-        if is_frozen:
-            return "frozen"
-
-        if self._controller.is_notification_showing:
-            return MODE_NOTIFICATION
-
-        media = self._controller.entry_data.get("media_entities", [])
-        if self._engine.check_media(media):
-            return "media"
-
-        is_night = self._engine.is_late_night_active(
-            bool(self._controller.entry_data.get("late_night_enabled", False)),
-            str(self._controller.entry_data.get("late_night_condition_type", "time")),
-            self._controller.entry_data.get("late_night_entity"),
-            str(self._controller.entry_data.get("late_night_start_time", "22:00:00")),
-            str(self._controller.entry_data.get("late_night_stop_time", "06:00:00")),
-            self._controller.entry_data.get("late_night_start_entity"),
-            self._controller.entry_data.get("late_night_stop_entity"),
-        )
-        if is_night:
-            return "late_night"
-
-        presence = self._controller.entry_data.get("presence_entity", [])
-        is_occupied = self._engine.check_presence(presence)
-
-        sec_lights = self._controller.entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS)
-        if isinstance(sec_lights, str):
-            sec_lights = [sec_lights] if sec_lights else []
-        any_sec_on = any(safe_get_state(self.hass, s, "off") == "on" for s in (sec_lights or []))
-        suppress_main = bool(
-            self._controller.entry_data.get(CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON, DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON)
-        )
-
-        if suppress_main and any_sec_on and is_occupied:
-            return "secondary_active"
-
-        if is_occupied:
-            return "occupied"
-
-        return "vacant"
+        return compute_room_active_mode(self.hass, self._engine, self._controller)
 
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
@@ -388,6 +337,73 @@ class PassableLightingEngineReadySensor(SensorEntity):
             "room_datasets": self._store.get_room_datasets(),
             "available_reset_types": RESET_TYPES,
         }
+
+
+class PassableLightingSummarySensor(SensorEntity):
+    """System-wide summary sensor aggregating engine, room, holiday, and simulation status."""
+
+    _attr_should_poll = False
+
+    def __init__(self, hass: HomeAssistant, engine: PassableLightingEngine) -> None:
+        """Initialize summary sensor."""
+        self.hass = hass
+        self._engine = engine
+        self.entity_id = SUMMARY_SENSOR_ENTITY_ID
+        self._attr_unique_id = SUMMARY_SENSOR_UNIQUE_ID
+        self._attr_name = "Passable Smart Light Engine Summary"
+        self._attr_icon = "mdi:lightbulb-auto"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return system hub device info."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "system_hub")},
+            name="Passable Smart Light Engine",
+            manufacturer="Passable",
+            model="Smart Lighting Engine Hub",
+            sw_version="2.9.0",
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to engine, learning store, and holiday store updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            self._engine.register_summary_listener(self._on_summary_updated)
+        )
+        self.async_on_remove(
+            self._engine.store.register_update_listener(self._on_summary_updated)
+        )
+        holiday_coord = self._engine.holiday_lighting
+        if holiday_coord and getattr(holiday_coord, "store", None):
+            self.async_on_remove(
+                holiday_coord.store.register_update_listener(self._on_summary_updated)
+            )
+
+    def _on_summary_updated(self) -> None:
+        """Write updated summary state safely when attached to hass."""
+        if self.hass:
+            self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str:
+        """Return high-level engine operational state."""
+        summary = compute_engine_summary(self.hass, self._engine)
+        if summary["presence_simulation_active"]:
+            return "simulating"
+        if summary["manual_overrides_count"] > 0:
+            return "override_active"
+        if summary["holiday_active"]:
+            return "holiday"
+        if summary["total_rooms"] > 0 and summary["rooms_auto_enabled"] == 0:
+            return "paused"
+        return "auto"
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        """Expose cross-room and subsystem telemetry."""
+        summary = compute_engine_summary(self.hass, self._engine)
+        summary.pop("sun_elevation", None)
+        return summary
 
 
 class PassablePresenceSimulationStatusSensor(SensorEntity):

@@ -210,10 +210,52 @@ When configured via the Native UI, the integration provisions a room Device with
 | `button.<room>_reset_all_room_learning_data` | `button` | 1-click button to reset all learning datasets for this room. |
 
 ### System-Wide Entities:
+* `sensor.passable_smart_light_engine_summary`: Real-time cross-room and subsystem summary sensor (`auto`, `override_active`, `holiday`, `simulating`, `paused`) exposing `total_rooms`, `rooms_auto_enabled`, `manual_overrides_count`, `overridden_rooms`, `current_circadian_kelvin`, `holiday_active`, `active_holiday`, and `presence_simulation_status`.
 * `sensor.passable_smart_light_engine_ready`: Publishes `active_rooms`, `room_datasets`, and `available_reset_types` state attributes to power dynamic dashboard popups.
 * `switch.presence_simulation`: Master enable/disable toggle for the presence simulation function.
 * `switch.simulate_presence_away_mode`: Operational presence simulation away trigger switch. Drop-in compatible with existing automations. Exposes live attributes including `simulation_enabled`, `configured_lights`, `active_simulated_lights`, and `next_event`.
 * `sensor.presence_simulation_status`: Real-time operational diagnostics (`disabled`, `idle`, `planning`, `simulating`, `handover`).
+
+---
+
+## 🪄 Bundled Lighting Command Center Card
+
+`passable-smart-light-engine` ships with a built-in Lovelace custom card (`custom:passable-lighting-card`) served automatically at `/passable_smart_light_frontend/passable-lighting-card.js` and auto-registered as a Lovelace module resource with versioned cache busting.
+
+### Highlights
+- **Whole-Home Control & Recursive Drill-Down:** Automatically expands nested floor/room light groups (or falls back to Home Assistant's Floor & Area registry) with an inline active-light and per-floor drawer to toggle or dim individual bulbs in 1–2 taps.
+- **3 Selectable Floor Layouts:** Choose `tiles` (default compact 2-column HVAC-matched tiles), `rings` (5-across progress rings), or `rows` (full-width stacked rows) via the visual card editor or YAML.
+- **Built-In 4-Tab Command Center Modal:**
+  - **Lights:** Filter by `Active` or floor, toggle room `Auto` / `Circadian`, clear active overrides, and control individual lamps.
+  - **Engine:** Adjust room Target Lux steppers, inspect learned Lux Yield Curves (`lx/%`), trigger curve calibration, and reset learning datasets.
+  - **Holiday & Ext:** Toggle Dusk-to-Dawn, Holiday Lighting, and Decor Plugs, and preview or apply holidays from your catalog.
+  - **Away Sim:** Start/stop presence simulation and inspect active simulated fixtures.
+
+### Minimal Configuration
+```yaml
+type: custom:passable-lighting-card
+```
+
+### Overview Example (Headerless + Conditional Alert Pill)
+```yaml
+type: custom:passable-lighting-card
+show_header: false
+layout: tiles
+master_light: light.all_lights
+show_holiday_banner: true
+stats_navigation_path: /dashboard-home/light-stats
+alerts:
+  - entity: binary_sensor.laundry_light_scene_active
+    state: "on"
+    label: "Laundry ↺"
+    icon: phu:rooms-laundry-room
+    color: var(--info-color)
+    tap_action:
+      action: perform-action
+      perform_action: input_button.press
+      target:
+        entity_id: input_button.reset_laundry_light_button
+```
 
 ---
 
@@ -259,6 +301,15 @@ Manually starts presence simulation across all lights with label `lights_presenc
 
 ### `passable_smart_light_engine.stop_presence_simulation`
 Manually stops presence simulation. If stopping at night while home, performs graceful room handover; otherwise sweeps off simulated lights.
+
+### `passable_smart_light_engine.clear_manual_override`
+Clears an active manual override lockout for a specific `room_id` (or all rooms when omitted) and smoothly re-evaluates adaptive lighting.
+
+```yaml
+service: passable_smart_light_engine.clear_manual_override
+data:
+  room_id: "kitchen" # Optional: omit or pass 'all' to clear all rooms
+```
 
 ---
 

@@ -379,6 +379,8 @@ class HolidayLightingCoordinator:
             self._exterior_switch_entity.async_write_ha_state()
         if self._sensor_entity:
             self._sensor_entity.async_write_ha_state()
+        if self.engine:
+            self.engine.notify_summary_listeners()
 
     def evaluate_active_holiday(self, target_dt: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
         """Determine which holiday is active based on calendar date."""

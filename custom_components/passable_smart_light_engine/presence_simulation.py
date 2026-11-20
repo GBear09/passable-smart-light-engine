@@ -121,6 +121,8 @@ class PresenceSimulationCoordinator:
                 listener()
             except Exception:
                 pass
+        if self.engine:
+            self.engine.notify_summary_listeners()
 
     @property
     def is_on(self) -> bool:

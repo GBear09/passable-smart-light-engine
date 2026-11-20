@@ -90,3 +90,15 @@ preview_holiday:
           step: 5
           mode: box
 
+clear_manual_override:
+  name: Clear Manual Override
+  description: Clears an active manual override lockout for a specific room or all rooms and smoothly resumes adaptive lighting evaluation.
+  fields:
+    room_id:
+      name: Room ID
+      description: Optional room ID to clear (e.g. 'kitchen'). Omit or pass 'all' to clear manual overrides across all rooms.
+      example: "kitchen"
+      required: false
+      selector:
+        text:
+
