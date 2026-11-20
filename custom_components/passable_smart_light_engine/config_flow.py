@@ -320,8 +320,29 @@ class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="room", data_schema=step1_schema, errors=errors)
 
     async def async_step_import(self, import_data: Dict[str, Any]) -> config_entries.ConfigFlowResult:
-        """Auto-create dedicated presence simulation config entry from system."""
-        if import_data.get("entry_type") == "presence_simulation":
+        """Auto-create unified system or legacy subsystem config entry from import."""
+        entry_type = import_data.get("entry_type")
+        if entry_type == "system":
+            await self.async_set_unique_id(f"{DOMAIN}_system")
+            self._abort_if_unique_id_configured()
+            defaults = {
+                CONF_SIMULATION_ENABLED: DEFAULT_SIMULATION_ENABLED,
+                CONF_SIMULATION_LABEL: DEFAULT_SIMULATION_LABEL,
+                CONF_SIMULATION_MODE: DEFAULT_SIMULATION_MODE,
+                CONF_SIMULATION_LOOKBACK_DAYS: DEFAULT_SIMULATION_LOOKBACK_DAYS,
+                CONF_SIMULATION_JITTER_MIN: DEFAULT_SIMULATION_JITTER_MIN,
+                CONF_SIMULATION_ARRIVAL_GRACE_MIN: DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN,
+                CONF_SIMULATION_MAX_BRIGHTNESS_PCT: DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT,
+            }
+            merged_sim = {**defaults, **{k: v for k, v in import_data.items() if k != "entry_type"}}
+            return self.async_create_entry(
+                title="Passable Smart Light Engine",
+                data={
+                    "entry_type": "system",
+                    **merged_sim,
+                },
+            )
+        if entry_type == "presence_simulation":
             await self.async_set_unique_id(f"{DOMAIN}_presence_simulation")
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
@@ -577,11 +598,15 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
         self._entry = config_entry
 
     async def async_step_init(self, user_input: Optional[Dict[str, Any]] = None) -> config_entries.ConfigFlowResult:
-        """Manage room, presence simulation, or holiday lighting options."""
-        if self._entry.data.get("entry_type") == "presence_simulation":
+        """Manage room, system, presence simulation, or holiday lighting options."""
+        entry_type = self._entry.data.get("entry_type")
+        if entry_type == "system":
+            return await self.async_step_system_menu()
+
+        if entry_type == "presence_simulation":
             return await self.async_step_presence_simulation_options(user_input)
 
-        if self._entry.data.get("entry_type") == "holiday_lighting":
+        if entry_type == "holiday_lighting":
             return await self.async_step_holiday_menu()
 
         if user_input is not None:
@@ -797,6 +822,15 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(step_id="init", data_schema=options_schema)
+
+    async def async_step_system_menu(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> config_entries.ConfigFlowResult:
+        """Top-level menu for the unified Passable Smart Light Engine system entry."""
+        return self.async_show_menu(
+            step_id="system_menu",
+            menu_options=["holiday_menu", "presence_simulation_options"],
+        )
 
     async def async_step_presence_simulation_options(
         self, user_input: Optional[Dict[str, Any]] = None

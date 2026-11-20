@@ -17,6 +17,7 @@ from homeassistant.helpers import config_validation as cv, device_registry as dr
 
 from .const import (
     ACTIVE_HOLIDAY_SENSOR_ENTITY_ID,
+    ACTIVE_HOLIDAY_SENSOR_UNIQUE_ID,
     ATTR_CALIBRATE_FORCE,
     ATTR_CALIBRATE_ROOM_ID,
     ATTR_DURATION_SEC,
@@ -24,16 +25,36 @@ from .const import (
     ATTR_OVERRIDE_ROOM_ID,
     ATTR_RESET_ROOM_ID,
     ATTR_RESET_TYPE,
+    CONF_SIMULATION_ARRIVAL_GRACE_MIN,
+    CONF_SIMULATION_ENABLED,
+    CONF_SIMULATION_JITTER_MIN,
+    CONF_SIMULATION_LABEL,
+    CONF_SIMULATION_LOOKBACK_DAYS,
+    CONF_SIMULATION_MAX_BRIGHTNESS_PCT,
+    CONF_SIMULATION_MODE,
+    DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN,
+    DEFAULT_SIMULATION_ENABLED,
+    DEFAULT_SIMULATION_JITTER_MIN,
+    DEFAULT_SIMULATION_LABEL,
+    DEFAULT_SIMULATION_LOOKBACK_DAYS,
+    DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT,
+    DEFAULT_SIMULATION_MODE,
     DOMAIN,
     EVENT_PASSABLE_SMART_LIGHT_ENGINE,
     EVENT_SMART_LIGHT_ENGINE,
+    EXTERIOR_LIGHTING_SWITCH_ENTITY_ID,
+    EXTERIOR_LIGHTING_SWITCH_UNIQUE_ID,
     FRONTEND_URL_PATH,
     HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID,
+    HOLIDAY_DECORATIONS_SWITCH_UNIQUE_ID,
     HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID,
+    HOLIDAY_LIGHTING_MASTER_SWITCH_UNIQUE_ID,
     LEGACY_DOMAIN,
     PLATFORMS,
     PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID,
+    PRESENCE_SIMULATION_MASTER_SWITCH_UNIQUE_ID,
     PRESENCE_SIMULATION_SWITCH_ENTITY_ID,
+    PRESENCE_SIMULATION_SWITCH_UNIQUE_ID,
     RESET_TYPES,
     SERVICE_APPLY_HOLIDAY_LIGHTING,
     SERVICE_CALIBRATE_ROOM_CURVE,
@@ -42,6 +63,8 @@ from .const import (
     SERVICE_RESET_LEARNING_DATA,
     SERVICE_START_PRESENCE_SIMULATION,
     SERVICE_STOP_PRESENCE_SIMULATION,
+    SUMMARY_SENSOR_ENTITY_ID,
+    SUMMARY_SENSOR_UNIQUE_ID,
 )
 from .engine import PassableLightingEngine, RoomController
 from .holiday_lighting import HolidayLightingCoordinator, HolidayStore
@@ -92,9 +115,9 @@ def _get_integration_version() -> str:
     try:
         manifest_path = pathlib.Path(__file__).parent / "manifest.json"
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return str(data.get("version", "2.9.0"))
+        return str(data.get("version", "2.9.1"))
     except Exception:
-        return "2.9.0"
+        return "2.9.1"
 
 
 async def _async_register_lovelace_resource(
@@ -331,49 +354,243 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         schema=CLEAR_OVERRIDE_SERVICE_SCHEMA,
     )
 
-    # Ensure dedicated presence simulation entry is created
-    async def _async_ensure_simulation_entry() -> None:
-        sim_entries = [
-            e for e in hass.config_entries.async_entries(DOMAIN)
-            if e.data.get("entry_type") == "presence_simulation"
+    # Ensure a single unified general system entry holds all system devices & entities
+    async def _async_ensure_system_entry() -> None:
+        all_entries = list(hass.config_entries.async_entries(DOMAIN))
+        system_entries = [
+            e for e in all_entries if e.data.get("entry_type") == "system"
         ]
-        if not sim_entries:
-            _LOGGER.info("PassableSmartLighting: Auto-creating dedicated Presence Simulation config entry...")
-            await hass.config_entries.flow.async_init(
-                DOMAIN,
-                context={"source": "import"},
-                data={"entry_type": "presence_simulation"},
-            )
-
-    hass.async_create_task(_async_ensure_simulation_entry())
-
-    # Ensure dedicated holiday lighting entry is created
-    async def _async_ensure_holiday_entry() -> None:
-        h_entries = [
-            e for e in hass.config_entries.async_entries(DOMAIN)
-            if e.data.get("entry_type") == "holiday_lighting"
+        legacy_entries = [
+            e
+            for e in all_entries
+            if e.data.get("entry_type") in ("presence_simulation", "holiday_lighting")
         ]
-        if not h_entries:
-            _LOGGER.info("PassableSmartLighting: Auto-creating dedicated Holiday & Exterior Lighting config entry...")
-            await hass.config_entries.flow.async_init(
-                DOMAIN,
-                context={"source": "import"},
-                data={"entry_type": "holiday_lighting"},
-            )
 
-    hass.async_create_task(_async_ensure_holiday_entry())
+        sim_defaults: Dict[str, Any] = {
+            CONF_SIMULATION_ENABLED: DEFAULT_SIMULATION_ENABLED,
+            CONF_SIMULATION_LABEL: DEFAULT_SIMULATION_LABEL,
+            CONF_SIMULATION_MODE: DEFAULT_SIMULATION_MODE,
+            CONF_SIMULATION_LOOKBACK_DAYS: DEFAULT_SIMULATION_LOOKBACK_DAYS,
+            CONF_SIMULATION_JITTER_MIN: DEFAULT_SIMULATION_JITTER_MIN,
+            CONF_SIMULATION_ARRIVAL_GRACE_MIN: DEFAULT_SIMULATION_ARRIVAL_GRACE_MIN,
+            CONF_SIMULATION_MAX_BRIGHTNESS_PCT: DEFAULT_SIMULATION_MAX_BRIGHTNESS_PCT,
+        }
+        for src in system_entries + [
+            e for e in legacy_entries if e.data.get("entry_type") == "presence_simulation"
+        ]:
+            for key in list(sim_defaults):
+                if key in src.data:
+                    sim_defaults[key] = src.data[key]
+            break
+
+        promoted = False
+        system_entry: Optional[ConfigEntry] = system_entries[0] if system_entries else None
+
+        if system_entry is None:
+            if legacy_entries:
+                sim_first = [
+                    e for e in legacy_entries if e.data.get("entry_type") == "presence_simulation"
+                ]
+                primary = sim_first[0] if sim_first else legacy_entries[0]
+                _LOGGER.info(
+                    "PassableSmartLighting: Consolidating legacy entry '%s' (%s) into unified 'Passable Smart Light Engine' system entry",
+                    primary.title,
+                    primary.entry_id,
+                )
+                hass.data.setdefault(DOMAIN, {}).setdefault(
+                    "skip_reload_entries", set()
+                ).add(primary.entry_id)
+                hass.config_entries.async_update_entry(
+                    primary,
+                    title="Passable Smart Light Engine",
+                    unique_id=f"{DOMAIN}_system",
+                    data={"entry_type": "system", **sim_defaults},
+                )
+                system_entry = primary
+                promoted = True
+            else:
+                _LOGGER.info(
+                    "PassableSmartLighting: Auto-creating unified Passable Smart Light Engine system entry..."
+                )
+                await hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context={"source": "import"},
+                    data={"entry_type": "system", **sim_defaults},
+                )
+                refreshed = [
+                    e
+                    for e in hass.config_entries.async_entries(DOMAIN)
+                    if e.data.get("entry_type") == "system"
+                ]
+                if refreshed:
+                    await _async_migrate_system_registries(hass, refreshed[0].entry_id)
+                return
+
+        redundant_entries = [
+            e
+            for e in (legacy_entries + system_entries[1:])
+            if e.entry_id != system_entry.entry_id
+        ]
+
+        if not promoted and not redundant_entries:
+            await _async_migrate_system_registries(hass, system_entry.entry_id)
+            return
+
+        await _async_migrate_system_registries(hass, system_entry.entry_id)
+
+        for old_entry in redundant_entries:
+            _LOGGER.info(
+                "PassableSmartLighting: Removing consolidated legacy entry '%s' (%s)",
+                old_entry.title,
+                old_entry.entry_id,
+            )
+            await hass.config_entries.async_remove(old_entry.entry_id)
+
+        await _async_migrate_system_registries(hass, system_entry.entry_id)
+        await hass.config_entries.async_reload(system_entry.entry_id)
+
+    hass.async_create_task(_async_ensure_system_entry())
 
     _LOGGER.info("Passable Smart Light Engine component initialized successfully.")
     return True
 
 
+async def _async_migrate_system_registries(
+    hass: HomeAssistant, system_entry_id: str
+) -> None:
+    """Attach all system entities and system devices exclusively to the unified system entry."""
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+
+    system_targets = [
+        ("sensor", SUMMARY_SENSOR_UNIQUE_ID, SUMMARY_SENSOR_ENTITY_ID),
+        ("sensor", f"{DOMAIN}_ready", "sensor.passable_smart_light_engine_ready"),
+        (
+            "sensor",
+            f"{DOMAIN}_presence_simulation_status",
+            "sensor.presence_simulation_status",
+        ),
+        ("sensor", ACTIVE_HOLIDAY_SENSOR_UNIQUE_ID, ACTIVE_HOLIDAY_SENSOR_ENTITY_ID),
+        (
+            "switch",
+            PRESENCE_SIMULATION_MASTER_SWITCH_UNIQUE_ID,
+            PRESENCE_SIMULATION_MASTER_SWITCH_ENTITY_ID,
+        ),
+        (
+            "switch",
+            PRESENCE_SIMULATION_SWITCH_UNIQUE_ID,
+            PRESENCE_SIMULATION_SWITCH_ENTITY_ID,
+        ),
+        (
+            "switch",
+            HOLIDAY_LIGHTING_MASTER_SWITCH_UNIQUE_ID,
+            HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID,
+        ),
+        (
+            "switch",
+            HOLIDAY_DECORATIONS_SWITCH_UNIQUE_ID,
+            HOLIDAY_DECORATIONS_SWITCH_ENTITY_ID,
+        ),
+        (
+            "switch",
+            EXTERIOR_LIGHTING_SWITCH_UNIQUE_ID,
+            EXTERIOR_LIGHTING_SWITCH_ENTITY_ID,
+        ),
+    ]
+
+    migrated_device_ids = set()
+    for platform_domain, unique_id, fallback_entity_id in system_targets:
+        entity_id: Optional[str] = None
+        if hasattr(ent_reg, "async_get_entity_id"):
+            entity_id = ent_reg.async_get_entity_id(platform_domain, DOMAIN, unique_id)
+        if not entity_id and fallback_entity_id and ent_reg.async_get(fallback_entity_id):
+            entity_id = fallback_entity_id
+        if not entity_id:
+            for reg_ent in getattr(ent_reg, "entities", {}).values():
+                if (
+                    getattr(reg_ent, "platform", None) == DOMAIN
+                    and getattr(reg_ent, "domain", None) == platform_domain
+                    and getattr(reg_ent, "unique_id", None) == unique_id
+                ):
+                    entity_id = reg_ent.entity_id
+                    break
+        if not entity_id:
+            continue
+
+        reg_entry = ent_reg.async_get(entity_id)
+        if not reg_entry:
+            continue
+        if reg_entry.device_id:
+            migrated_device_ids.add(reg_entry.device_id)
+        if reg_entry.config_entry_id != system_entry_id:
+            _LOGGER.info(
+                "PassableSmartLighting: Migrating entity %s from entry %s to system entry %s",
+                entity_id,
+                reg_entry.config_entry_id,
+                system_entry_id,
+            )
+            ent_reg.async_update_entity(entity_id, config_entry_id=system_entry_id)
+
+    for ident_key in ("system_hub", "presence_simulation", "holiday_lighting"):
+        device = None
+        if hasattr(dev_reg, "async_get_device"):
+            device = dev_reg.async_get_device(identifiers={(DOMAIN, ident_key)})
+        if not device:
+            for dev in getattr(dev_reg, "devices", {}).values():
+                if (DOMAIN, ident_key) in getattr(dev, "identifiers", set()):
+                    device = dev
+                    break
+        if device:
+            migrated_device_ids.add(device.id)
+
+    for dev_id in migrated_device_ids:
+        device = dev_reg.async_get(dev_id)
+        if not device:
+            continue
+        config_entries = list(getattr(device, "config_entries", ()))
+        if system_entry_id not in config_entries:
+            dev_reg.async_update_device(dev_id, add_config_entry_id=system_entry_id)
+        for old_cid in [cid for cid in config_entries if cid != system_entry_id]:
+            _LOGGER.info(
+                "PassableSmartLighting: Detaching device %s from non-system entry %s",
+                dev_id,
+                old_cid,
+            )
+            dev_reg.async_update_device(dev_id, remove_config_entry_id=old_cid)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up a room, presence simulation, or holiday lighting from a config entry."""
+    """Set up a room, unified system entry, or legacy subsystem from a config entry."""
     await _async_register_frontend(hass)
     async_register_websocket_commands(hass)
 
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
+
+    if entry.data.get("entry_type") == "system":
+        if entry.title != "Passable Smart Light Engine":
+            data.setdefault("skip_reload_entries", set()).add(entry.entry_id)
+            hass.config_entries.async_update_entry(
+                entry, title="Passable Smart Light Engine"
+            )
+
+        coordinator = data.get("coordinator")
+        if coordinator:
+            coordinator.update_options(dict(entry.data))
+
+        holiday_coord: Optional[HolidayLightingCoordinator] = data.get(
+            "holiday_coordinator"
+        )
+        if holiday_coord:
+            await holiday_coord.async_start()
+
+        await _async_migrate_system_registries(hass, entry.entry_id)
+        await hass.config_entries.async_forward_entry_setups(entry, ["switch", "sensor"])
+        entry.async_on_unload(entry.add_update_listener(async_update_options_listener))
+        _LOGGER.info(
+            "PassableSmartLighting: Set up unified Passable Smart Light Engine system entry successfully."
+        )
+        return True
 
     if entry.data.get("entry_type") == "presence_simulation":
         coordinator = data.get("coordinator")
@@ -471,8 +688,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a room, presence simulation, or holiday lighting config entry."""
+    """Unload a room, unified system entry, or legacy subsystem config entry."""
     data = hass.data[DOMAIN]
+
+    if entry.data.get("entry_type") == "system":
+        coordinator = data.get("coordinator")
+        if coordinator:
+            coordinator.stop()
+        holiday_coord = data.get("holiday_coordinator")
+        if holiday_coord:
+            holiday_coord.stop()
+        data["system_simulation_sensor_registered"] = False
+        data["system_sensor_registered"] = False
+        data["system_switch_registered"] = False
+        data["system_sensor_entry_id"] = None
+        return await hass.config_entries.async_unload_platforms(entry, ["switch", "sensor"])
 
     if entry.data.get("entry_type") == "presence_simulation":
         coordinator = data.get("coordinator")

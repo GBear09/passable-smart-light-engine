@@ -242,7 +242,7 @@ type: custom:passable-lighting-card
 show_header: false
 layout: tiles
 master_light: light.all_lights
-show_holiday_banner: true
+show_holiday_banner: false # Optional inline holiday banner (off by default)
 stats_navigation_path: /dashboard-home/light-stats
 alerts:
   - entity: binary_sensor.laundry_light_scene_active

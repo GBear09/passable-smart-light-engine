@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.9.0";
+const CARD_VERSION = "2.9.1";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -66,7 +66,7 @@ class PassableLightingCard extends LitElement {
       layout: "tiles",
       master_light: "light.all_lights",
       show_summary_strip: true,
-      show_holiday_banner: true,
+      show_holiday_banner: false,
       show_master_dimmer: true,
       show_engine_footer: true,
       default_expanded_floor: "",
@@ -124,6 +124,14 @@ class PassableLightingCard extends LitElement {
     this._confirmResetTimer = null;
     this._ringHoldTimer = null;
     this._ringHoldFired = false;
+    this._touchStartY = undefined;
+    this._touchStartX = undefined;
+    this._touchCurrentY = undefined;
+    this._touchTarget = null;
+    this._touchInScroll = false;
+    this._touchDragging = false;
+    this._touchLockedHorizontal = false;
+    this._swipeResetTimer = null;
     this._onKeyDown = (ev) => {
       if (ev.key === "Escape" && this._modalOpen) {
         this._closeModal();
@@ -141,7 +149,7 @@ class PassableLightingCard extends LitElement {
       layout: "tiles",
       master_light: "light.all_lights",
       show_summary_strip: true,
-      show_holiday_banner: true,
+      show_holiday_banner: false,
       show_master_dimmer: true,
       show_engine_footer: true,
       default_expanded_floor: "",
@@ -184,6 +192,7 @@ class PassableLightingCard extends LitElement {
     clearTimeout(this._toastTimer);
     clearTimeout(this._confirmResetTimer);
     clearTimeout(this._ringHoldTimer);
+    clearTimeout(this._swipeResetTimer);
   }
 
   updated(changedProps) {
@@ -218,6 +227,7 @@ class PassableLightingCard extends LitElement {
       "switch.simulate_presence_away_mode",
       "switch.presence_simulation",
       "sensor.presence_simulation_status",
+      "sensor.passable_smart_light_engine_presence_simulation_presence_simulation_status",
       "sun.sun",
     ]);
 
@@ -248,6 +258,19 @@ class PassableLightingCard extends LitElement {
         }
       }
     }
+    const wsHoliday = this._wsData?.holiday_exterior;
+    if (wsHoliday) {
+      (wsHoliday.participating_decorations || []).forEach((id) => id && watched.add(id));
+      (wsHoliday.active_decorations || []).forEach((id) => id && watched.add(id));
+      (wsHoliday.participating_lights || []).forEach((id) => id && watched.add(id));
+      (wsHoliday.exterior_lights || []).forEach((id) => id && watched.add(id));
+    }
+    [
+      newStates["sensor.active_holiday"]?.attributes?.active_decorations,
+      oldStates["sensor.active_holiday"]?.attributes?.active_decorations,
+    ].forEach((list) => {
+      if (Array.isArray(list)) list.forEach((id) => id && watched.add(id));
+    });
 
     for (const id of watched) {
       if (oldStates[id] !== newStates[id]) return true;
@@ -712,6 +735,11 @@ class PassableLightingCard extends LitElement {
     return st?.attributes?.friendly_name || entityId.replace(/^light\./, "").replace(/_/g, " ");
   }
 
+  _getEntityName(entityId) {
+    const st = this.hass?.states?.[entityId];
+    return st?.attributes?.friendly_name || String(entityId || "").replace(/^[^.]+\./, "").replace(/_/g, " ");
+  }
+
   _getFloorStats(floor, leafToRoom) {
     const total = floor.leaves.length;
     const active = floor.leaves.filter((id) => this._isLightOn(id));
@@ -923,8 +951,11 @@ class PassableLightingCard extends LitElement {
     if (expandRoomId) {
       this._expandedEngineRoom = expandRoomId;
     }
+    clearTimeout(this._swipeResetTimer);
     this._modalOpen = true;
-    if (!this._wsData) {
+    if (!this._wsUnsub && !this._wsSubscribing) {
+      this._subscribeEngine();
+    } else if (!this._wsData) {
       this._fetchFallbackData();
     }
     this._syncCountdownTimer();
@@ -932,6 +963,7 @@ class PassableLightingCard extends LitElement {
 
   _closeModal() {
     this._fireHaptic("light");
+    clearTimeout(this._swipeResetTimer);
     const overlay = this.shadowRoot?.querySelector(".popup-overlay");
     const content = this.shadowRoot?.querySelector(".popup-content");
     if (overlay) overlay.classList.add("closing");
@@ -943,6 +975,129 @@ class PassableLightingCard extends LitElement {
       this._confirmResetRoom = null;
       this._syncCountdownTimer();
     }, 180);
+  }
+
+  _handlePopupTouchStart(e) {
+    if (!e.touches || e.touches.length !== 1) return;
+    if (e.target?.closest?.('input[type="range"]')) return;
+    const popupContent = e.currentTarget;
+    const scrollArea = popupContent.querySelector(".modal-scroll-area");
+    const inScroll = Boolean(scrollArea && e.target && scrollArea.contains(e.target));
+    if (inScroll && scrollArea.scrollTop > 0) return;
+
+    clearTimeout(this._swipeResetTimer);
+    this._touchStartY = e.touches[0].clientY;
+    this._touchStartX = e.touches[0].clientX;
+    this._touchCurrentY = this._touchStartY;
+    this._touchTarget = popupContent;
+    this._touchInScroll = inScroll;
+    this._touchDragging = false;
+    this._touchLockedHorizontal = false;
+  }
+
+  _handlePopupTouchMove(e) {
+    if (this._touchStartY === undefined || !this._touchTarget || this._touchLockedHorizontal) return;
+    if (!e.touches || e.touches.length !== 1) return;
+    const popupContent = this._touchTarget;
+    const currentY = e.touches[0].clientY;
+    const currentX = e.touches[0].clientX;
+    const deltaY = currentY - this._touchStartY;
+    const deltaX = currentX - (this._touchStartX ?? currentX);
+
+    if (!this._touchDragging) {
+      if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 8) {
+        this._touchLockedHorizontal = true;
+        return;
+      }
+      if (this._touchInScroll) {
+        const scrollArea = popupContent.querySelector(".modal-scroll-area");
+        if (scrollArea && scrollArea.scrollTop > 0) {
+          this._touchStartY = undefined;
+          this._touchTarget = null;
+          return;
+        }
+      }
+      if (deltaY > 6) {
+        this._touchDragging = true;
+        clearTimeout(this._swipeResetTimer);
+        popupContent.style.animation = "none";
+        popupContent.style.transition = "none";
+      } else {
+        return;
+      }
+    }
+
+    if (deltaY > 0) {
+      if (e.cancelable) e.preventDefault();
+      this._touchCurrentY = currentY;
+      popupContent.style.transform = `translateY(${deltaY}px)`;
+      const overlay = this.shadowRoot?.querySelector(".popup-overlay");
+      if (overlay) {
+        overlay.style.animation = "none";
+        overlay.style.opacity = String(Math.max(0.2, 1 - deltaY / 360));
+      }
+    } else {
+      this._touchCurrentY = this._touchStartY;
+      popupContent.style.transform = "translateY(0px)";
+    }
+  }
+
+  _handlePopupTouchEnd() {
+    if (this._touchStartY === undefined || !this._touchTarget) return;
+    const popupContent = this._touchTarget;
+    const overlay = this.shadowRoot?.querySelector(".popup-overlay");
+    const wasDragging = this._touchDragging;
+    const deltaY =
+      wasDragging && this._touchCurrentY !== undefined
+        ? this._touchCurrentY - this._touchStartY
+        : 0;
+
+    this._touchStartY = undefined;
+    this._touchStartX = undefined;
+    this._touchCurrentY = undefined;
+    this._touchTarget = null;
+    this._touchInScroll = false;
+    this._touchDragging = false;
+    this._touchLockedHorizontal = false;
+
+    if (deltaY > 80) {
+      this._fireHaptic("light");
+      popupContent.style.transition = "transform 180ms ease-in, opacity 180ms ease-in";
+      popupContent.style.transform = "translateY(100%)";
+      popupContent.style.opacity = "0";
+      if (overlay) {
+        overlay.style.transition = "opacity 180ms ease-in";
+        overlay.style.opacity = "0";
+      }
+      clearTimeout(this._closeModalTimer);
+      this._closeModalTimer = setTimeout(() => {
+        this._modalOpen = false;
+        this._confirmResetRoom = null;
+        this._syncCountdownTimer();
+      }, 180);
+    } else if (wasDragging) {
+      popupContent.style.transition = "transform 250ms cubic-bezier(0.2, 0, 0, 1)";
+      popupContent.style.transform = "translateY(0px)";
+      if (overlay) {
+        overlay.style.transition = "opacity 250ms cubic-bezier(0.2, 0, 0, 1)";
+        overlay.style.opacity = "1";
+      }
+      clearTimeout(this._swipeResetTimer);
+      this._swipeResetTimer = setTimeout(() => {
+        popupContent.style.transition = "";
+        popupContent.style.transform = "";
+        popupContent.style.animation = "";
+        if (overlay) {
+          overlay.style.transition = "";
+          overlay.style.opacity = "";
+          overlay.style.animation = "";
+        }
+      }, 250);
+    }
+  }
+
+  _handlePopupTouchCancel() {
+    this._handlePopupTouchEnd();
   }
 
   async _callEngineWS(payload, successToast = null) {
@@ -1225,7 +1380,7 @@ class PassableLightingCard extends LitElement {
   }
 
   _renderHolidayBanner() {
-    if (this.config?.show_holiday_banner === false) return "";
+    if (this.config?.show_holiday_banner !== true) return "";
     const holidayInfo = this._wsData?.holiday_exterior;
     const sensorObj = this.hass?.states?.["sensor.active_holiday"];
     const activeHoliday = holidayInfo?.active_holiday;
@@ -1687,12 +1842,19 @@ class PassableLightingCard extends LitElement {
     const duskOn = this.hass?.states?.["switch.exterior_dusk_to_dawn_lighting"]?.state === "on";
     const holidayOn = this.hass?.states?.["switch.holiday_lighting"]?.state === "on";
     const awayOn = this.hass?.states?.["switch.simulate_presence_away_mode"]?.state === "on";
-    const activeHolidayName =
-      this._wsData?.holiday_exterior?.active_holiday?.name ||
-      (this.hass?.states?.["sensor.active_holiday"]?.state !== "unknown"
-        ? this.hass?.states?.["sensor.active_holiday"]?.state
-        : null) ||
-      "Holiday";
+    const holidaySensor = this.hass?.states?.["sensor.active_holiday"];
+    const activeHolidayObj = this._wsData?.holiday_exterior?.active_holiday;
+    const sensorHolidayName =
+      holidaySensor?.state &&
+      holidaySensor.state !== "unknown" &&
+      holidaySensor.state !== "unavailable"
+        ? holidaySensor.state
+        : null;
+    const activeHolidayName = activeHolidayObj?.name || sensorHolidayName || "Holiday";
+    const activeHolidayIcon =
+      activeHolidayObj?.icon ||
+      (sensorHolidayName ? holidaySensor?.attributes?.current_icon : null) ||
+      null;
 
     return html`
       <div class="engine-footer-strip">
@@ -1709,14 +1871,18 @@ class PassableLightingCard extends LitElement {
                 </button>
               `
             : ""}
-          ${this.hass?.states?.["switch.holiday_lighting"]
+          ${this.hass?.states?.["switch.holiday_lighting"] || holidaySensor
             ? html`
                 <button
                   type="button"
                   class="footer-chip ${holidayOn ? "amber" : ""}"
-                  @click=${() => this._toggleSubsystemEntity("switch.holiday_lighting")}
+                  @click=${() => this._openModal("holiday")}
+                  title="Open Holiday & Exterior Lighting"
                 >
-                  ${activeHolidayName}
+                  ${activeHolidayIcon
+                    ? html`<ha-icon icon="${activeHolidayIcon}" style="--mdc-icon-size:13px;"></ha-icon>`
+                    : ""}
+                  <span>${activeHolidayName}</span>
                 </button>
               `
             : ""}
@@ -2095,8 +2261,126 @@ class PassableLightingCard extends LitElement {
     `;
   }
 
-  _renderModalHolidayTab() {
-    const holidayInfo = this._wsData?.holiday_exterior || {};
+  _formatNextEventText(nextEvent) {
+    if (!nextEvent) return "";
+    const lightLabel = nextEvent.entity_id
+      ? this._getLightName(nextEvent.entity_id)
+      : "Light";
+    const actionState = String(nextEvent.state || "on").toUpperCase();
+    let timeText = nextEvent.time ? String(nextEvent.time) : "";
+    if (timeText) {
+      const parsed = new Date(timeText);
+      if (!isNaN(parsed.getTime())) {
+        timeText = parsed.toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit",
+        });
+      }
+    }
+    return timeText
+      ? `Next: ${lightLabel} → ${actionState} at ${timeText}`
+      : `Next: ${lightLabel} → ${actionState}`;
+  }
+
+  _getFallbackHolidayState() {
+    const sensorObj = this.hass?.states?.["sensor.active_holiday"];
+    const attrs = sensorObj?.attributes || {};
+    const stateName =
+      sensorObj?.state &&
+      sensorObj.state !== "unknown" &&
+      sensorObj.state !== "unavailable"
+        ? sensorObj.state
+        : null;
+
+    let catalog = [];
+    if (typeof attrs.holiday_data === "string" && attrs.holiday_data.trim()) {
+      try {
+        const parsed = JSON.parse(attrs.holiday_data);
+        if (parsed && typeof parsed === "object") {
+          catalog = Object.entries(parsed).map(([name, info]) => ({
+            id: name
+              .toLowerCase()
+              .replace(/'/g, "")
+              .replace(/[^a-z0-9]+/g, "_")
+              .replace(/^_+|_+$/g, ""),
+            name,
+            icon: info?.icon || "mdi:calendar-star",
+            phrase: info?.phrase || name,
+            theme_color: info?.theme_color || "#b45f06",
+            light_mode: "rgb",
+            decorations_on: Boolean(info?.decorations_on),
+            start_date: "",
+            end_date: "",
+          }));
+        }
+      } catch (_err) {
+        catalog = [];
+      }
+    }
+
+    const active = stateName
+      ? catalog.find((h) => h.name === stateName) || {
+          id: stateName
+            .toLowerCase()
+            .replace(/'/g, "")
+            .replace(/[^a-z0-9]+/g, "_")
+            .replace(/^_+|_+$/g, ""),
+          name: stateName,
+          icon: attrs.current_icon || "mdi:calendar-star",
+          phrase: attrs.current_phrase || stateName,
+          theme_color: attrs.current_theme || "#b45f06",
+          light_mode: attrs.current_effect ? "effect" : attrs.current_scene ? "hue_scene" : "rgb",
+          start_date: "",
+          end_date: "",
+        }
+      : null;
+
+    return {
+      active_holiday: active,
+      participating_lights: Array.isArray(attrs.participating_lights)
+        ? attrs.participating_lights
+        : [],
+      exterior_lights: Array.isArray(attrs.exterior_lights)
+        ? attrs.exterior_lights
+        : [],
+      participating_decorations: Array.isArray(attrs.active_decorations)
+        ? attrs.active_decorations
+        : [],
+      active_decorations: Array.isArray(attrs.active_decorations)
+        ? attrs.active_decorations
+        : [],
+      catalog,
+    };
+  }
+
+  _renderModalHolidayTab(leafToRoom = {}, leafGroupName = {}) {
+    const wsHoliday = this._wsData?.holiday_exterior;
+    const fallbackHoliday = this._getFallbackHolidayState();
+    const holidayInfo = {
+      ...fallbackHoliday,
+      ...(wsHoliday || {}),
+      active_holiday: wsHoliday?.active_holiday || fallbackHoliday.active_holiday,
+      participating_lights:
+        Array.isArray(wsHoliday?.participating_lights) && wsHoliday.participating_lights.length > 0
+          ? wsHoliday.participating_lights
+          : fallbackHoliday.participating_lights,
+      exterior_lights:
+        Array.isArray(wsHoliday?.exterior_lights) && wsHoliday.exterior_lights.length > 0
+          ? wsHoliday.exterior_lights
+          : fallbackHoliday.exterior_lights,
+      participating_decorations:
+        Array.isArray(wsHoliday?.participating_decorations) && wsHoliday.participating_decorations.length > 0
+          ? wsHoliday.participating_decorations
+          : fallbackHoliday.participating_decorations,
+      active_decorations:
+        Array.isArray(wsHoliday?.active_decorations) && wsHoliday.active_decorations.length > 0
+          ? wsHoliday.active_decorations
+          : fallbackHoliday.active_decorations,
+      catalog:
+        Array.isArray(wsHoliday?.catalog) && wsHoliday.catalog.length > 0
+          ? wsHoliday.catalog
+          : fallbackHoliday.catalog,
+    };
     const catalog = holidayInfo.catalog || [];
     const active = holidayInfo.active_holiday;
     const duskOn =
@@ -2110,7 +2394,29 @@ class PassableLightingCard extends LitElement {
       holidayInfo.decorations_enabled;
 
     const participating = this._resolveHolidayParticipatingLeaves(holidayInfo);
-    const anyHolidayLightOn = participating.some((id) => this._isLightOn(id));
+    const fallbackExterior = (holidayInfo.exterior_lights || []).flatMap((id) =>
+      this._expandLightGroup(id)
+    );
+    const holidayLightsRaw =
+      participating.length > 0 ? participating : [...new Set(fallbackExterior)];
+    const holidayLights = [...holidayLightsRaw].sort(
+      (a, b) => Number(this._isLightOn(b)) - Number(this._isLightOn(a))
+    );
+    const holidayLightsOn = holidayLights.filter((id) => this._isLightOn(id)).length;
+    const anyHolidayLightOn = holidayLightsOn > 0;
+
+    const holidayDecorations = [
+      ...new Set(
+        [
+          ...(holidayInfo.participating_decorations || []),
+          ...(holidayInfo.active_decorations || []),
+        ].filter(Boolean)
+      ),
+    ];
+    const decorOnCount = holidayDecorations.filter(
+      (id) => this.hass?.states?.[id]?.state === "on"
+    ).length;
+
     const safeTheme = /^#[0-9a-f]{3,8}$/i.test(String(active?.theme_color || ""))
       ? active.theme_color
       : "#b45f06";
@@ -2151,13 +2457,15 @@ class PassableLightingCard extends LitElement {
                 style="background:${safeTheme}; border-color:${safeTheme}; color:#ffffff;"
               >
                 <div class="holiday-hero-text">
-                  <div class="holiday-hero-kicker">${active.name} · ${active.start_date} to ${active.end_date}</div>
+                  <div class="holiday-hero-kicker">
+                    ${active.name}${active.start_date && active.end_date ? ` · ${active.start_date} to ${active.end_date}` : ""}
+                  </div>
                   <div class="holiday-hero-phrase">${active.phrase || active.name}</div>
                   <div class="holiday-hero-meta">
-                    Mode: ${active.light_mode || "rgb"} · ${participating.length} participating light${participating.length === 1 ? "" : "s"}
+                    Mode: ${active.light_mode || "rgb"} · ${holidayLights.length} participating light${holidayLights.length === 1 ? "" : "s"}
                   </div>
                 </div>
-                ${participating.length > 0
+                ${holidayLights.length > 0
                   ? html`
                       <button
                         type="button"
@@ -2178,9 +2486,88 @@ class PassableLightingCard extends LitElement {
               </div>
             `}
 
+        ${holidayLights.length > 0
+          ? html`
+              <div class="passable-section-card">
+                <div class="passable-section-header">
+                  <span class="passable-section-title">
+                    ${active ? `${active.name} Lights` : "Holiday & Exterior Lights"}
+                  </span>
+                  <span class="zone-inline-chip neutral">${holidayLightsOn}/${holidayLights.length} on</span>
+                </div>
+                <div class="room-lights-list">
+                  ${holidayLights.map((lid) =>
+                    this._renderLightRow(lid, leafToRoom, leafGroupName, false)
+                  )}
+                </div>
+              </div>
+            `
+          : ""}
+
+        ${holidayDecorations.length > 0
+          ? html`
+              <div class="passable-section-card">
+                <div class="passable-section-header">
+                  <span class="passable-section-title">Holiday Decorations</span>
+                  <span class="zone-inline-chip neutral">${decorOnCount}/${holidayDecorations.length} on</span>
+                </div>
+                <div class="room-lights-list">
+                  ${holidayDecorations.map((eid) => {
+                    const isOn = this.hass?.states?.[eid]?.state === "on";
+                    const name = this._getEntityName(eid);
+                    return html`
+                      <div class="light-item-row ${isOn ? "lit" : ""}">
+                        <div class="light-item-left">
+                          <button
+                            type="button"
+                            class="bulb-toggle-btn ${isOn ? "lit" : ""}"
+                            @click=${(ev) => {
+                              ev.stopPropagation();
+                              this._toggleSubsystemEntity(eid);
+                            }}
+                            title="Toggle ${name}"
+                          >
+                            <ha-icon
+                              icon="${isOn ? "mdi:power-plug" : "mdi:power-plug-outline"}"
+                              style="--mdc-icon-size:15px;"
+                            ></ha-icon>
+                          </button>
+                          <div class="light-item-text">
+                            <div class="light-item-name-row">
+                              <button
+                                type="button"
+                                class="light-name-btn ${isOn ? "lit" : ""}"
+                                @click=${(ev) => this._showMoreInfo(eid, ev)}
+                                title="Open details for ${eid}"
+                              >
+                                ${name}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                        <div class="light-item-right">
+                          <button
+                            type="button"
+                            class="onoff-chip ${isOn ? "lit" : ""}"
+                            @click=${(ev) => {
+                              ev.stopPropagation();
+                              this._toggleSubsystemEntity(eid);
+                            }}
+                          >
+                            ${isOn ? "On" : "Off"}
+                          </button>
+                        </div>
+                      </div>
+                    `;
+                  })}
+                </div>
+              </div>
+            `
+          : ""}
+
         <div class="holiday-catalog-list">
           ${catalog.map((h) => {
-            const isSel = active && active.id === h.id;
+            const isSel = active && (active.id === h.id || active.name === h.name);
             const swatch = /^#[0-9a-f]{3,8}$/i.test(String(h.theme_color || ""))
               ? h.theme_color
               : "#b45f06";
@@ -2191,7 +2578,9 @@ class PassableLightingCard extends LitElement {
                   <div class="holiday-cat-text">
                     <div class="holiday-cat-name">
                       ${h.name}
-                      <span class="holiday-cat-dates">· ${h.start_date}–${h.end_date}</span>
+                      ${h.start_date && h.end_date
+                        ? html`<span class="holiday-cat-dates">· ${h.start_date}–${h.end_date}</span>`
+                        : ""}
                     </div>
                     <div class="holiday-cat-sub">${h.phrase || h.light_mode}</div>
                   </div>
@@ -2202,7 +2591,7 @@ class PassableLightingCard extends LitElement {
                     class="catalog-btn"
                     @click=${() =>
                       this._callEngineWS(
-                        { type: `${ENGINE_DOMAIN}/preview_holiday`, holiday_id: h.id, duration_sec: 60 },
+                        { type: `${ENGINE_DOMAIN}/preview_holiday`, holiday_id: h.id || h.name, duration_sec: 60 },
                         `Previewing ${h.name} (60s)`
                       )}
                   >
@@ -2213,7 +2602,7 @@ class PassableLightingCard extends LitElement {
                     class="catalog-btn ${isSel ? "primary" : ""}"
                     @click=${() =>
                       this._callEngineWS(
-                        { type: `${ENGINE_DOMAIN}/apply_holiday`, holiday_id: h.id },
+                        { type: `${ENGINE_DOMAIN}/apply_holiday`, holiday_id: h.id || h.name },
                         `Applied ${h.name}`
                       )}
                   >
@@ -2229,7 +2618,30 @@ class PassableLightingCard extends LitElement {
   }
 
   _renderModalAwayTab() {
-    const sim = this._wsData?.presence_simulation || {};
+    const simSensor =
+      this.hass?.states?.["sensor.passable_smart_light_engine_presence_simulation_presence_simulation_status"] ||
+      this.hass?.states?.["sensor.presence_simulation_status"];
+    const simAttrs = simSensor?.attributes || {};
+    const wsSim = this._wsData?.presence_simulation || {};
+    const sim = {
+      enabled: wsSim.enabled ?? simAttrs.simulation_enabled,
+      is_on: wsSim.is_on ?? simAttrs.is_active,
+      status: wsSim.status ?? (simSensor?.state !== "unknown" && simSensor?.state !== "unavailable" ? simSensor?.state : undefined),
+      mode: wsSim.mode ?? simAttrs.mode,
+      label: wsSim.label ?? simAttrs.label,
+      lookback_days: wsSim.lookback_days ?? simAttrs.lookback_days,
+      jitter_minutes: wsSim.jitter_minutes ?? simAttrs.jitter_minutes,
+      next_event: wsSim.next_event ?? simAttrs.next_event,
+      configured_lights:
+        Array.isArray(wsSim.configured_lights) && wsSim.configured_lights.length > 0
+          ? wsSim.configured_lights
+          : (Array.isArray(simAttrs.configured_lights) ? simAttrs.configured_lights : []),
+      active_simulated_lights:
+        Array.isArray(wsSim.active_simulated_lights) && wsSim.active_simulated_lights.length > 0
+          ? wsSim.active_simulated_lights
+          : (Array.isArray(simAttrs.active_simulated_lights) ? simAttrs.active_simulated_lights : []),
+    };
+
     const masterEnabled =
       this.hass?.states?.["switch.presence_simulation"]?.state === "on" || sim.enabled;
     const isActive =
@@ -2249,7 +2661,7 @@ class PassableLightingCard extends LitElement {
               <div class="away-hero-title">Presence Simulation: ${statusText}</div>
               <div class="away-hero-sub">
                 ${sim.next_event
-                  ? `Next event: ${sim.next_event.entity_id || ""} (${sim.next_event.time || ""})`
+                  ? this._formatNextEventText(sim.next_event)
                   : isActive
                     ? `${activeSimSet.size} simulated light${activeSimSet.size === 1 ? "" : "s"} active`
                     : "Standby until Home State switches to Away"}
@@ -2336,7 +2748,13 @@ class PassableLightingCard extends LitElement {
           if (ev.target === ev.currentTarget) this._closeModal();
         }}
       >
-        <div class="popup-content">
+        <div
+          class="popup-content"
+          @touchstart=${this._handlePopupTouchStart}
+          @touchmove=${this._handlePopupTouchMove}
+          @touchend=${this._handlePopupTouchEnd}
+          @touchcancel=${this._handlePopupTouchCancel}
+        >
           <div class="drag-handle"></div>
 
           <div class="popup-header">
@@ -2400,7 +2818,7 @@ class PassableLightingCard extends LitElement {
             : this._modalTab === "engine"
               ? this._renderModalEngineTab(metrics)
               : this._modalTab === "holiday"
-                ? this._renderModalHolidayTab()
+                ? this._renderModalHolidayTab(leafToRoom, leafGroupName)
                 : this._renderModalAwayTab()}
         </div>
       </div>
@@ -3351,6 +3769,9 @@ class PassableLightingCard extends LitElement {
         gap: 5px;
       }
       .footer-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
         padding: 2px 9px;
         border-radius: 999px;
         border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.22));
@@ -3453,6 +3874,7 @@ class PassableLightingCard extends LitElement {
         max-width: 520px;
         max-height: 90vh;
         overflow: hidden;
+        touch-action: pan-y;
         color: var(--primary-text-color);
         display: flex;
         flex-direction: column;
@@ -4099,6 +4521,8 @@ class PassableLightingCard extends LitElement {
           border-radius: 3px;
           margin: -4px auto 4px auto;
           flex-shrink: 0;
+          touch-action: none;
+          cursor: grab;
         }
         .light-kpi-grid {
           grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4295,7 +4719,7 @@ class PassableLightingCardEditor extends LitElement {
           <div class="switch-row">
             <label class="form-label">Show Active Holiday Banner</label>
             <ha-switch
-              .checked=${c.show_holiday_banner !== false}
+              .checked=${c.show_holiday_banner === true}
               @change=${(ev) => this._onFieldChange(ev, "show_holiday_banner")}
             ></ha-switch>
           </div>

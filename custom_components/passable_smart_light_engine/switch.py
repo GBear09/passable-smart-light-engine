@@ -37,6 +37,25 @@ async def async_setup_entry(
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
 
+    if entry.data.get("entry_type") == "system":
+        system_switches: list[SwitchEntity] = [
+            PassablePresenceSimulationMasterSwitch(hass, entry, engine),
+            PassablePresenceSimulationSwitch(hass, engine),
+        ]
+        holiday_coord = data.get("holiday_coordinator")
+        if holiday_coord:
+            master_sw = PassableHolidayLightingMasterSwitch(entry, holiday_coord)
+            decor_sw = PassableHolidayDecorationsSwitch(entry, holiday_coord)
+            exterior_sw = PassableExteriorLightingSwitch(entry, holiday_coord)
+            holiday_coord.register_entities(
+                master_switch=master_sw,
+                decor_switch=decor_sw,
+                exterior_switch=exterior_sw,
+            )
+            system_switches.extend([master_sw, decor_sw, exterior_sw])
+        async_add_entities(system_switches)
+        return
+
     if entry.data.get("entry_type") == "presence_simulation":
         async_add_entities(
             [

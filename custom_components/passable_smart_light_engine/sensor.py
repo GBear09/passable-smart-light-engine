@@ -66,6 +66,23 @@ async def async_setup_entry(
     data = hass.data[DOMAIN]
     engine: PassableLightingEngine = data["engine"]
 
+    if entry.data.get("entry_type") == "system":
+        system_entities: List[SensorEntity] = [
+            PassableLightingEngineReadySensor(hass, engine.store),
+            PassableLightingSummarySensor(hass, engine),
+            PassablePresenceSimulationStatusSensor(hass, engine),
+        ]
+        holiday_coord = data.get("holiday_coordinator")
+        if holiday_coord:
+            holiday_sensor = PassableActiveHolidaySensor(entry, holiday_coord)
+            holiday_coord.register_entities(sensor=holiday_sensor)
+            system_entities.append(holiday_sensor)
+        data["system_sensor_registered"] = True
+        data["system_simulation_sensor_registered"] = True
+        data["system_sensor_entry_id"] = entry.entry_id
+        async_add_entities(system_entities)
+        return
+
     if entry.data.get("entry_type") == "presence_simulation":
         if not data.get("system_simulation_sensor_registered"):
             async_add_entities([PassablePresenceSimulationStatusSensor(hass, engine)])
@@ -88,17 +105,6 @@ async def async_setup_entry(
         PassableLightingTargetLuxSensor(entry, controller, engine),
         PassableLightingActiveModeSensor(entry, controller, engine),
     ]
-
-    # Add the system-wide ready and summary sensors once if not already added
-    if not data.get("system_sensor_registered"):
-        entities.extend(
-            [
-                PassableLightingEngineReadySensor(hass, engine.store),
-                PassableLightingSummarySensor(hass, engine),
-            ]
-        )
-        data["system_sensor_registered"] = True
-        data["system_sensor_entry_id"] = entry.entry_id
 
     async_add_entities(entities)
 
@@ -324,6 +330,17 @@ class PassableLightingEngineReadySensor(SensorEntity):
         self.async_write_ha_state()
 
     @property
+    def device_info(self) -> DeviceInfo:
+        """Return system hub device info."""
+        return DeviceInfo(
+            identifiers={(DOMAIN, "system_hub")},
+            name="Passable Smart Light Engine",
+            manufacturer="Passable",
+            model="Smart Lighting Engine Hub",
+            sw_version="2.9.1",
+        )
+
+    @property
     def native_value(self) -> str:
         """Return engine state."""
         return "on"
@@ -361,7 +378,7 @@ class PassableLightingSummarySensor(SensorEntity):
             name="Passable Smart Light Engine",
             manufacturer="Passable",
             model="Smart Lighting Engine Hub",
-            sw_version="2.9.0",
+            sw_version="2.9.1",
         )
 
     async def async_added_to_hass(self) -> None:

@@ -342,6 +342,14 @@
           "power_grid_entity": "Power Grid Status Entity"
         }
       },
+      "system_menu": {
+        "title": "Passable Smart Light Engine — System Settings",
+        "description": "Choose a system subsystem to configure:",
+        "menu_options": {
+          "holiday_menu": "Holiday & Exterior Lighting",
+          "presence_simulation_options": "Presence Simulation"
+        }
+      },
       "presence_simulation_options": {
         "title": "Configure Presence Simulation",
         "description": "Configure house-wide presence simulation behavior, timers, and active targets.\n\n{lights_summary}",
