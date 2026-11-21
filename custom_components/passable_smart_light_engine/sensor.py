@@ -337,7 +337,7 @@ class PassableLightingEngineReadySensor(SensorEntity):
             name="Passable Smart Light Engine",
             manufacturer="Passable",
             model="Smart Lighting Engine Hub",
-            sw_version="2.9.3",
+            sw_version="2.9.4",
         )
 
     @property
@@ -378,7 +378,7 @@ class PassableLightingSummarySensor(SensorEntity):
             name="Passable Smart Light Engine",
             manufacturer="Passable",
             model="Smart Lighting Engine Hub",
-            sw_version="2.9.3",
+            sw_version="2.9.4",
         )
 
     async def async_added_to_hass(self) -> None:

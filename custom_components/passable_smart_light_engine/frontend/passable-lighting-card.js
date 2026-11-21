@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.9.3";
+const CARD_VERSION = "2.9.4";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -136,6 +136,13 @@ class PassableLightingCard extends LitElement {
     this._touchDragging = false;
     this._touchLockedHorizontal = false;
     this._swipeResetTimer = null;
+    this._scrollLockedElements = null;
+    this._scrollGuardOverlay = null;
+    this._guardTouchY = 0;
+    this._guardTouchX = 0;
+    this._onOverlayWheel = this._onOverlayWheel.bind(this);
+    this._onOverlayTouchStart = this._onOverlayTouchStart.bind(this);
+    this._onOverlayTouchMove = this._onOverlayTouchMove.bind(this);
     this._onKeyDown = (ev) => {
       if (ev.key === "Escape" && this._modalOpen) {
         this._closeModal();
@@ -189,6 +196,8 @@ class PassableLightingCard extends LitElement {
   disconnectedCallback() {
     super.disconnectedCallback();
     window.removeEventListener("keydown", this._onKeyDown);
+    this._detachOverlayScrollGuard();
+    this._unlockBackgroundScroll();
     this._unsubscribeEngine();
     clearInterval(this._countdownInterval);
     this._countdownInterval = null;
@@ -203,6 +212,11 @@ class PassableLightingCard extends LitElement {
     super.updated(changedProps);
     if (changedProps.has("hass") && this.hass && !this._wsUnsub && !this._wsSubscribing && !this._wsData) {
       this._subscribeEngine();
+    }
+    if (this._modalOpen) {
+      this._attachOverlayScrollGuard();
+    } else {
+      this._detachOverlayScrollGuard();
     }
   }
 
@@ -1156,8 +1170,10 @@ class PassableLightingCard extends LitElement {
     if (expandRoomId) {
       this._expandedEngineRoom = expandRoomId;
     }
+    clearTimeout(this._closeModalTimer);
     clearTimeout(this._swipeResetTimer);
     this._modalOpen = true;
+    this._lockBackgroundScroll();
     if (!this._wsUnsub && !this._wsSubscribing) {
       this._subscribeEngine();
     } else if (!this._wsData) {
@@ -1180,8 +1196,160 @@ class PassableLightingCard extends LitElement {
       this._showModalDimmer = false;
       this._expandedScenesEntity = null;
       this._confirmResetRoom = null;
+      this._detachOverlayScrollGuard();
+      this._unlockBackgroundScroll();
       this._syncCountdownTimer();
     }, 180);
+  }
+
+  _lockBackgroundScroll() {
+    if (this._scrollLockedElements) return;
+    const lockMap = (window.__passableScrollLocks = window.__passableScrollLocks || new Map());
+    const targets = new Set();
+    if (document.documentElement) targets.add(document.documentElement);
+    if (document.body) targets.add(document.body);
+    if (document.scrollingElement) targets.add(document.scrollingElement);
+
+    let node = this.parentNode;
+    while (node) {
+      if (node.nodeType === 1) {
+        const oy = window.getComputedStyle(node).overflowY;
+        if (oy === "auto" || oy === "scroll" || oy === "overlay" || node.id === "view") {
+          targets.add(node);
+        }
+      }
+      node = node.parentNode || node.host || null;
+    }
+
+    const locked = [];
+    targets.forEach((el) => {
+      let entry = lockMap.get(el);
+      if (!entry) {
+        entry = {
+          count: 0,
+          overflow: el.style.overflow,
+          overflowY: el.style.overflowY,
+          overscrollBehavior: el.style.overscrollBehavior,
+        };
+        lockMap.set(el, entry);
+      }
+      if (entry.count === 0) {
+        el.style.overflowY = "hidden";
+        el.style.overscrollBehavior = "none";
+      }
+      entry.count += 1;
+      locked.push(el);
+    });
+    this._scrollLockedElements = locked;
+  }
+
+  _unlockBackgroundScroll() {
+    if (!this._scrollLockedElements) return;
+    const lockMap = window.__passableScrollLocks;
+    this._scrollLockedElements.forEach((el) => {
+      const entry = lockMap && lockMap.get(el);
+      if (!entry) return;
+      entry.count -= 1;
+      if (entry.count <= 0) {
+        el.style.overflow = entry.overflow;
+        el.style.overflowY = entry.overflowY;
+        el.style.overscrollBehavior = entry.overscrollBehavior;
+        lockMap.delete(el);
+      }
+    });
+    this._scrollLockedElements = null;
+  }
+
+  _attachOverlayScrollGuard() {
+    const overlay = this.shadowRoot?.querySelector(".popup-overlay");
+    if (overlay === this._scrollGuardOverlay) return;
+    this._detachOverlayScrollGuard();
+    if (!overlay) return;
+    overlay.addEventListener("wheel", this._onOverlayWheel, { passive: false });
+    overlay.addEventListener("touchstart", this._onOverlayTouchStart, { passive: true });
+    overlay.addEventListener("touchmove", this._onOverlayTouchMove, { passive: false });
+    this._scrollGuardOverlay = overlay;
+  }
+
+  _detachOverlayScrollGuard() {
+    if (!this._scrollGuardOverlay) return;
+    this._scrollGuardOverlay.removeEventListener("wheel", this._onOverlayWheel);
+    this._scrollGuardOverlay.removeEventListener("touchstart", this._onOverlayTouchStart);
+    this._scrollGuardOverlay.removeEventListener("touchmove", this._onOverlayTouchMove);
+    this._scrollGuardOverlay = null;
+  }
+
+  _findModalScrollContainer(ev, overlay) {
+    const path = typeof ev.composedPath === "function" ? ev.composedPath() : [];
+    const contentEl = overlay ? overlay.querySelector(".popup-content") : null;
+    if (!contentEl || !path.includes(contentEl)) return null;
+    for (const el of path) {
+      if (el === overlay) break;
+      if (!el || el.nodeType !== 1 || !contentEl.contains(el)) continue;
+      const oy = window.getComputedStyle(el).overflowY;
+      if ((oy === "auto" || oy === "scroll" || oy === "overlay") && el.scrollHeight > el.clientHeight + 1) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  _isInteractiveDragTarget(ev) {
+    const path = typeof ev.composedPath === "function" ? ev.composedPath() : [];
+    return path.some((el) => {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.tagName === "HA-SLIDER" || el.tagName === "SELECT") return true;
+      if (el.tagName === "INPUT" && el.type === "range") return true;
+      return false;
+    });
+  }
+
+  _onOverlayWheel(ev) {
+    const overlay = this._scrollGuardOverlay;
+    const scroller = this._findModalScrollContainer(ev, overlay);
+    if (!scroller) {
+      if (ev.cancelable) ev.preventDefault();
+      return;
+    }
+    if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY) && scroller.scrollWidth > scroller.clientWidth + 1) {
+      return;
+    }
+    const atTop = scroller.scrollTop <= 0;
+    const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+    if ((ev.deltaY < 0 && atTop) || (ev.deltaY > 0 && atBottom)) {
+      if (ev.cancelable) ev.preventDefault();
+    }
+  }
+
+  _onOverlayTouchStart(ev) {
+    if (ev.touches && ev.touches.length === 1) {
+      this._guardTouchY = ev.touches[0].clientY;
+      this._guardTouchX = ev.touches[0].clientX;
+    }
+  }
+
+  _onOverlayTouchMove(ev) {
+    if (!ev.touches || ev.touches.length !== 1 || this._isInteractiveDragTarget(ev)) return;
+    const curY = ev.touches[0].clientY;
+    const curX = ev.touches[0].clientX;
+    const dy = curY - this._guardTouchY;
+    const dx = curX - this._guardTouchX;
+    this._guardTouchY = curY;
+    this._guardTouchX = curX;
+
+    if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 4) return;
+
+    const overlay = this._scrollGuardOverlay;
+    const scroller = this._findModalScrollContainer(ev, overlay);
+    if (!scroller) {
+      if (ev.cancelable) ev.preventDefault();
+      return;
+    }
+    const atTop = scroller.scrollTop <= 0;
+    const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+    if ((dy > 0 && atTop) || (dy < 0 && atBottom)) {
+      if (ev.cancelable) ev.preventDefault();
+    }
   }
 
   _handlePopupTouchStart(e) {
@@ -1282,6 +1450,8 @@ class PassableLightingCard extends LitElement {
         this._showModalDimmer = false;
         this._expandedScenesEntity = null;
         this._confirmResetRoom = null;
+        this._detachOverlayScrollGuard();
+        this._unlockBackgroundScroll();
         this._syncCountdownTimer();
       }, 180);
     } else if (wasDragging) {
@@ -4532,6 +4702,7 @@ class PassableLightingCard extends LitElement {
         align-items: center;
         padding: 16px;
         box-sizing: border-box;
+        overscroll-behavior: contain;
         z-index: 9999;
         animation: ha-popup-backdrop-fade-in 240ms cubic-bezier(0.2, 0, 0, 1) forwards;
       }
@@ -4546,6 +4717,7 @@ class PassableLightingCard extends LitElement {
         max-width: 520px;
         max-height: 90vh;
         overflow: hidden;
+        overscroll-behavior: contain;
         touch-action: pan-y;
         color: var(--primary-text-color);
         display: flex;
@@ -4707,6 +4879,9 @@ class PassableLightingCard extends LitElement {
 
       .modal-scroll-area {
         overflow-y: auto;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+        touch-action: pan-y;
         max-height: 55vh;
         display: flex;
         flex-direction: column;

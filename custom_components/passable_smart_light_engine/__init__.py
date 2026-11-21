@@ -115,9 +115,9 @@ def _get_integration_version() -> str:
     try:
         manifest_path = pathlib.Path(__file__).parent / "manifest.json"
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return str(data.get("version", "2.9.3"))
+        return str(data.get("version", "2.9.4"))
     except Exception:
-        return "2.9.3"
+        return "2.9.4"
 
 
 async def _async_register_lovelace_resource(
