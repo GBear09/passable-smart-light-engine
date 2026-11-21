@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.9.1";
+const CARD_VERSION = "2.9.2";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -67,7 +67,7 @@ class PassableLightingCard extends LitElement {
       master_light: "light.all_lights",
       show_summary_strip: true,
       show_holiday_banner: false,
-      show_master_dimmer: true,
+      show_master_dimmer: false,
       show_engine_footer: true,
       default_expanded_floor: "",
       stats_navigation_path: "",
@@ -88,6 +88,8 @@ class PassableLightingCard extends LitElement {
       _modalOpen: { state: true },
       _modalTab: { state: true },
       _modalFloorFilter: { state: true },
+      _showModalDimmer: { state: true },
+      _expandedScenesEntity: { state: true },
       _expandedEngineRoom: { state: true },
       _resetTargetByRoom: { state: true },
       _confirmResetRoom: { state: true },
@@ -111,6 +113,8 @@ class PassableLightingCard extends LitElement {
     this._modalOpen = false;
     this._modalTab = "lights";
     this._modalFloorFilter = "active";
+    this._showModalDimmer = false;
+    this._expandedScenesEntity = null;
     this._expandedEngineRoom = null;
     this._resetTargetByRoom = {};
     this._confirmResetRoom = null;
@@ -150,7 +154,7 @@ class PassableLightingCard extends LitElement {
       master_light: "light.all_lights",
       show_summary_strip: true,
       show_holiday_banner: false,
-      show_master_dimmer: true,
+      show_master_dimmer: false,
       show_engine_footer: true,
       default_expanded_floor: "",
       stats_navigation_path: "",
@@ -276,10 +280,10 @@ class PassableLightingCard extends LitElement {
       if (oldStates[id] !== newStates[id]) return true;
     }
 
-    // Also watch all light.* entities in HA so floor stats/leaf brightness stay live
+    // Also watch all light.* and scene.* entities so floor stats, brightness, and scenes stay live
     const checkKeys = (statesObj) => {
       for (const id of Object.keys(statesObj)) {
-        if (id.startsWith("light.") && oldStates[id] !== newStates[id]) {
+        if ((id.startsWith("light.") || id.startsWith("scene.")) && oldStates[id] !== newStates[id]) {
           return true;
         }
       }
@@ -740,6 +744,157 @@ class PassableLightingCard extends LitElement {
     return st?.attributes?.friendly_name || String(entityId || "").replace(/^[^.]+\./, "").replace(/_/g, " ");
   }
 
+  _normalizeSlug(str) {
+    return String(str || "")
+      .toLowerCase()
+      .replace(/['’]/g, "")
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
+  _formatEffectLabel(effect, withEmoji = true) {
+    const raw = String(effect || "").trim();
+    const key = raw.toLowerCase();
+    const map = {
+      candle: ["🕯️", "Candle"],
+      fire: ["🔥", "Fire"],
+      prism: ["🌈", "Prism"],
+      sparkle: ["✨", "Sparkle"],
+      opal: ["💎", "Opal"],
+      glisten: ["🌟", "Glisten"],
+      sunrise: ["🌅", "Sunrise"],
+      sunset: ["🌇", "Sunset"],
+      cosmos: ["🌌", "Cosmos"],
+      enchant: ["✨", "Enchant"],
+      sunbeam: ["☀️", "Sunbeam"],
+      underwater: ["🌊", "Underwater"],
+      "slow pulse": ["💓", "Slow Pulse"],
+      "fast pulse": ["⚡", "Fast Pulse"],
+    };
+    const entry = map[key];
+    if (entry) {
+      return withEmoji ? `${entry[0]} ${entry[1]}` : entry[1];
+    }
+    const label = raw
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (ch) => ch.toUpperCase());
+    return withEmoji ? `✨ ${label}` : label;
+  }
+
+  _getLightEffects(entityId) {
+    const rawList = this.hass?.states?.[entityId]?.attributes?.effect_list;
+    if (!Array.isArray(rawList) || rawList.length === 0) return [];
+    const seen = new Set();
+    const effects = [];
+    for (const item of rawList) {
+      if (typeof item !== "string") continue;
+      const clean = item.trim();
+      if (!clean || ["off", "none"].includes(clean.toLowerCase())) continue;
+      if (!seen.has(clean)) {
+        seen.add(clean);
+        effects.push(clean);
+      }
+    }
+    return effects;
+  }
+
+  _getLightEffectOffValue(entityId) {
+    const rawList = this.hass?.states?.[entityId]?.attributes?.effect_list;
+    if (Array.isArray(rawList)) {
+      const match = rawList.find(
+        (item) => typeof item === "string" && ["off", "none"].includes(item.trim().toLowerCase())
+      );
+      if (match) return match.trim();
+    }
+    return "off";
+  }
+
+  _getAreaNameForLight(entityId) {
+    const hierarchy = this._wsData?.ha_hierarchy;
+    if (!hierarchy || !entityId) return "";
+    for (const fl of hierarchy.floors || []) {
+      for (const area of fl.areas || []) {
+        if (Array.isArray(area.lights) && area.lights.includes(entityId)) {
+          return area.name || "";
+        }
+      }
+    }
+    for (const area of hierarchy.unassigned_areas || []) {
+      if (Array.isArray(area.lights) && area.lights.includes(entityId)) {
+        return area.name || "";
+      }
+    }
+    return "";
+  }
+
+  _getScenesForRoomOrLight(entityId, room = null, groupLabel = "") {
+    if (!this.hass?.states) return [];
+    const candidateSlugs = new Set();
+    const addCandidate = (raw) => {
+      const slug = this._normalizeSlug(raw);
+      if (slug && slug.length >= 2) {
+        candidateSlugs.add(slug);
+      }
+    };
+
+    if (room?.room_id) addCandidate(room.room_id);
+    if (room?.name) addCandidate(room.name);
+    if (groupLabel) {
+      addCandidate(groupLabel);
+      const glSlug = this._normalizeSlug(groupLabel);
+      if (glSlug && !glSlug.endsWith("_room") && !glSlug.endsWith("_bedroom")) {
+        candidateSlugs.add(`${glSlug}_room`);
+      }
+    }
+    const areaName = entityId ? this._getAreaNameForLight(entityId) : "";
+    if (areaName) addCandidate(areaName);
+
+    if (candidateSlugs.size === 0) return [];
+
+    const looseCandidates = new Set([...candidateSlugs].map((s) => s.replace(/_/g, "")));
+    const scenes = [];
+
+    for (const [sid, st] of Object.entries(this.hass.states)) {
+      if (!sid.startsWith("scene.") || !st) continue;
+      const attrs = st.attributes || {};
+      const groupSlug = this._normalizeSlug(attrs.group_name);
+      const sceneObjLoose = this._normalizeSlug(sid.replace(/^scene\./, "")).replace(/_/g, "");
+
+      let matched = false;
+      if (groupSlug && candidateSlugs.has(groupSlug)) {
+        matched = true;
+      } else {
+        for (const lc of looseCandidates) {
+          if (sceneObjLoose.startsWith(lc)) {
+            matched = true;
+            break;
+          }
+        }
+      }
+      if (!matched) continue;
+
+      const fullName = attrs.friendly_name || sid.replace(/^scene\./, "").replace(/_/g, " ");
+      let shortName = attrs.name ? String(attrs.name).trim() : "";
+      if (!shortName) {
+        const prefixText = attrs.group_name || areaName || room?.name || groupLabel || "";
+        if (prefixText && fullName.toLowerCase().startsWith(prefixText.toLowerCase())) {
+          shortName = fullName.slice(prefixText.length).replace(/^[\s\-:·]+/, "").trim();
+        }
+        if (!shortName) shortName = fullName;
+      }
+
+      scenes.push({
+        entityId: sid,
+        name: shortName,
+        fullName,
+        isDynamic: Boolean(attrs.is_dynamic),
+      });
+    }
+
+    scenes.sort((a, b) => a.name.localeCompare(b.name));
+    return scenes;
+  }
+
   _getFloorStats(floor, leafToRoom) {
     const total = floor.leaves.length;
     const active = floor.leaves.filter((id) => this._isLightOn(id));
@@ -932,6 +1087,56 @@ class PassableLightingCard extends LitElement {
     }
   }
 
+  _onScopeSliderInput(ev) {
+    const val = parseInt(ev.target.value, 10);
+    this._draggingSliders = { ...this._draggingSliders, __scope__: val };
+  }
+
+  _onScopeSliderChange(scopeLeaves, ev) {
+    const val = parseInt(ev.target.value, 10);
+    const next = { ...this._draggingSliders };
+    delete next.__scope__;
+    this._draggingSliders = next;
+
+    this._fireHaptic("light");
+    const activeLeaves = scopeLeaves.filter((id) => this._isLightOn(id));
+    if (activeLeaves.length === 0) return;
+    if (val <= 0) {
+      this.hass.callService("light", "turn_off", { entity_id: activeLeaves });
+    } else {
+      this.hass.callService("light", "turn_on", {
+        entity_id: activeLeaves,
+        brightness_pct: val,
+      });
+    }
+  }
+
+  _activateScene(sceneEntityId, ev = null) {
+    if (ev) ev.stopPropagation();
+    if (!this.hass || !sceneEntityId) return;
+    this._fireHaptic("medium");
+    const label = this._getEntityName(sceneEntityId);
+    this.hass.callService("scene", "turn_on", { entity_id: sceneEntityId });
+    this._showToast(`Activated ${label}`);
+  }
+
+  _setLightEffect(entityId, effectVal, ev = null) {
+    if (ev) ev.stopPropagation();
+    if (!this.hass || !entityId) return;
+    this._fireHaptic("light");
+    const offVal = this._getLightEffectOffValue(entityId);
+    const isOff = String(effectVal || "").toLowerCase() === offVal.toLowerCase();
+    this.hass.callService("light", "turn_on", {
+      entity_id: entityId,
+      effect: effectVal,
+    });
+    this._showToast(
+      isOff
+        ? `Cleared effect on ${this._getLightName(entityId)}`
+        : `${this._formatEffectLabel(effectVal, false)} on ${this._getLightName(entityId)}`
+    );
+  }
+
   _toggleDrawer(mode) {
     this._fireHaptic("light");
     this._drawerMode = this._drawerMode === mode ? null : mode;
@@ -972,6 +1177,8 @@ class PassableLightingCard extends LitElement {
     clearTimeout(this._closeModalTimer);
     this._closeModalTimer = setTimeout(() => {
       this._modalOpen = false;
+      this._showModalDimmer = false;
+      this._expandedScenesEntity = null;
       this._confirmResetRoom = null;
       this._syncCountdownTimer();
     }, 180);
@@ -1072,6 +1279,8 @@ class PassableLightingCard extends LitElement {
       clearTimeout(this._closeModalTimer);
       this._closeModalTimer = setTimeout(() => {
         this._modalOpen = false;
+        this._showModalDimmer = false;
+        this._expandedScenesEntity = null;
         this._confirmResetRoom = null;
         this._syncCountdownTimer();
       }, 180);
@@ -1465,7 +1674,7 @@ class PassableLightingCard extends LitElement {
   }
 
   _renderMasterDimmer(metrics, allLeaves) {
-    if (this.config?.show_master_dimmer === false) return "";
+    if (this.config?.show_master_dimmer !== true) return "";
     const anyOn = metrics.onLights > 0;
     return html`
       <div class="master-dimmer-row">
@@ -1660,6 +1869,15 @@ class PassableLightingCard extends LitElement {
     const name = this._getLightName(entityId);
     const room = leafToRoom[entityId];
     const isNotifClaimed = room?.notification_showing && room?.notification_light_entity === entityId;
+    const effects = this._getLightEffects(entityId);
+    const scenes = this._getScenesForRoomOrLight(entityId, room, leafGroupName[entityId]);
+    const hasScenesOrEffects = effects.length > 0 || scenes.length > 0;
+    const currentEffect = this.hass?.states?.[entityId]?.attributes?.effect;
+    const hasActiveEffect = Boolean(
+      currentEffect && !["off", "none"].includes(String(currentEffect).trim().toLowerCase())
+    );
+    const isScenesOpen = hasScenesOrEffects && this._expandedScenesEntity === entityId;
+    const offEffectVal = this._getLightEffectOffValue(entityId);
 
     const contextParts = [];
     if (showFloorContext && floorNameByLeaf[entityId]) {
@@ -1674,73 +1892,151 @@ class PassableLightingCard extends LitElement {
 
     return html`
       <div class="light-item-row ${isOn ? "lit" : ""}">
-        <div class="light-item-left">
-          <button
-            type="button"
-            class="bulb-toggle-btn ${isOn ? "lit" : ""}"
-            @click=${(ev) => this._toggleLight(entityId, ev)}
-            title="Toggle ${name}"
-          >
-            <ha-icon icon="${isOn ? "mdi:lightbulb" : "mdi:lightbulb-outline"}" style="--mdc-icon-size:15px;"></ha-icon>
-          </button>
-          <div class="light-item-text">
-            <div class="light-item-name-row">
-              <button
-                type="button"
-                class="light-name-btn ${isOn ? "lit" : ""}"
-                @click=${(ev) => this._showMoreInfo(entityId, ev)}
-                title="Open details & color controls for ${entityId}"
-              >
-                ${name}
-              </button>
-              ${isNotifClaimed
-                ? html`<span class="zone-inline-chip info">Notify</span>`
-                : ""}
-              ${room?.override_active
-                ? html`
-                    <button
-                      type="button"
-                      class="zone-inline-chip warning clickable"
-                      @click=${(ev) => this._clearOverride(room.room_id, ev)}
-                      title="Clear manual override for ${room.name}"
-                    >
-                      Override ${this._formatCountdown(this._getOverrideRemainingSec(room))} ✕
-                    </button>
-                  `
-                : ""}
+        <div class="light-item-main">
+          <div class="light-item-left">
+            <button
+              type="button"
+              class="bulb-toggle-btn ${isOn ? "lit" : ""}"
+              @click=${(ev) => this._toggleLight(entityId, ev)}
+              title="Toggle ${name}"
+            >
+              <ha-icon icon="${isOn ? "mdi:lightbulb" : "mdi:lightbulb-outline"}" style="--mdc-icon-size:15px;"></ha-icon>
+            </button>
+            <div class="light-item-text">
+              <div class="light-item-name-row">
+                <button
+                  type="button"
+                  class="light-name-btn ${isOn ? "lit" : ""}"
+                  @click=${(ev) => this._showMoreInfo(entityId, ev)}
+                  title="Open details & color controls for ${entityId}"
+                >
+                  ${name}
+                </button>
+                ${isNotifClaimed
+                  ? html`<span class="zone-inline-chip info">Notify</span>`
+                  : ""}
+                ${room?.override_active
+                  ? html`
+                      <button
+                        type="button"
+                        class="zone-inline-chip warning clickable"
+                        @click=${(ev) => this._clearOverride(room.room_id, ev)}
+                        title="Clear manual override for ${room.name}"
+                      >
+                        Override ${this._formatCountdown(this._getOverrideRemainingSec(room))} ✕
+                      </button>
+                    `
+                  : ""}
+                ${hasScenesOrEffects
+                  ? html`
+                      <button
+                        type="button"
+                        class="zone-inline-chip clickable ${hasActiveEffect ? "warning" : (isScenesOpen ? "info" : "neutral")}"
+                        @click=${(ev) => {
+                          ev.stopPropagation();
+                          this._fireHaptic("light");
+                          this._expandedScenesEntity = isScenesOpen ? null : entityId;
+                        }}
+                        title="Select Hue room scenes or bulb effects"
+                      >
+                        ${hasActiveEffect
+                          ? this._formatEffectLabel(currentEffect, true)
+                          : `✨ Scenes${isScenesOpen ? " ▴" : ""}`}
+                      </button>
+                    `
+                  : ""}
+              </div>
+              ${subText ? html`<div class="light-item-sub">${subText}</div>` : ""}
             </div>
-            ${subText ? html`<div class="light-item-sub">${subText}</div>` : ""}
+          </div>
+
+          <div class="light-item-right">
+            ${dimmable
+              ? html`
+                  <div class="slider-track small">
+                    <div class="slider-fill" style="width:${pct}%;"></div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      .value=${String(pct)}
+                      class="dimmer-range"
+                      aria-label="${name} brightness"
+                      @input=${(ev) => this._onLightSliderInput(entityId, ev)}
+                      @change=${(ev) => this._onLightSliderChange(entityId, ev)}
+                    />
+                  </div>
+                  <span class="light-pct-label ${isOn ? "lit" : ""}">${isOn ? `${pct}%` : "Off"}</span>
+                `
+              : html`
+                  <button
+                    type="button"
+                    class="onoff-chip ${isOn ? "lit" : ""}"
+                    @click=${(ev) => this._toggleLight(entityId, ev)}
+                  >
+                    ${isOn ? "On" : "Off"}
+                  </button>
+                `}
           </div>
         </div>
 
-        <div class="light-item-right">
-          ${dimmable
-            ? html`
-                <div class="slider-track small">
-                  <div class="slider-fill" style="width:${pct}%;"></div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    .value=${String(pct)}
-                    class="dimmer-range"
-                    aria-label="${name} brightness"
-                    @input=${(ev) => this._onLightSliderInput(entityId, ev)}
-                    @change=${(ev) => this._onLightSliderChange(entityId, ev)}
-                  />
-                </div>
-                <span class="light-pct-label ${isOn ? "lit" : ""}">${isOn ? `${pct}%` : "Off"}</span>
-              `
-            : html`
-                <button
-                  type="button"
-                  class="onoff-chip ${isOn ? "lit" : ""}"
-                  @click=${(ev) => this._toggleLight(entityId, ev)}
-                >
-                  ${isOn ? "On" : "Off"}
-                </button>
-              `}
-        </div>
+        ${isScenesOpen
+          ? html`
+              <div class="light-scenes-tray" @click=${(ev) => ev.stopPropagation()}>
+                ${scenes.length > 0
+                  ? html`
+                      <div class="scenes-tray-group">
+                        <span class="scenes-tray-label">Room Scenes</span>
+                        <div class="scenes-chip-row">
+                          ${scenes.map(
+                            (sc) => html`
+                              <button
+                                type="button"
+                                class="scene-chip"
+                                @click=${(ev) => this._activateScene(sc.entityId, ev)}
+                                title="Activate ${sc.fullName}"
+                              >
+                                ${sc.name}
+                              </button>
+                            `
+                          )}
+                        </div>
+                      </div>
+                    `
+                  : ""}
+                ${effects.length > 0
+                  ? html`
+                      <div class="scenes-tray-group">
+                        <span class="scenes-tray-label">Effects</span>
+                        <div class="scenes-chip-row">
+                          <button
+                            type="button"
+                            class="scene-chip ${!hasActiveEffect ? "active" : ""}"
+                            @click=${(ev) => this._setLightEffect(entityId, offEffectVal, ev)}
+                          >
+                            Off
+                          </button>
+                          ${effects.map((eff) => {
+                            const isEffActive =
+                              hasActiveEffect &&
+                              String(currentEffect).trim().toLowerCase() === eff.toLowerCase();
+                            return html`
+                              <button
+                                type="button"
+                                class="scene-chip ${isEffActive ? "active" : ""}"
+                                @click=${(ev) => this._setLightEffect(entityId, eff, ev)}
+                              >
+                                ${this._formatEffectLabel(eff, true)}
+                              </button>
+                            `;
+                          })}
+                        </div>
+                      </div>
+                    `
+                  : ""}
+              </div>
+            `
+          : ""}
       </div>
     `;
   }
@@ -1980,6 +2276,19 @@ class PassableLightingCard extends LitElement {
       ? allLeaves.filter((id) => this._isLightOn(id))
       : (targetFloor?.leaves || []);
 
+    const scopeActiveLeaves = sourceLeaves.filter((id) => this._isLightOn(id));
+    const scopeAnyOn = scopeActiveLeaves.length > 0;
+    const scopeAvgPct =
+      this._draggingSliders?.__scope__ !== undefined
+        ? this._draggingSliders.__scope__
+        : scopeAnyOn
+          ? Math.round(
+              scopeActiveLeaves.reduce((sum, id) => sum + this._getLightPct(id), 0) /
+                scopeActiveLeaves.length
+            )
+          : 0;
+    const scopeLabel = isActiveOnly ? "Master" : (targetFloor?.name || "Floor");
+
     // Group sourceLeaves into room buckets (engine rooms first, then manual sub-groups)
     const buckets = [];
     const bucketByKey = {};
@@ -2024,7 +2333,51 @@ class PassableLightingCard extends LitElement {
             </button>
           `
         )}
+        <button
+          type="button"
+          class="modal-filter-pill dimmer-toggle ${this._showModalDimmer ? "active-amber" : ""}"
+          @click=${() => {
+            this._fireHaptic("light");
+            this._showModalDimmer = !this._showModalDimmer;
+          }}
+          title="Show brightness dimmer scoped to currently selected lights"
+        >
+          <ha-icon icon="mdi:brightness-6" style="--mdc-icon-size:13px;"></ha-icon>
+          <span>${scopeLabel} Dimmer</span>
+        </button>
       </div>
+
+      ${this._showModalDimmer
+        ? html`
+            <div class="modal-scope-dimmer-card">
+              <div class="modal-scope-dimmer-header">
+                <span class="modal-scope-dimmer-title">${scopeLabel} Brightness</span>
+                <span class="modal-scope-dimmer-sub">
+                  ${scopeAnyOn
+                    ? `Adjusts ${scopeActiveLeaves.length} active light${scopeActiveLeaves.length === 1 ? "" : "s"}`
+                    : "No active lights in selection"}
+                </span>
+              </div>
+              <div class="master-dimmer-row">
+                <div class="slider-track">
+                  <div class="slider-fill master" style="width:${scopeAvgPct}%;"></div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    .value=${String(scopeAvgPct)}
+                    ?disabled=${!scopeAnyOn}
+                    class="dimmer-range"
+                    aria-label="${scopeLabel} brightness of active lights"
+                    @input=${this._onScopeSliderInput}
+                    @change=${(ev) => this._onScopeSliderChange(sourceLeaves, ev)}
+                  />
+                </div>
+                <span class="master-pct ${scopeAnyOn ? "lit" : ""}">${scopeAnyOn ? `${scopeAvgPct}%` : "Off"}</span>
+              </div>
+            </div>
+          `
+        : ""}
 
       <div class="modal-scroll-area thin-scroll">
         ${buckets.length > 0
@@ -2036,6 +2389,7 @@ class PassableLightingCard extends LitElement {
               const modeLabel = r
                 ? (MODE_LABELS[r.active_mode] || r.active_mode)
                 : "Manual";
+              const roomScenes = this._getScenesForRoomOrLight(b.lights[0], r, b.title);
               return html`
                 <div class="passable-section-card">
                   <div class="room-card-header">
@@ -2083,6 +2437,26 @@ class PassableLightingCard extends LitElement {
                         `
                       : ""}
                   </div>
+
+                  ${roomScenes.length > 0
+                    ? html`
+                        <div class="room-scenes-strip">
+                          <span class="scenes-strip-icon">✨</span>
+                          ${roomScenes.map(
+                            (sc) => html`
+                              <button
+                                type="button"
+                                class="scene-chip"
+                                @click=${(ev) => this._activateScene(sc.entityId, ev)}
+                                title="Activate ${sc.fullName}"
+                              >
+                                ${sc.name}
+                              </button>
+                            `
+                          )}
+                        </div>
+                      `
+                    : ""}
 
                   <div class="room-lights-list">
                     ${sortedLights.map((lid) =>
@@ -2517,45 +2891,47 @@ class PassableLightingCard extends LitElement {
                     const name = this._getEntityName(eid);
                     return html`
                       <div class="light-item-row ${isOn ? "lit" : ""}">
-                        <div class="light-item-left">
-                          <button
-                            type="button"
-                            class="bulb-toggle-btn ${isOn ? "lit" : ""}"
-                            @click=${(ev) => {
-                              ev.stopPropagation();
-                              this._toggleSubsystemEntity(eid);
-                            }}
-                            title="Toggle ${name}"
-                          >
-                            <ha-icon
-                              icon="${isOn ? "mdi:power-plug" : "mdi:power-plug-outline"}"
-                              style="--mdc-icon-size:15px;"
-                            ></ha-icon>
-                          </button>
-                          <div class="light-item-text">
-                            <div class="light-item-name-row">
-                              <button
-                                type="button"
-                                class="light-name-btn ${isOn ? "lit" : ""}"
-                                @click=${(ev) => this._showMoreInfo(eid, ev)}
-                                title="Open details for ${eid}"
-                              >
-                                ${name}
-                              </button>
+                        <div class="light-item-main">
+                          <div class="light-item-left">
+                            <button
+                              type="button"
+                              class="bulb-toggle-btn ${isOn ? "lit" : ""}"
+                              @click=${(ev) => {
+                                ev.stopPropagation();
+                                this._toggleSubsystemEntity(eid);
+                              }}
+                              title="Toggle ${name}"
+                            >
+                              <ha-icon
+                                icon="${isOn ? "mdi:power-plug" : "mdi:power-plug-outline"}"
+                                style="--mdc-icon-size:15px;"
+                              ></ha-icon>
+                            </button>
+                            <div class="light-item-text">
+                              <div class="light-item-name-row">
+                                <button
+                                  type="button"
+                                  class="light-name-btn ${isOn ? "lit" : ""}"
+                                  @click=${(ev) => this._showMoreInfo(eid, ev)}
+                                  title="Open details for ${eid}"
+                                >
+                                  ${name}
+                                </button>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                        <div class="light-item-right">
-                          <button
-                            type="button"
-                            class="onoff-chip ${isOn ? "lit" : ""}"
-                            @click=${(ev) => {
-                              ev.stopPropagation();
-                              this._toggleSubsystemEntity(eid);
-                            }}
-                          >
-                            ${isOn ? "On" : "Off"}
-                          </button>
+                          <div class="light-item-right">
+                            <button
+                              type="button"
+                              class="onoff-chip ${isOn ? "lit" : ""}"
+                              @click=${(ev) => {
+                                ev.stopPropagation();
+                                this._toggleSubsystemEntity(eid);
+                              }}
+                            >
+                              ${isOn ? "On" : "Off"}
+                            </button>
+                          </div>
                         </div>
                       </div>
                     `;
@@ -2951,7 +3327,7 @@ class PassableLightingCard extends LitElement {
         container-type: inline-size;
       }
       .card-content.no-header {
-        padding: 8px 10px;
+        padding: 10px;
       }
       .header + .card-content {
         padding-top: 0;
@@ -2964,8 +3340,8 @@ class PassableLightingCard extends LitElement {
         align-items: center;
         justify-content: space-between;
         gap: 6px 10px;
-        padding: 6px 10px;
-        border-radius: 10px;
+        padding: 7px 12px;
+        border-radius: max(12px, calc(var(--ha-card-border-radius, 20px) - 8px));
         min-height: 36px;
         background: var(--secondary-background-color, rgba(128, 128, 128, 0.10));
         border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.16));
@@ -3119,7 +3495,7 @@ class PassableLightingCard extends LitElement {
         justify-content: space-between;
         gap: 10px;
         padding: 7px 10px;
-        border-radius: 12px;
+        border-radius: max(12px, calc(var(--ha-card-border-radius, 20px) - 8px));
         border: 1.5px solid transparent;
         cursor: pointer;
         transition: all 0.2s ease;
@@ -3259,7 +3635,7 @@ class PassableLightingCard extends LitElement {
       .light-zone-card {
         position: relative;
         overflow: hidden;
-        border-radius: 12px;
+        border-radius: max(12px, calc(var(--ha-card-border-radius, 20px) - 8px));
         background: var(--secondary-background-color, rgba(128, 128, 128, 0.10));
         border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.14));
         cursor: pointer;
@@ -3642,9 +4018,8 @@ class PassableLightingCard extends LitElement {
       /* LEAF LIGHT ROW */
       .light-item-row {
         display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 8px;
+        flex-direction: column;
+        gap: 6px;
         padding: 6px 8px;
         border-radius: 10px;
         border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.16));
@@ -3653,6 +4028,13 @@ class PassableLightingCard extends LitElement {
       .light-item-row.lit {
         border-color: rgba(245, 158, 11, 0.36);
         background: rgba(245, 158, 11, 0.10);
+      }
+      .light-item-main {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        width: 100%;
       }
       .light-item-left {
         display: flex;
@@ -3751,6 +4133,78 @@ class PassableLightingCard extends LitElement {
         background: #f59e0b;
         border-color: #f59e0b;
         color: #ffffff;
+      }
+
+      /* HUE ROOM SCENES & BULB EFFECTS */
+      button.zone-inline-chip {
+        font-family: inherit;
+      }
+      .light-scenes-tray {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 8px 2px 2px;
+        border-top: 1px dashed var(--divider-color, rgba(128, 128, 128, 0.22));
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .scenes-tray-group {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .scenes-tray-label {
+        font-size: 0.68rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--secondary-text-color);
+      }
+      .scenes-chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .room-scenes-strip {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 5px;
+        padding: 6px 10px 8px;
+        border-bottom: 1px solid var(--divider-color, rgba(128, 128, 128, 0.14));
+        background: rgba(139, 92, 246, 0.05);
+      }
+      .scenes-strip-icon {
+        font-size: 0.78rem;
+        line-height: 1;
+        margin-right: 2px;
+      }
+      .scene-chip {
+        appearance: none;
+        font-family: inherit;
+        font-size: 0.72rem;
+        font-weight: 600;
+        padding: 4px 9px;
+        border-radius: 999px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.26));
+        background: var(--card-background-color, rgba(128, 128, 128, 0.08));
+        color: var(--primary-text-color);
+        cursor: pointer;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+      .scene-chip:hover {
+        border-color: rgba(139, 92, 246, 0.55);
+        background: rgba(139, 92, 246, 0.14);
+      }
+      .scene-chip:active {
+        transform: scale(0.96);
+      }
+      .scene-chip.active {
+        background: rgba(245, 158, 11, 0.18);
+        border-color: rgba(245, 158, 11, 0.65);
+        color: #f59e0b;
+        font-weight: 700;
       }
 
       /* FOOTER STRIP */
@@ -3993,6 +4447,44 @@ class PassableLightingCard extends LitElement {
         background: var(--primary-color, #3b82f6);
         border-color: var(--primary-color, #3b82f6);
         color: var(--text-primary-color, #ffffff);
+      }
+      .modal-filter-pill.dimmer-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        margin-left: auto;
+      }
+      .modal-filter-pill.active-amber {
+        background: rgba(245, 158, 11, 0.16);
+        border-color: rgba(245, 158, 11, 0.65);
+        color: #f59e0b;
+      }
+
+      .modal-scope-dimmer-card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        background: rgba(245, 158, 11, 0.08);
+        margin-bottom: 10px;
+      }
+      .modal-scope-dimmer-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .modal-scope-dimmer-title {
+        font-size: 0.78rem;
+        font-weight: 700;
+        color: var(--primary-text-color);
+      }
+      .modal-scope-dimmer-sub {
+        font-size: 0.72rem;
+        font-weight: 600;
+        color: var(--secondary-text-color);
       }
 
       .modal-scroll-area {
@@ -4725,9 +5217,9 @@ class PassableLightingCardEditor extends LitElement {
           </div>
 
           <div class="switch-row">
-            <label class="form-label">Show Master Dimmer</label>
+            <label class="form-label">Show Master Dimmer on Main Card</label>
             <ha-switch
-              .checked=${c.show_master_dimmer !== false}
+              .checked=${c.show_master_dimmer === true}
               @change=${(ev) => this._onFieldChange(ev, "show_master_dimmer")}
             ></ha-switch>
           </div>
