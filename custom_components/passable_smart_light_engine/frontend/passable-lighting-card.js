@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.9.2";
+const CARD_VERSION = "2.9.3";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -2213,54 +2213,272 @@ class PassableLightingCard extends LitElement {
     const curves = room.room_curves || {};
     const points = Object.entries(curves)
       .map(([pct, lux]) => [parseFloat(pct), parseFloat(lux)])
-      .filter(([pct, lux]) => !isNaN(pct) && !isNaN(lux))
+      .filter(([pct, lux]) => !isNaN(pct) && !isNaN(lux) && pct >= 0 && pct <= 100 && lux >= 0)
       .sort((a, b) => a[0] - b[0]);
 
-    const displayPts =
-      points.length >= 2
-        ? points
-        : [25, 50, 75, 100].map((pct) => [pct, Math.round(pct * (room.lux_yield || 0.2) * 10) / 10]);
+    const hasLearned = points.length >= 2;
+    const rawRatio = Number(room.lux_yield);
+    const defaultRatio = !isNaN(rawRatio) && rawRatio > 0 ? rawRatio : 0.2;
 
-    const maxLux = Math.max(20, ...displayPts.map(([, lux]) => lux)) * 1.12;
-    const coords = displayPts.map(([pct, lux]) => {
-      const x = 22 + (Math.max(0, Math.min(100, pct)) / 100) * 224;
-      const y = 62 - (lux / maxLux) * 44;
-      return { pct: Math.round(pct), lux: Math.round(lux * 10) / 10, x, y };
-    });
+    // Mirror engine.get_expected_lux linear interpolation/extrapolation across 0–100%
+    const expectedLuxAt = (pct) => {
+      if (!hasLearned) return Math.max(0, pct * defaultRatio);
+      if (pct <= points[0][0]) {
+        return points[0][0] === 0
+          ? points[0][1]
+          : Math.max(0, (points[0][1] / points[0][0]) * pct);
+      }
+      if (pct >= points[points.length - 1][0]) {
+        const [pLast, lLast] = points[points.length - 1];
+        const [pPrev, lPrev] = points[points.length - 2];
+        const slope =
+          pLast > pPrev ? Math.max(0.1, (lLast - lPrev) / (pLast - pPrev)) : defaultRatio;
+        return Math.max(0, lLast + slope * (pct - pLast));
+      }
+      for (let i = 0; i < points.length - 1; i++) {
+        const [p1, l1] = points[i];
+        const [p2, l2] = points[i + 1];
+        if (p1 <= pct && pct <= p2) {
+          if (p2 === p1) return l1;
+          return l1 + ((pct - p1) / (p2 - p1)) * (l2 - l1);
+        }
+      }
+      return points[points.length - 1][1];
+    };
 
-    const polylinePts = coords.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-    // Pick up to 5 evenly spaced labels so crowded curves remain readable
-    const labelStep = Math.max(1, Math.ceil(coords.length / 5));
+    const fullCurvePts = [];
+    if (hasLearned) {
+      if (points[0][0] > 0) fullCurvePts.push([0, expectedLuxAt(0)]);
+      for (const pt of points) fullCurvePts.push(pt);
+      if (points[points.length - 1][0] < 100) fullCurvePts.push([100, expectedLuxAt(100)]);
+    } else {
+      for (const pct of [0, 25, 50, 75, 100]) {
+        fullCurvePts.push([pct, expectedLuxAt(pct)]);
+      }
+    }
+
+    const peakLux = Math.max(1, ...fullCurvePts.map(([, l]) => l));
+    const rawStep = (peakLux * 1.15) / 4;
+    const niceSteps = [0.5, 1, 1.5, 2, 2.5, 5, 10, 15, 20, 25, 50, 75, 100, 150, 200, 250, 500];
+    const yStep = niceSteps.find((val) => val >= rawStep) ?? Math.ceil(rawStep / 100) * 100;
+    const yMax = yStep * 4;
+    const yTicks = [0, yStep, yStep * 2, yStep * 3, yMax];
+
+    const fmtLux = (v) => {
+      const rounded = Math.round(v * 10) / 10;
+      return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1).replace(/\.0$/, "");
+    };
+
+    const padLeft = 44;
+    const padRight = 16;
+    const padTop = 18;
+    const padBottom = 34;
+    const svgW = 380;
+    const svgH = 154;
+    const plotW = svgW - padLeft - padRight; // 320
+    const plotH = svgH - padTop - padBottom; // 102
+    const y0 = padTop + plotH; // 120
+
+    const toX = (pct) => padLeft + (Math.max(0, Math.min(100, pct)) / 100) * plotW;
+    const toY = (lux) => padTop + plotH - (Math.max(0, Math.min(yMax, lux)) / yMax) * plotH;
+
+    const fullCoords = fullCurvePts.map(([pct, lux]) => ({
+      pct: Math.round(pct),
+      lux: Math.round(lux * 10) / 10,
+      x: toX(pct),
+      y: toY(lux),
+    }));
+    const fullPolylinePts = fullCoords.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    const areaPath =
+      `M ${fullCoords[0].x.toFixed(1)} ${y0} ` +
+      fullCoords.map((p) => `L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ") +
+      ` L ${fullCoords[fullCoords.length - 1].x.toFixed(1)} ${y0} Z`;
+
+    const dotSource = hasLearned ? points : fullCurvePts.filter(([pct]) => pct > 0);
+    const measuredCoords = dotSource.map(([pct, lux]) => ({
+      pct: Math.round(pct),
+      lux: Math.round(lux * 10) / 10,
+      x: toX(pct),
+      y: toY(lux),
+    }));
+    const measuredPolylinePts = measuredCoords.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+
+    // Select non-overlapping callouts (>= 34px apart horizontally), always prioritizing endpoints
+    const selectedIndices = new Set();
+    const selectedXs = [];
+    if (measuredCoords.length > 0) {
+      const lastIdx = measuredCoords.length - 1;
+      selectedIndices.add(lastIdx);
+      selectedXs.push(measuredCoords[lastIdx].x);
+      if (lastIdx > 0 && Math.abs(measuredCoords[0].x - measuredCoords[lastIdx].x) >= 34) {
+        selectedIndices.add(0);
+        selectedXs.push(measuredCoords[0].x);
+      }
+      for (let i = 1; i < lastIdx; i++) {
+        const cx = measuredCoords[i].x;
+        if (selectedXs.every((sx) => Math.abs(cx - sx) >= 34)) {
+          selectedIndices.add(i);
+          selectedXs.push(cx);
+        }
+      }
+    }
+
+    const gradId = `yieldGrad-${String(room.room_id || "room").replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 
     return html`
       <div class="yield-chart-box">
-        <svg viewBox="0 0 268 80" class="yield-svg">
-          <line x1="20" y1="62" x2="250" y2="62" stroke="rgba(148,163,184,0.28)" stroke-width="1"></line>
-          <line x1="20" y1="36" x2="250" y2="36" stroke="rgba(148,163,184,0.16)" stroke-dasharray="3 3" stroke-width="1"></line>
+        <div class="yield-chart-header">
+          <div class="yield-chart-title">
+            <span>Calibration Curve</span>
+            <span class="zone-inline-chip neutral">
+              ${hasLearned ? `${points.length} pts` : "Estimated"}
+            </span>
+          </div>
+          <div class="yield-chart-legend">
+            ${hasLearned
+              ? html`
+                  <span class="yield-legend-item">
+                    <span class="yield-legend-dot"></span>Measured
+                  </span>
+                `
+              : ""}
+            <span class="yield-legend-item">
+              <span class="yield-legend-dash"></span>Interpolated
+            </span>
+          </div>
+        </div>
+
+        <svg viewBox="0 0 ${svgW} ${svgH}" class="yield-svg" role="img" aria-label="Calibration curve: dimmer brightness percentage versus measured lux">
+          <defs>
+            <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.28" />
+              <stop offset="100%" stop-color="#f59e0b" stop-opacity="0.02" />
+            </linearGradient>
+          </defs>
+
+          ${yTicks.map((val) => {
+            const y = toY(val);
+            const isZero = val === 0;
+            return svg`
+              <line
+                x1="${padLeft}"
+                y1="${y.toFixed(1)}"
+                x2="${padLeft + plotW}"
+                y2="${y.toFixed(1)}"
+                stroke="${isZero ? "rgba(148,163,184,0.32)" : "rgba(148,163,184,0.16)"}"
+                stroke-dasharray="${isZero ? "none" : "3 3"}"
+                stroke-width="1"
+              ></line>
+              <text
+                x="${padLeft - 6}"
+                y="${(y + 3.5).toFixed(1)}"
+                text-anchor="end"
+                fill="var(--secondary-text-color)"
+                font-size="9.5"
+              >${fmtLux(val)} lx</text>
+            `;
+          })}
+
+          ${[0, 25, 50, 75, 100].map((pct) => {
+            const x = toX(pct);
+            const isOrigin = pct === 0;
+            return svg`
+              <line
+                x1="${x.toFixed(1)}"
+                y1="${padTop}"
+                x2="${x.toFixed(1)}"
+                y2="${y0}"
+                stroke="${isOrigin ? "rgba(148,163,184,0.28)" : "rgba(148,163,184,0.13)"}"
+                stroke-dasharray="${isOrigin ? "none" : "3 3"}"
+                stroke-width="1"
+              ></line>
+              <text
+                x="${x.toFixed(1)}"
+                y="${y0 + 14}"
+                text-anchor="middle"
+                fill="var(--secondary-text-color)"
+                font-size="9.5"
+              >${pct}%</text>
+            `;
+          })}
+
+          <text
+            x="${padLeft + plotW / 2}"
+            y="${y0 + 29}"
+            text-anchor="middle"
+            fill="var(--secondary-text-color)"
+            font-size="9.5"
+            font-weight="600"
+          >Dimmer Brightness (%) → Measured Illuminance (lx)</text>
+
+          <path d="${areaPath}" fill="url(#${gradId})"></path>
+
           <polyline
             fill="none"
-            stroke="#f59e0b"
-            stroke-width="2.4"
+            stroke="rgba(245, 158, 11, 0.55)"
+            stroke-width="1.8"
+            stroke-dasharray="4 3"
             stroke-linecap="round"
             stroke-linejoin="round"
-            points="${polylinePts}"
+            points="${fullPolylinePts}"
           ></polyline>
-          ${coords.map((p, idx) => {
-            const showLabel = idx === coords.length - 1 || idx % labelStep === 0;
+
+          ${hasLearned
+            ? svg`
+                <polyline
+                  fill="none"
+                  stroke="#f59e0b"
+                  stroke-width="2.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  points="${measuredPolylinePts}"
+                ></polyline>
+              `
+            : ""}
+
+          ${measuredCoords.map((p, idx) => {
+            const showCallout = selectedIndices.has(idx);
+            const labelX = Math.max(padLeft + 14, Math.min(padLeft + plotW - 14, p.x));
             return svg`
-              <circle cx="${p.x}" cy="${p.y}" r="3.2" fill="#f59e0b" stroke="var(--ha-card-background, #1c1c1e)" stroke-width="1.5"></circle>
-              ${showLabel
+              <circle
+                cx="${p.x.toFixed(1)}"
+                cy="${p.y.toFixed(1)}"
+                r="${hasLearned ? "3.4" : "2.8"}"
+                fill="${hasLearned ? "#f59e0b" : "var(--ha-card-background, #1c1c1e)"}"
+                stroke="${hasLearned ? "var(--ha-card-background, #1c1c1e)" : "#f59e0b"}"
+                stroke-width="1.6"
+              ></circle>
+              ${showCallout
                 ? svg`
-                    <text x="${p.x}" y="${Math.max(12, p.y - 7)}" text-anchor="middle" fill="var(--primary-text-color)" font-size="11" font-weight="700">${p.lux}</text>
-                    <text x="${p.x}" y="76" text-anchor="middle" fill="var(--secondary-text-color)" font-size="11">${p.pct}%</text>
+                    <text
+                      x="${labelX.toFixed(1)}"
+                      y="${Math.max(12, p.y - 7).toFixed(1)}"
+                      text-anchor="middle"
+                      fill="var(--primary-text-color)"
+                      font-size="9.5"
+                      font-weight="700"
+                    >${fmtLux(p.lux)} lx</text>
                   `
                 : ""}
             `;
           })}
         </svg>
-        ${points.length < 2
-          ? html`<div class="yield-fallback-note">Estimated from default lux ratio (${room.lux_yield} lx/%)</div>`
-          : ""}
+
+        ${hasLearned
+          ? html`
+              <div class="yield-points-strip">
+                ${points.map(
+                  ([pct, lux]) => html`
+                    <span class="yield-point-pill">${Math.round(pct)}% → ${fmtLux(lux)} lx</span>
+                  `
+                )}
+              </div>
+            `
+          : html`
+              <div class="yield-fallback-note">
+                Estimated from default lux ratio (${room.lux_yield} lx/%) — tap Calibrate Curve to measure
+              </div>
+            `}
       </div>
     `;
   }
@@ -4716,18 +4934,79 @@ class PassableLightingCard extends LitElement {
         gap: 4px;
       }
       .yield-chart-box {
-        border-radius: 10px;
+        border-radius: 12px;
         border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.16));
         background: var(--secondary-background-color, rgba(128, 128, 128, 0.08));
-        padding: 6px 8px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .yield-chart-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .yield-chart-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.78rem;
+        font-weight: 700;
+        color: var(--primary-text-color);
+      }
+      .yield-chart-legend {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: var(--secondary-text-color);
+      }
+      .yield-legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .yield-legend-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: #f59e0b;
+        display: inline-block;
+      }
+      .yield-legend-dash {
+        width: 12px;
+        height: 0;
+        border-top: 2px dashed rgba(245, 158, 11, 0.7);
+        display: inline-block;
       }
       .yield-svg {
         width: 100%;
-        height: 76px;
+        height: auto;
+        aspect-ratio: 380 / 154;
         display: block;
       }
+      .yield-points-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        padding-top: 2px;
+      }
+      .yield-point-pill {
+        font-size: 0.68rem;
+        font-weight: 600;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: var(--card-background-color, rgba(128, 128, 128, 0.12));
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.18));
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+      }
       .yield-fallback-note {
-        font-size: 12px;
+        font-size: 0.72rem;
         color: var(--secondary-text-color);
         text-align: center;
         margin-top: 2px;
