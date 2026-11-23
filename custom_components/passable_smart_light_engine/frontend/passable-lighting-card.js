@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.10.1";
+const CARD_VERSION = "2.10.2";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -90,6 +90,21 @@ const STATS_USAGE_MODE_ORDER = [
   "holiday",
   "presence_simulation",
   "secondary_active",
+];
+
+const STATS_INSPECTOR_MODE_ORDER = [
+  "occupied",
+  "manual_override",
+  "media",
+  "late_night",
+  "secondary_active",
+  "holiday",
+  "presence_simulation",
+  "notification",
+  "frozen",
+  "disabled",
+  "forced_off",
+  "vacant",
 ];
 
 class PassableLightingCard extends LitElement {
@@ -4291,7 +4306,15 @@ class PassableLightingCard extends LitElement {
     const luxLines = room.has_lux_sensor
       ? this._buildSegmentedPolylines(room.lux_series || [], timestamps, toTimeX, toLuxY)
       : { polylines: [], points: [] };
-    const tgtLines = room.has_lux_sensor
+
+    const modeSegments = Array.isArray(room.mode_segments) ? room.mode_segments : [];
+    const mediaSegs = modeSegments.filter((s) => s.mode === "media");
+    const lateNightSegs = modeSegments.filter((s) => s.mode === "late_night");
+    const activeTgtLuxSeries = (room.target_lux_series || []).map((val, idx) => {
+      const m = this._getModeAtTimestamp(modeSegments, timestamps[idx], room.active_mode);
+      return m === "media" || m === "late_night" ? null : val;
+    });
+    const tgtLinesDim = room.has_lux_sensor
       ? this._buildSegmentedPolylines(
           room.target_lux_series || [],
           timestamps,
@@ -4299,6 +4322,25 @@ class PassableLightingCard extends LitElement {
           toLuxY
         )
       : { polylines: [], points: [] };
+    const tgtLinesActive = room.has_lux_sensor
+      ? this._buildSegmentedPolylines(
+          activeTgtLuxSeries,
+          timestamps,
+          toTimeX,
+          toLuxY
+        )
+      : { polylines: [], points: [] };
+
+    const seenModes = new Set(
+      modeSegments.map((s) => String(s.mode || "").toLowerCase()).filter(Boolean)
+    );
+    if (seenModes.size === 0) {
+      seenModes.add(String(room.active_mode || "vacant").toLowerCase());
+    }
+    const presentModes = [
+      ...STATS_INSPECTOR_MODE_ORDER.filter((m) => seenModes.has(m)),
+      ...[...seenModes].filter((m) => !STATS_INSPECTOR_MODE_ORDER.includes(m)),
+    ];
 
     const hoverIdx = this._statsHoverIdx?.inspector;
     const hasHover =
@@ -4375,26 +4417,53 @@ class PassableLightingCard extends LitElement {
                         <span class="stats-legend-dot" style="background:#10b981;"></span>
                         Lux: <strong>${hoverLux != null ? `${hoverLux} lx` : "--"}</strong>
                       </span>
-                      <span class="stats-scrub-item">
-                        <span class="stats-legend-dot" style="background:#38bdf8;"></span>
-                        Target: <strong>${hoverTgt != null ? `${hoverTgt} lx` : "--"}</strong>
-                      </span>
                     `
                   : ""}
+                ${hoverMode === "media" && room.media_target_pct != null
+                  ? html`
+                      <span class="stats-scrub-item">
+                        <span class="stats-legend-dot" style="background:#a855f7;"></span>
+                        Media Target: <strong>${room.media_target_pct}%</strong>
+                      </span>
+                    `
+                  : hoverMode === "late_night" && room.late_night_target_pct != null
+                    ? html`
+                        <span class="stats-scrub-item">
+                          <span class="stats-legend-dot" style="background:#6366f1;"></span>
+                          Night Target: <strong>${room.late_night_target_pct}%</strong>
+                        </span>
+                      `
+                    : room.has_lux_sensor
+                      ? html`
+                          <span class="stats-scrub-item">
+                            <span class="stats-legend-dot" style="background:#38bdf8;"></span>
+                            Target: <strong>${hoverTgt != null ? `${hoverTgt} lx` : "--"}</strong>
+                          </span>
+                        `
+                      : ""}
                 <span class="stats-scrub-item">
                   <span class="stats-legend-dot" style="background:#f59e0b;"></span>
-                  Dim: <strong>${hoverPct}%</strong>
+                  ${room.brightness_source === "estimated" ? "On:" : "Dim:"}
+                  <strong>${hoverPct}%</strong>
                 </span>
                 <span class="stats-scrub-item">
+                  <span
+                    class="stats-legend-dot"
+                    style="background:${this._getStatsModeColor(hoverMode)};${hoverMode === "vacant" ? " border:1px solid rgba(148,163,184,0.55);" : ""}"
+                  ></span>
                   Mode: <strong>${this._getStatsModeLabel(hoverMode)}</strong>
                 </span>
               `
             : html`
                 <span class="stats-scrub-hint">Hover or drag chart to inspect</span>
                 <span class="stats-scrub-summary">
-                  ${room.has_lux_sensor
-                    ? `Live: ${room.ambient_lux ?? "--"} lx • Target: ${room.blended_target_lux} lx`
-                    : "No lux sensor — showing brightness & mode"}
+                  ${room.active_mode === "media" && room.media_target_pct != null
+                    ? `Media Target: ${room.media_target_pct}%${room.has_lux_sensor ? ` • Live: ${room.ambient_lux ?? "--"} lx` : ""}`
+                    : room.active_mode === "late_night" && room.late_night_target_pct != null
+                      ? `Night Target: ${room.late_night_target_pct}%${room.has_lux_sensor ? ` • Live: ${room.ambient_lux ?? "--"} lx` : ""}`
+                      : room.has_lux_sensor
+                        ? `Live: ${room.ambient_lux ?? "--"} lx • Target: ${room.blended_target_lux} lx`
+                        : "No lux sensor — showing brightness & mode"}
                 </span>
               `}
         </div>
@@ -4497,7 +4566,21 @@ class PassableLightingCard extends LitElement {
             `
           )}
 
-          ${tgtLines.polylines.map(
+          ${tgtLinesDim.polylines.map(
+            (pts) => svg`
+              <polyline
+                fill="none"
+                stroke="#38bdf8"
+                stroke-opacity="0.24"
+                stroke-width="1.4"
+                stroke-dasharray="5 3"
+                stroke-linejoin="round"
+                points="${pts}"
+              ></polyline>
+            `
+          )}
+
+          ${tgtLinesActive.polylines.map(
             (pts) => svg`
               <polyline
                 fill="none"
@@ -4509,6 +4592,46 @@ class PassableLightingCard extends LitElement {
               ></polyline>
             `
           )}
+
+          ${room.media_target_pct != null
+            ? mediaSegs.map((seg) => {
+                const x1 = toTimeX(Math.max(startMs, seg.start_ms));
+                const x2 = toTimeX(Math.min(endMs, seg.end_ms));
+                if (x2 - x1 < 1.5) return "";
+                const y = toPctY(room.media_target_pct);
+                return svg`
+                  <line
+                    x1="${x1.toFixed(1)}"
+                    y1="${y.toFixed(1)}"
+                    x2="${x2.toFixed(1)}"
+                    y2="${y.toFixed(1)}"
+                    stroke="#a855f7"
+                    stroke-width="1.8"
+                    stroke-dasharray="4 3"
+                  ></line>
+                `;
+              })
+            : ""}
+
+          ${room.late_night_target_pct != null
+            ? lateNightSegs.map((seg) => {
+                const x1 = toTimeX(Math.max(startMs, seg.start_ms));
+                const x2 = toTimeX(Math.min(endMs, seg.end_ms));
+                if (x2 - x1 < 1.5) return "";
+                const y = toPctY(room.late_night_target_pct);
+                return svg`
+                  <line
+                    x1="${x1.toFixed(1)}"
+                    y1="${y.toFixed(1)}"
+                    x2="${x2.toFixed(1)}"
+                    y2="${y.toFixed(1)}"
+                    stroke="#6366f1"
+                    stroke-width="1.8"
+                    stroke-dasharray="4 3"
+                  ></line>
+                `;
+              })
+            : ""}
 
           ${luxLines.polylines.map(
             (pts) => svg`
@@ -4580,18 +4703,40 @@ class PassableLightingCard extends LitElement {
                       ></circle>
                     `
                   : ""}
-                ${room.has_lux_sensor && hoverTgt != null
+                ${hoverMode === "media" && room.media_target_pct != null
                   ? svg`
                       <circle
                         cx="${hoverX.toFixed(1)}"
-                        cy="${toLuxY(hoverTgt).toFixed(1)}"
+                        cy="${toPctY(room.media_target_pct).toFixed(1)}"
                         r="3.2"
-                        fill="#38bdf8"
+                        fill="#a855f7"
                         stroke="#ffffff"
                         stroke-width="1.3"
                       ></circle>
                     `
-                  : ""}
+                  : hoverMode === "late_night" && room.late_night_target_pct != null
+                    ? svg`
+                        <circle
+                          cx="${hoverX.toFixed(1)}"
+                          cy="${toPctY(room.late_night_target_pct).toFixed(1)}"
+                          r="3.2"
+                          fill="#6366f1"
+                          stroke="#ffffff"
+                          stroke-width="1.3"
+                        ></circle>
+                      `
+                    : room.has_lux_sensor && hoverTgt != null
+                      ? svg`
+                          <circle
+                            cx="${hoverX.toFixed(1)}"
+                            cy="${toLuxY(hoverTgt).toFixed(1)}"
+                            r="3.2"
+                            fill="#38bdf8"
+                            stroke="#ffffff"
+                            stroke-width="1.3"
+                          ></circle>
+                        `
+                      : ""}
                 ${room.has_lux_sensor && hoverLux != null
                   ? svg`
                       <circle
@@ -4620,11 +4765,44 @@ class PassableLightingCard extends LitElement {
               `
             : ""}
           <span class="stats-legend-item">
-            <span class="stats-legend-dot" style="background:#f59e0b;"></span>Brightness %
+            <span class="stats-legend-dot" style="background:#f59e0b;"></span>${room.brightness_source === "estimated" ? "Light On % (est.)" : "Brightness %"}
           </span>
+          ${mediaSegs.length > 0 && room.media_target_pct != null
+            ? html`
+                <span class="stats-legend-item">
+                  <span class="stats-legend-dash" style="border-color:#a855f7;"></span>Media Target (${room.media_target_pct}%)
+                </span>
+              `
+            : ""}
+          ${lateNightSegs.length > 0 && room.late_night_target_pct != null
+            ? html`
+                <span class="stats-legend-item">
+                  <span class="stats-legend-dash" style="border-color:#6366f1;"></span>Night Target (${room.late_night_target_pct}%)
+                </span>
+              `
+            : ""}
           <span class="stats-legend-item">
-            <span class="stats-legend-dot" style="background:rgba(99,102,241,0.55);"></span>Night
+            <span class="stats-legend-swatch" style="background:rgba(99,102,241,0.22); border:1px solid rgba(99,102,241,0.45);"></span>Night Shade
           </span>
+        </div>
+
+        <div class="stats-legend-row stats-mode-legend">
+          <span class="stats-legend-prefix">Mode</span>
+          ${presentModes.map((m) => {
+            const hrs = Number(room.mode_hours?.[m] || 0);
+            return html`
+              <span class="stats-legend-item">
+                <span
+                  class="stats-legend-swatch ${m === "vacant" ? "vacant" : ""}"
+                  style="background:${this._getStatsModeColor(m)};"
+                ></span>
+                <span>${this._getStatsModeLabel(m)}</span>
+                ${hrs > 0
+                  ? html`<span class="stats-legend-dur">${this._formatHoursShort(hrs)}</span>`
+                  : ""}
+              </span>
+            `;
+          })}
         </div>
 
         <div class="stats-mini-metrics">
@@ -4653,6 +4831,28 @@ class PassableLightingCard extends LitElement {
             </span>
           </div>
         </div>
+
+        ${Array.isArray(room.fixtures) && room.fixtures.length > 1
+          ? html`
+              <div class="stats-fixtures-strip">
+                <span class="stats-fixtures-label">Fixtures</span>
+                <div class="stats-fixtures-chips">
+                  ${room.fixtures.map(
+                    (f) => html`
+                      <span class="stats-fixture-chip" title="${f.entity_id}">
+                        <span class="away-light-dot ${f.is_on ? "lit" : ""}"></span>
+                        <span class="stats-fixture-name">${f.name}</span>
+                        ${f.role === "secondary"
+                          ? html`<span class="stats-fixture-role">Aux</span>`
+                          : ""}
+                        <span class="stats-fixture-hrs">${this._formatHoursShort(f.lit_hours)}</span>
+                      </span>
+                    `
+                  )}
+                </div>
+              </div>
+            `
+          : ""}
       </div>
 
       ${this._renderSunPrefsSvg(room, data.current_sun_elev)}
@@ -7669,6 +7869,80 @@ class PassableLightingCard extends LitElement {
         border-top: 2px dashed;
         display: inline-block;
         flex-shrink: 0;
+      }
+      .stats-mode-legend {
+        padding-top: 2px;
+        gap: 6px 10px;
+      }
+      .stats-legend-prefix {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--secondary-text-color);
+        opacity: 0.8;
+      }
+      .stats-legend-swatch {
+        width: 9px;
+        height: 9px;
+        border-radius: 3px;
+        display: inline-block;
+        flex-shrink: 0;
+      }
+      .stats-legend-swatch.vacant {
+        border: 1px solid rgba(148, 163, 184, 0.45);
+      }
+      .stats-legend-dur {
+        font-size: 10.5px;
+        opacity: 0.75;
+        font-variant-numeric: tabular-nums;
+      }
+      .stats-fixtures-strip {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        padding-top: 4px;
+        border-top: 1px solid var(--divider-color, rgba(128, 128, 128, 0.14));
+      }
+      .stats-fixtures-label {
+        font-size: 10.5px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--secondary-text-color);
+      }
+      .stats-fixtures-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .stats-fixture-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--card-background-color, rgba(128, 128, 128, 0.08));
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.16));
+        font-size: 11px;
+        color: var(--primary-text-color);
+      }
+      .stats-fixture-name {
+        font-weight: 600;
+      }
+      .stats-fixture-role {
+        font-size: 9.5px;
+        font-weight: 700;
+        text-transform: uppercase;
+        padding: 0 5px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.16);
+        color: var(--secondary-text-color);
+      }
+      .stats-fixture-hrs {
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
       }
       .stats-mini-metrics {
         display: grid;

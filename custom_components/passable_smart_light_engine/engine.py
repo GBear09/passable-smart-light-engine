@@ -23,6 +23,7 @@ from .const import (
     CONF_BYPASS_FREEZE_ENTITIES,
     CONF_BYPASS_OFF_ENTITIES,
     CONF_CIRCADIAN_ENABLED,
+    CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
     CONF_LIGHT_ENTITY,
     CONF_LUX_SENSOR,
     CONF_MANUAL_OVERRIDE_ENTITY,
@@ -97,7 +98,9 @@ from .const import (
     OVERRIDE_FADE_TRANSITION_SEC,
     SENSOR_DEBOUNCE_SEC,
     SEVERE_LUX_DEFICIT_THRESHOLD,
+    STAGGERED_TURN_ON_WINDOW_SEC,
     STARTUP_SETTLE_SEC,
+    TURN_ON_SETTLE_DEBOUNCE_SEC,
 )
 from .storage import LearningDataStore
 
@@ -132,6 +135,53 @@ def get_light_members(hass: HomeAssistant, light_entity: str) -> List[str]:
                 expanded.extend(get_light_members(hass, m))
         return expanded if expanded else [light_entity]
     return [light_entity]
+
+
+def compute_room_effective_brightness_pct(
+    hass: HomeAssistant, light_entity: Optional[str]
+) -> int:
+    """Compute effective room brightness (0-100%) across available primary leaf fixtures."""
+    if not light_entity:
+        return 0
+
+    def _state_pct(st: Optional[State]) -> Optional[int]:
+        if not st or st.state in ("unavailable", "unknown", "none"):
+            return None
+        if st.state != "on":
+            return 0
+        raw_b = st.attributes.get("brightness")
+        if raw_b is not None:
+            try:
+                return max(1, min(100, int(round((float(raw_b) / 255.0) * 100.0))))
+            except (ValueError, TypeError):
+                pass
+        raw_bp = st.attributes.get("brightness_pct")
+        if raw_bp is not None:
+            try:
+                return max(1, min(100, int(round(float(raw_bp)))))
+            except (ValueError, TypeError):
+                pass
+        return 100
+
+    members = get_light_members(hass, light_entity)
+    pcts: List[int] = []
+    any_on = False
+    for member in members:
+        pct = _state_pct(hass.states.get(member))
+        if pct is None:
+            continue
+        pcts.append(pct)
+        if pct > 0:
+            any_on = True
+
+    if pcts:
+        avg = int(round(sum(pcts) / len(pcts)))
+        if any_on and avg == 0:
+            return 1
+        return max(0, min(100, avg))
+
+    fallback = _state_pct(hass.states.get(light_entity))
+    return fallback if fallback is not None else 0
 
 
 def get_circadian_temp(
@@ -1629,6 +1679,7 @@ class PassableLightingEngine:
                 and abs(current_pct - from_pct) >= BRIGHTNESS_HYSTERESIS_PCT
             )
             is_color_change = bool(p.get("trigger_color_changed", False)) and from_st == "on" and is_light_on
+            within_turn_on_window = bool(p.get("trigger_within_turn_on_window", False))
 
             # If not UI, not physical toggle from off, not physical dimmer/color adjustment, and not turned off: ignore
             if not (is_user_ui or is_physical_turn_on or is_physical_dim or is_color_change or not is_light_on):
@@ -1643,16 +1694,23 @@ class PassableLightingEngine:
             # Genuine manual action detected
             is_manual_action = True
 
-            # If turning on to 100% from OFF:
+            # If turning on to 100% from OFF (or settling across staggered multi-dimmer reports):
             # Check the "Ignore Max Brightness Override" setting.
             # When enabled (default: True), turning on to 100% from off is treated as a normal turn-on
             # and MUST NOT engage manual override or lockout.
             # When disabled (False), turning on to 100% from off locks manual override.
-            if current_pct >= 95 and from_st == "off":
+            is_staggered_max_settle = (
+                within_turn_on_window
+                and ignore_max_override
+                and not is_user_ui
+            )
+            if current_pct >= 95 and (from_st == "off" or is_staggered_max_settle):
                 if ignore_max_override:
                     _LOGGER.info(
-                        "PassableSmartLighting [%s]: Light turned on to 100%% from off; ignoring manual override as configured.",
+                        "PassableSmartLighting [%s]: Light turned on to %s%% (%s); ignoring manual override as configured.",
                         room_id,
+                        current_pct,
+                        "from off" if from_st == "off" else "staggered turn-on settle",
                     )
                     is_manual_action = False
                 else:
@@ -2826,6 +2884,8 @@ class RoomController:
         self._freeze_bypass_active = False
         self._vacancy_cancel: Optional[CALLBACK_TYPE] = None
         self._debounce_cancels: Dict[str, CALLBACK_TYPE] = {}
+        self._recent_turn_on_ts: float = 0.0
+        self._pending_light_params: Optional[Dict[str, Any]] = None
         self.selected_reset_target: str = "all"
         self.started_at: float = time.time()
 
@@ -3064,6 +3124,8 @@ class RoomController:
         @callback
         def _execute(_now: Any) -> None:
             self._debounce_cancels.pop(bucket, None)
+            if bucket == "light":
+                self._pending_light_params = None
             self.hass.async_create_task(self.async_evaluate(trigger_id, extra_params))
 
         if delay_sec <= 0:
@@ -3158,8 +3220,8 @@ class RoomController:
                 if old_st.state in ("unavailable", "unknown") or new_st.state in ("unavailable", "unknown"):
                     return
 
-                old_b = old_st.attributes.get("brightness", 0) if old_st else 0
-                new_b = new_st.attributes.get("brightness", 0) if new_st else 0
+                old_b = old_st.attributes.get("brightness") or 0
+                new_b = new_st.attributes.get("brightness") or 0
                 color_attrs = ("color_temp_kelvin", "color_temp", "rgb_color", "hs_color", "xy_color", "effect")
                 color_changed = any(old_st.attributes.get(k) != new_st.attributes.get(k) for k in color_attrs)
 
@@ -3167,15 +3229,82 @@ class RoomController:
                 if old_st.state == new_st.state and old_b == new_b and not color_changed:
                     return
 
+                if new_st.state == "off":
+                    self._pending_light_params = None
+                    self._recent_turn_on_ts = 0.0
+                    params = {
+                        "trigger_id": "light_change",
+                        "trigger_from_state": old_st.state,
+                        "trigger_from_brightness": old_b,
+                        "trigger_color_changed": color_changed,
+                        "trigger_within_turn_on_window": False,
+                        "context": evt.context,
+                    }
+                    self.schedule_evaluation("light_change", params, delay_sec=0.05)
+                    return
+
+                prev = self._pending_light_params
+                if prev is not None:
+                    eff_from_state = prev["trigger_from_state"]
+                    eff_from_b = prev["trigger_from_brightness"]
+                    eff_color_changed = bool(prev.get("trigger_color_changed")) or color_changed
+                else:
+                    eff_from_state = old_st.state
+                    eff_from_b = old_b
+                    eff_color_changed = color_changed
+
+                ignore_max_override = bool(
+                    self.entry_data.get(
+                        CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
+                        DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
+                    )
+                )
+                is_engine_ctx = self.engine.is_engine_context(evt.context)
+                now_ts = time.time()
+
+                if eff_from_state == "off" and not is_engine_ctx:
+                    self._recent_turn_on_ts = now_ts
+
+                member_just_turned_on = False
+                if not is_engine_ctx and ignore_max_override:
+                    members = get_light_members(self.hass, light_entity)
+                    if len(members) > 1:
+                        last_cmd_ts = self.engine._last_engine_command.get(self.room_id, 0.0)
+                        now_utc = dt_util.utcnow()
+                        for m in members:
+                            m_st = self.hass.states.get(m)
+                            if m_st and m_st.state == "on" and m_st.last_changed:
+                                lc_utc = dt_util.as_utc(m_st.last_changed)
+                                age_sec = (now_utc - lc_utc).total_seconds()
+                                if (
+                                    0.0 <= age_sec <= STAGGERED_TURN_ON_WINDOW_SEC
+                                    and lc_utc.timestamp() > (last_cmd_ts + 2.0)
+                                ):
+                                    member_just_turned_on = True
+                                    break
+
+                in_turn_on_window = (
+                    not is_engine_ctx
+                    and ignore_max_override
+                    and (
+                        eff_from_state == "off"
+                        or (now_ts - self._recent_turn_on_ts) <= STAGGERED_TURN_ON_WINDOW_SEC
+                        or member_just_turned_on
+                        or bool(prev and prev.get("trigger_within_turn_on_window"))
+                    )
+                )
+
                 params = {
                     "trigger_id": "light_change",
-                    "trigger_from_state": old_st.state,
-                    "trigger_from_brightness": old_b,
-                    "trigger_color_changed": color_changed,
+                    "trigger_from_state": eff_from_state,
+                    "trigger_from_brightness": eff_from_b,
+                    "trigger_color_changed": eff_color_changed,
+                    "trigger_within_turn_on_window": in_turn_on_window,
                     "context": evt.context,
                 }
-                # Minimal debounce to capture rapid multi-bulb Zigbee reports
-                self.schedule_evaluation("light_change", params, delay_sec=0.05)
+                self._pending_light_params = params
+                delay_sec = TURN_ON_SETTLE_DEBOUNCE_SEC if in_turn_on_window else 0.05
+                self.schedule_evaluation("light_change", params, delay_sec=delay_sec)
 
             self._unsub_listeners.append(
                 async_track_state_change_event(self.hass, [light_entity], _on_light_change)
@@ -3366,6 +3495,7 @@ class RoomController:
     def stop(self) -> None:
         """Unsubscribe all active listeners and cancel pending timers."""
         self.cancel_vacancy_timer()
+        self._pending_light_params = None
         for cancel_cb in list(self._debounce_cancels.values()):
             try:
                 cancel_cb()

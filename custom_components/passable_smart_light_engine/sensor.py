@@ -1,7 +1,7 @@
 """Sensor platform for Passable Smart Light Engine."""
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -9,15 +9,20 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
 from .const import (
     ACTIVE_HOLIDAY_SENSOR_ENTITY_ID,
     ACTIVE_HOLIDAY_SENSOR_UNIQUE_ID,
+    BRIGHTNESS_SENSOR_DEADBAND_PCT,
+    BRIGHTNESS_SENSOR_DEBOUNCE_SEC,
     CONF_DEFAULT_LUX_RATIO,
     CONF_LATE_NIGHT_LEARN_PREFS,
+    CONF_LIGHT_ENTITY,
     CONF_MEDIA_LEARN_PREFS,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_PRESENCE_TIMEOUT_MIN,
@@ -53,7 +58,9 @@ from .engine import (
     calculate_learned_target_lux,
     compute_engine_summary,
     compute_room_active_mode,
+    compute_room_effective_brightness_pct,
     get_expected_lux,
+    get_light_members,
     safe_get_state,
 )
 from .storage import LearningDataStore
@@ -104,6 +111,7 @@ async def async_setup_entry(
         PassableLightingLuxYieldSensor(entry, controller, engine),
         PassableLightingTargetLuxSensor(entry, controller, engine),
         PassableLightingActiveModeSensor(entry, controller, engine),
+        PassableLightingBrightnessSensor(entry, controller, engine),
     ]
 
     async_add_entities(entities)
@@ -139,7 +147,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.10.1",
+            sw_version="2.10.2",
         )
 
 
@@ -305,6 +313,120 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
         }
 
 
+class PassableLightingBrightnessSensor(PassableLightingBaseSensor):
+    """Debounced room brightness sensor (0-100%) for clean Recorder history."""
+
+    def __init__(self, entry: ConfigEntry, controller: RoomController, engine: PassableLightingEngine) -> None:
+        """Initialize room brightness sensor."""
+        super().__init__(entry, controller, engine)
+        self._attr_unique_id = f"{DOMAIN}_{self._room_id}_brightness"
+        self._attr_name = f"{self._room_title} Brightness"
+        self._attr_native_unit_of_measurement = "%"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_icon = "mdi:brightness-percent"
+        self._light_entity: Optional[str] = controller.entry_data.get(CONF_LIGHT_ENTITY)
+        self._tracked_entities: Tuple[str, ...] = ()
+        self._unsub_light: Optional[CALLBACK_TYPE] = None
+        self._debounce_cancel: Optional[CALLBACK_TYPE] = None
+        self._last_written_pct: Optional[int] = None
+
+    async def async_added_to_hass(self) -> None:
+        """Track primary light and leaf members with settle debounce and zero extra attributes."""
+        init_pct = compute_room_effective_brightness_pct(self.hass, self._light_entity)
+        self._attr_native_value = init_pct
+        self._last_written_pct = init_pct
+        self._refresh_tracked_entities()
+
+        if not self.hass.is_running:
+            @callback
+            def _on_hass_started(_event: Event) -> None:
+                self._refresh_tracked_entities()
+                self._commit_settled_brightness(force=True)
+
+            self.async_on_remove(
+                self.hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_hass_started)
+            )
+
+        self.async_on_remove(self._cleanup_listeners)
+
+    @callback
+    def _cleanup_listeners(self) -> None:
+        """Unsubscribe light listeners and cancel pending debounce timer."""
+        if self._debounce_cancel:
+            self._debounce_cancel()
+            self._debounce_cancel = None
+        if self._unsub_light:
+            self._unsub_light()
+            self._unsub_light = None
+        self._tracked_entities = ()
+
+    @callback
+    def _refresh_tracked_entities(self) -> None:
+        """Subscribe to the primary light entity and its expanded leaf members."""
+        if not self._light_entity:
+            return
+        raw = [self._light_entity] + get_light_members(self.hass, self._light_entity)
+        entities = tuple(dict.fromkeys(e for e in raw if e))
+        if entities == self._tracked_entities:
+            return
+        if self._unsub_light:
+            self._unsub_light()
+            self._unsub_light = None
+        self._tracked_entities = entities
+        if entities:
+            self._unsub_light = async_track_state_change_event(
+                self.hass, list(entities), self._on_light_event
+            )
+
+    @callback
+    def _on_light_event(self, evt: Event) -> None:
+        """Debounce brightness changes while ignoring pure color-temperature updates."""
+        old_st = evt.data.get("old_state")
+        new_st = evt.data.get("new_state")
+        if evt.data.get("entity_id") == self._light_entity:
+            self._refresh_tracked_entities()
+
+        if (
+            old_st is not None
+            and new_st is not None
+            and old_st.state == new_st.state
+            and old_st.attributes.get("brightness") == new_st.attributes.get("brightness")
+            and old_st.attributes.get("entity_id") == new_st.attributes.get("entity_id")
+        ):
+            return
+
+        if self._debounce_cancel:
+            self._debounce_cancel()
+        self._debounce_cancel = async_call_later(
+            self.hass, BRIGHTNESS_SENSOR_DEBOUNCE_SEC, self._on_debounce_fired
+        )
+
+    @callback
+    def _on_debounce_fired(self, _now: Any) -> None:
+        """Commit settled brightness after the debounce interval elapses."""
+        self._debounce_cancel = None
+        self._commit_settled_brightness(force=False)
+
+    @callback
+    def _commit_settled_brightness(self, force: bool = False) -> None:
+        """Write sensor state only on off/on flips, 100% saturation, or >= deadband change."""
+        new_pct = compute_room_effective_brightness_pct(self.hass, self._light_entity)
+        prev = self._last_written_pct
+        should_write = (
+            force
+            or prev is None
+            or (new_pct == 0) != (prev == 0)
+            or abs(new_pct - prev) >= BRIGHTNESS_SENSOR_DEADBAND_PCT
+            or (new_pct == 100 and prev != 100)
+        )
+        if not should_write:
+            return
+        self._attr_native_value = new_pct
+        self._last_written_pct = new_pct
+        if self.hass:
+            self.async_write_ha_state()
+
+
 class PassableLightingEngineReadySensor(SensorEntity):
     """System-wide readiness and dataset synchronization sensor."""
 
@@ -337,7 +459,7 @@ class PassableLightingEngineReadySensor(SensorEntity):
             name="Passable Smart Light Engine",
             manufacturer="Passable",
             model="Smart Lighting Engine Hub",
-            sw_version="2.10.1",
+            sw_version="2.10.2",
         )
 
     @property
@@ -378,7 +500,7 @@ class PassableLightingSummarySensor(SensorEntity):
             name="Passable Smart Light Engine",
             manufacturer="Passable",
             model="Smart Lighting Engine Hub",
-            sw_version="2.10.1",
+            sw_version="2.10.2",
         )
 
     async def async_added_to_hass(self) -> None:

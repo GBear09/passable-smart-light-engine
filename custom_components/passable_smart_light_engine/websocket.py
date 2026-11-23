@@ -29,6 +29,7 @@ from .const import (
     CONF_LUX_SENSOR,
     CONF_MAX_COLOR_TEMP,
     CONF_MEDIA_LEARN_PREFS,
+    CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_MIN_COLOR_TEMP,
     CONF_OVERRIDE_TIMEOUT_MIN,
     CONF_PRESENCE_ENTITIES,
@@ -42,6 +43,7 @@ from .const import (
     DEFAULT_LUX_RATIO,
     DEFAULT_MAX_COLOR_TEMP,
     DEFAULT_MEDIA_LEARN_PREFS,
+    DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_MIN_COLOR_TEMP,
     DEFAULT_OVERRIDE_TIMEOUT_MIN,
@@ -58,6 +60,7 @@ from .engine import (
     calculate_learned_target_lux,
     compute_engine_summary,
     compute_room_active_mode,
+    compute_room_effective_brightness_pct,
     get_expected_lux,
     get_light_members,
 )
@@ -199,7 +202,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
     engine: Optional[PassableLightingEngine] = data.get("engine")
     if not engine:
         return {
-            "version": data.get("version") or "2.10.1",
+            "version": data.get("version") or "2.10.2",
             "summary": {},
             "rooms": [],
             "holiday_exterior": {},
@@ -326,6 +329,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
                     "leaf_lights": leaf_lights,
                     "lux_sensor": lux_sensor,
                     "ambient_lux": ambient_lux,
+                    "live_brightness_pct": compute_room_effective_brightness_pct(hass, light_entity),
                     "seed_target_lux": int(round(seed_lux)),
                     "blended_target_lux": blended_target_lux,
                     "lux_yield": lux_yield,
@@ -383,6 +387,9 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
                         ),
                         "active_mode_sensor": _resolve_entity_id(
                             ent_reg, "sensor", f"{DOMAIN}_{room_id}_active_mode"
+                        ),
+                        "brightness_sensor": _resolve_entity_id(
+                            ent_reg, "sensor", f"{DOMAIN}_{room_id}_brightness"
                         ),
                     },
                 }
@@ -472,7 +479,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
         summary_payload = {}
 
     return {
-        "version": data.get("version") or "2.10.1",
+        "version": data.get("version") or "2.10.2",
         "summary": summary_payload,
         "rooms": rooms_payload,
         "holiday_exterior": holiday_payload,
@@ -1094,14 +1101,15 @@ def _light_state_to_pct(state_str: str, attrs: Dict[str, Any]) -> int:
     return 100
 
 
-def _bucket_light_brightness(
+def _build_light_intervals(
     states: List[Any],
     start_dt: datetime,
     end_dt: datetime,
-    bucket_sec: int,
-    n_buckets: int,
-) -> Tuple[List[int], float]:
-    """Compute time-weighted per-bucket brightness (0-100) and exact lit_hours."""
+) -> List[Tuple[datetime, datetime, int]]:
+    """Build piecewise-constant brightness (0-100) intervals over [start_dt, end_dt]."""
+    if start_dt >= end_dt:
+        return []
+
     records: List[Tuple[datetime, int]] = []
     for st in states or []:
         state_str, attrs, ts = _extract_state_ts(st)
@@ -1117,7 +1125,6 @@ def _bucket_light_brightness(
         cur_pct = records[idx][1]
         idx += 1
 
-    # Build piecewise-constant intervals over [start_dt, end_dt]
     intervals: List[Tuple[datetime, datetime, int]] = []
     cursor = start_dt
     while idx < n_rec and records[idx][0] < end_dt:
@@ -1129,10 +1136,157 @@ def _bucket_light_brightness(
         idx += 1
     if cursor < end_dt:
         intervals.append((cursor, end_dt, cur_pct))
+    return intervals
 
-    lit_sec = sum((t1 - t0).total_seconds() for t0, t1, pct in intervals if pct > 0)
-    lit_hours = round(lit_sec / 3600.0, 2)
 
+def _build_numeric_pct_intervals(
+    states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> Tuple[List[Tuple[datetime, datetime, int]], Optional[datetime]]:
+    """Build piecewise-constant intervals from recorded brightness % sensor states."""
+    records: List[Tuple[datetime, int]] = []
+    for st in states or []:
+        state_str, _, ts = _extract_state_ts(st)
+        val = _safe_float(state_str)
+        if ts is None or val is None:
+            continue
+        records.append((ts, max(0, min(100, int(round(val))))))
+    records.sort(key=lambda item: item[0])
+
+    if not records:
+        return [], None
+
+    first_ts = records[0][0]
+    if first_ts >= end_dt or start_dt >= end_dt:
+        return [], first_ts
+
+    idx = 0
+    n_rec = len(records)
+    if first_ts <= start_dt:
+        cur_pct = 0
+        while idx < n_rec and records[idx][0] <= start_dt:
+            cur_pct = records[idx][1]
+            idx += 1
+        cursor = start_dt
+    else:
+        cur_pct = records[0][1]
+        cursor = first_ts
+        idx = 1
+
+    intervals: List[Tuple[datetime, datetime, int]] = []
+    while idx < n_rec and records[idx][0] < end_dt:
+        ev_ts, next_pct = records[idx]
+        if ev_ts > cursor:
+            intervals.append((cursor, ev_ts, cur_pct))
+            cursor = ev_ts
+        cur_pct = next_pct
+        idx += 1
+    if cursor < end_dt:
+        intervals.append((cursor, end_dt, cur_pct))
+    return intervals, first_ts
+
+
+def _build_multi_leaf_fallback_intervals(
+    leaf_states_map: Dict[str, List[Any]],
+    primary_leaves: List[str],
+    light_entity_states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[Tuple[datetime, datetime, int]]:
+    """Estimate room brightness intervals by averaging available primary leaf lights."""
+    if start_dt >= end_dt:
+        return []
+    if len(primary_leaves) <= 1:
+        return _build_light_intervals(light_entity_states, start_dt, end_dt)
+
+    leaf_records: Dict[str, List[Tuple[datetime, Optional[int]]]] = {}
+    leaf_idx: Dict[str, int] = {}
+    leaf_cur: Dict[str, Optional[int]] = {}
+    boundaries = {start_dt, end_dt}
+
+    for eid in primary_leaves:
+        recs: List[Tuple[datetime, Optional[int]]] = []
+        for st in leaf_states_map.get(eid) or []:
+            state_str, attrs, ts = _extract_state_ts(st)
+            if ts is None or not state_str:
+                continue
+            cleaned = state_str.strip().lower()
+            pct: Optional[int] = (
+                None
+                if cleaned in ("unavailable", "unknown", "none")
+                else _light_state_to_pct(state_str, attrs)
+            )
+            recs.append((ts, pct))
+            if start_dt < ts < end_dt:
+                boundaries.add(ts)
+        recs.sort(key=lambda item: item[0])
+        idx = 0
+        cur: Optional[int] = None
+        while idx < len(recs) and recs[idx][0] <= start_dt:
+            cur = recs[idx][1]
+            idx += 1
+        leaf_records[eid] = recs
+        leaf_idx[eid] = idx
+        leaf_cur[eid] = cur
+
+    group_recs: List[Tuple[datetime, int]] = []
+    for st in light_entity_states or []:
+        state_str, attrs, ts = _extract_state_ts(st)
+        if ts is None or not state_str:
+            continue
+        group_recs.append((ts, _light_state_to_pct(state_str, attrs)))
+        if start_dt < ts < end_dt:
+            boundaries.add(ts)
+    group_recs.sort(key=lambda item: item[0])
+    g_idx = 0
+    g_cur = 0
+    while g_idx < len(group_recs) and group_recs[g_idx][0] <= start_dt:
+        g_cur = group_recs[g_idx][1]
+        g_idx += 1
+
+    sorted_bounds = sorted(boundaries)
+    intervals: List[Tuple[datetime, datetime, int]] = []
+    for i in range(len(sorted_bounds) - 1):
+        t0 = sorted_bounds[i]
+        t1 = sorted_bounds[i + 1]
+        if t1 <= t0:
+            continue
+        for eid in primary_leaves:
+            recs = leaf_records[eid]
+            idx = leaf_idx[eid]
+            while idx < len(recs) and recs[idx][0] <= t0:
+                leaf_cur[eid] = recs[idx][1]
+                idx += 1
+            leaf_idx[eid] = idx
+        while g_idx < len(group_recs) and group_recs[g_idx][0] <= t0:
+            g_cur = group_recs[g_idx][1]
+            g_idx += 1
+
+        avail = [v for v in leaf_cur.values() if v is not None]
+        if avail:
+            any_on = any(v > 0 for v in avail)
+            avg = int(round(sum(avail) / len(avail)))
+            pct = 1 if (any_on and avg == 0) else max(0, min(100, avg))
+        else:
+            pct = g_cur
+
+        if intervals and intervals[-1][2] == pct and intervals[-1][1] == t0:
+            intervals[-1] = (intervals[-1][0], t1, pct)
+        else:
+            intervals.append((t0, t1, pct))
+
+    return intervals
+
+
+def _bucket_intervals(
+    intervals: List[Tuple[datetime, datetime, int]],
+    start_dt: datetime,
+    end_dt: datetime,
+    bucket_sec: int,
+    n_buckets: int,
+) -> List[int]:
+    """Compute time-weighted per-bucket averages from piecewise-constant intervals."""
     series: List[int] = []
     iv_idx = 0
     n_iv = len(intervals)
@@ -1161,7 +1315,75 @@ def _bucket_light_brightness(
 
         series.append(max(0, min(100, int(round(weighted / b_dur)))))
 
+    return series
+
+
+def _bucket_light_brightness(
+    states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    bucket_sec: int,
+    n_buckets: int,
+) -> Tuple[List[int], float]:
+    """Compute time-weighted per-bucket brightness (0-100) and exact lit_hours."""
+    intervals = _build_light_intervals(states, start_dt, end_dt)
+    lit_sec = sum((t1 - t0).total_seconds() for t0, t1, pct in intervals if pct > 0)
+    lit_hours = round(lit_sec / 3600.0, 2)
+    series = _bucket_intervals(intervals, start_dt, end_dt, bucket_sec, n_buckets)
     return series, lit_hours
+
+
+def _compute_room_brightness_stats(
+    brightness_sensor_states: List[Any],
+    light_entity_states: List[Any],
+    primary_leaves: List[str],
+    hist_map: Dict[str, List[Any]],
+    start_dt: datetime,
+    end_dt: datetime,
+    bucket_sec: int,
+    n_buckets: int,
+) -> Tuple[List[int], float, str]:
+    """Compute room brightness series (sensor/hybrid/estimated) and unioned lit_hours."""
+    group_intervals = _build_light_intervals(light_entity_states, start_dt, end_dt)
+    lit_sec = sum((t1 - t0).total_seconds() for t0, t1, pct in group_intervals if pct > 0)
+    lit_hours = round(lit_sec / 3600.0, 2)
+
+    sensor_intervals, first_sensor_ts = _build_numeric_pct_intervals(
+        brightness_sensor_states, start_dt, end_dt
+    )
+
+    if first_sensor_ts is not None and first_sensor_ts <= start_dt and sensor_intervals:
+        combined_intervals = sensor_intervals
+        brightness_source = "sensor"
+    elif first_sensor_ts is not None and start_dt < first_sensor_ts < end_dt and sensor_intervals:
+        fallback_intervals = _build_multi_leaf_fallback_intervals(
+            hist_map, primary_leaves, light_entity_states, start_dt, first_sensor_ts
+        )
+        combined_intervals = fallback_intervals + sensor_intervals
+        brightness_source = (
+            "sensor"
+            if (first_sensor_ts - start_dt).total_seconds() <= bucket_sec
+            else "hybrid"
+        )
+    else:
+        combined_intervals = _build_multi_leaf_fallback_intervals(
+            hist_map, primary_leaves, light_entity_states, start_dt, end_dt
+        )
+        brightness_source = "estimated"
+
+    series = _bucket_intervals(combined_intervals, start_dt, end_dt, bucket_sec, n_buckets)
+    return series, lit_hours, brightness_source
+
+
+def _compute_entity_lit_hours(
+    states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> float:
+    """Compute total hours an entity was in the 'on' state over [start_dt, end_dt]."""
+    intervals = _build_light_intervals(states, start_dt, end_dt)
+    lit_sec = sum((t1 - t0).total_seconds() for t0, t1, pct in intervals if pct > 0)
+    return round(lit_sec / 3600.0, 2)
 
 
 def _compute_mode_timeline(
@@ -1573,20 +1795,38 @@ async def ws_get_stats(
         active_mode_sensor = _resolve_entity_id(
             ent_reg, "sensor", f"{DOMAIN}_{room_id}_active_mode"
         )
-        for eid in (lux_sensor, target_lux_sensor, active_mode_sensor, light_entity):
+        brightness_sensor = _resolve_entity_id(
+            ent_reg, "sensor", f"{DOMAIN}_{room_id}_brightness"
+        )
+        for eid in (
+            lux_sensor,
+            target_lux_sensor,
+            active_mode_sensor,
+            brightness_sensor,
+            light_entity,
+        ):
             if eid and eid not in query1_entities:
                 query1_entities.append(eid)
 
         sec_lights = entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS) or []
         if isinstance(sec_lights, str):
             sec_lights = [sec_lights] if sec_lights else []
-        raw_leaves: List[str] = []
-        if light_entity:
-            raw_leaves.extend(get_light_members(hass, light_entity))
-        for sec in sec_lights:
-            if sec:
-                raw_leaves.extend(get_light_members(hass, sec))
-        leaf_lights = list(dict.fromkeys(raw_leaves))
+        primary_leaves = (
+            list(dict.fromkeys(get_light_members(hass, light_entity)))
+            if light_entity
+            else []
+        )
+        secondary_leaves = [
+            m
+            for m in dict.fromkeys(
+                member
+                for sec in sec_lights
+                if sec
+                for member in get_light_members(hass, sec)
+            )
+            if m not in primary_leaves
+        ]
+        leaf_lights = list(dict.fromkeys(primary_leaves + secondary_leaves))
 
         room_meta.append(
             {
@@ -1594,10 +1834,13 @@ async def ws_get_stats(
                 "ctrl": ctrl,
                 "entry_data": entry_data,
                 "light_entity": light_entity,
+                "primary_leaves": primary_leaves,
+                "secondary_leaves": secondary_leaves,
                 "leaf_lights": leaf_lights,
                 "lux_sensor": lux_sensor,
                 "target_lux_sensor": target_lux_sensor,
                 "active_mode_sensor": active_mode_sensor,
+                "brightness_sensor": brightness_sensor,
             }
         )
 
@@ -1614,7 +1857,17 @@ async def ws_get_stats(
                     fallback_lights.append(lid)
         req_lights = fallback_lights[:120]
 
-    extra_lights = [eid for eid in req_lights if eid not in query1_entities][:120]
+    room_leaf_lights: List[str] = []
+    for rm in room_meta:
+        for lid in rm["leaf_lights"]:
+            if lid and lid not in room_leaf_lights:
+                room_leaf_lights.append(lid)
+
+    extra_lights = [
+        eid
+        for eid in dict.fromkeys(room_leaf_lights + req_lights)
+        if eid not in query1_entities
+    ][:150]
 
     hist_map: Dict[str, List[Any]] = {}
     recorder_available = True
@@ -1684,6 +1937,7 @@ async def ws_get_stats(
         lux_sensor = rm["lux_sensor"]
         target_lux_sensor = rm["target_lux_sensor"]
         active_mode_sensor = rm["active_mode_sensor"]
+        brightness_sensor = rm["brightness_sensor"]
 
         floor_id, floor_name = _resolve_room_floor(hass, light_entity)
         if floor_id:
@@ -1733,9 +1987,85 @@ async def ws_get_stats(
         light_states = hist_map.get(light_entity) if light_entity else []
         if not light_states and live_light_st:
             light_states = [live_light_st]
-        brightness_series, lit_hours = _bucket_light_brightness(
-            light_states or [], start_dt, end_dt, bucket_sec, n_buckets
+        brightness_states = hist_map.get(brightness_sensor) if brightness_sensor else []
+        if not brightness_states and brightness_sensor:
+            live_bright_st = hass.states.get(brightness_sensor)
+            if live_bright_st is not None:
+                brightness_states = [live_bright_st]
+        for lid in rm["primary_leaves"]:
+            if lid not in hist_map:
+                cur_lid_st = hass.states.get(lid)
+                if cur_lid_st is not None:
+                    hist_map[lid] = [cur_lid_st]
+        brightness_series, lit_hours, brightness_source = _compute_room_brightness_stats(
+            brightness_states or [],
+            light_states or [],
+            rm["primary_leaves"],
+            hist_map,
+            start_dt,
+            end_dt,
+            bucket_sec,
+            n_buckets,
         )
+
+        media_prefs = learning_data.get("media_prefs", {}).get(room_id, [])
+        late_night_prefs = learning_data.get("late_night_prefs", {}).get(room_id, [])
+        media_seed = int(entry_data.get("media_seed_pct", DEFAULT_MEDIA_SEED_PCT))
+        late_night_seed = int(entry_data.get("late_night_pct", DEFAULT_LATE_NIGHT_PCT))
+        media_learn = bool(
+            entry_data.get(CONF_MEDIA_LEARN_PREFS, DEFAULT_MEDIA_LEARN_PREFS)
+        )
+        late_night_learn = bool(
+            entry_data.get(CONF_LATE_NIGHT_LEARN_PREFS, DEFAULT_LATE_NIGHT_LEARN_PREFS)
+        )
+        media_target_pct = (
+            int(sum(media_prefs) / len(media_prefs))
+            if media_learn and media_prefs
+            else media_seed
+        )
+        late_night_target_pct = (
+            int(sum(late_night_prefs) / len(late_night_prefs))
+            if late_night_learn and late_night_prefs
+            else late_night_seed
+        )
+        media_respect_ambient_lux = bool(
+            entry_data.get(
+                CONF_MEDIA_RESPECT_AMBIENT_LUX, DEFAULT_MEDIA_RESPECT_AMBIENT_LUX
+            )
+        )
+
+        fixtures: List[Dict[str, Any]] = []
+        for role, role_leaves in (
+            ("primary", rm["primary_leaves"]),
+            ("secondary", rm["secondary_leaves"]),
+        ):
+            for lid in role_leaves:
+                f_st = hass.states.get(lid)
+                f_hist = hist_map.get(lid)
+                if not f_hist and f_st is not None:
+                    f_hist = [f_st]
+                f_lit_hours = _compute_entity_lit_hours(f_hist or [], start_dt, end_dt)
+                f_is_on = bool(f_st and f_st.state == "on")
+                f_pct = (
+                    _light_state_to_pct(f_st.state, dict(f_st.attributes))
+                    if f_st
+                    else 0
+                )
+                f_name = (
+                    str(f_st.attributes.get("friendly_name")).strip()
+                    if f_st and f_st.attributes.get("friendly_name")
+                    else lid.split(".", 1)[-1].replace("_", " ").title()
+                )
+                fixtures.append(
+                    {
+                        "entity_id": lid,
+                        "name": f_name,
+                        "role": role,
+                        "lit_hours": f_lit_hours,
+                        "is_on": f_is_on,
+                        "brightness_pct": f_pct,
+                    }
+                )
 
         mode_states = hist_map.get(active_mode_sensor) if active_mode_sensor else []
         mode_segments, mode_durations_sec, override_events = _compute_mode_timeline(
@@ -1813,6 +2143,14 @@ async def ws_get_stats(
                 "lux_series": lux_series,
                 "target_lux_series": target_lux_series,
                 "brightness_series": brightness_series,
+                "brightness_source": brightness_source,
+                "live_brightness_pct": compute_room_effective_brightness_pct(
+                    hass, light_entity
+                ),
+                "media_target_pct": media_target_pct,
+                "late_night_target_pct": late_night_target_pct,
+                "media_respect_ambient_lux": media_respect_ambient_lux,
+                "fixtures": fixtures,
                 "mode_segments": mode_segments,
                 "mode_hours": mode_hours,
                 "lit_hours": lit_hours,
