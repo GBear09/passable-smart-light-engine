@@ -230,6 +230,12 @@ When configured via the Native UI, the integration provisions a room Device with
   - **Engine:** Adjust room Target Lux steppers, inspect learned Lux Yield Curves (`lx/%`), trigger curve calibration, and reset learning datasets.
   - **Holiday & Ext:** Toggle Dusk-to-Dawn, Holiday Lighting, and Decor Plugs, and preview or apply holidays from your catalog.
   - **Away Sim:** Start/stop presence simulation and inspect active simulated fixtures.
+- **Built-In Light Stats Analytics Popup (`mdi:chart-line`):**
+  - Opens a dedicated Recorder-powered analytics sheet with a **`6h` / `24h` / `7d`** timeframe switcher, top KPI strip (`Lit Time`, `Automation %`, `Daylight %`, `Learning`), and **3 interactive sub-views**:
+    - **Room Inspector:** Synced Ambient Lux, Blended Target Lux, Dimmer Brightness %, and Mode/Occupancy Ribbon plus learned Sun-Elevation Preference scatter & curve.
+    - **All Rooms:** Auto-discovered multi-room illuminance comparison with Floor filters and **`Raw (lx)` / `Log (lx)` / `% Target`** scaling.
+    - **Usage & Overrides:** Ranked mode-breakdown bars per room plus a whole-home concurrent Lights On timeline.
+  - Enabled with zero YAML configuration (`show_stats_button: true`, with optional `stats_tap_action` override).
 
 ### Minimal Configuration
 ```yaml
@@ -243,7 +249,7 @@ show_header: false
 layout: tiles
 master_light: light.all_lights
 show_holiday_banner: false # Optional inline holiday banner (off by default)
-stats_navigation_path: /dashboard-home/light-stats
+show_stats_button: true # Opens built-in Light Stats popup (default: true)
 alerts:
   - entity: binary_sensor.laundry_light_scene_active
     state: "on"

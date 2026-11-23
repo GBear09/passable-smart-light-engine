@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
+from datetime import datetime, timedelta, timezone
 import logging
+import math
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from homeassistant.components import websocket_api
+from homeassistant.components import recorder, websocket_api
+from homeassistant.components.recorder import history
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import (
     area_registry as ar,
@@ -14,6 +18,7 @@ from homeassistant.helpers import (
     entity_registry as er,
     floor_registry as fr,
 )
+import homeassistant.util.dt as dt_util
 import voluptuous as vol
 
 from .const import (
@@ -194,7 +199,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
     engine: Optional[PassableLightingEngine] = data.get("engine")
     if not engine:
         return {
-            "version": data.get("version") or "2.9.4",
+            "version": data.get("version") or "2.10.0",
             "summary": {},
             "rooms": [],
             "holiday_exterior": {},
@@ -467,7 +472,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
         summary_payload = {}
 
     return {
-        "version": data.get("version") or "2.9.4",
+        "version": data.get("version") or "2.10.0",
         "summary": summary_payload,
         "rooms": rooms_payload,
         "holiday_exterior": holiday_payload,
@@ -484,6 +489,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
         return
 
     websocket_api.async_register_command(hass, ws_get_data)
+    websocket_api.async_register_command(hass, ws_get_stats)
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_clear_override)
     websocket_api.async_register_command(hass, ws_set_room_auto)
@@ -896,5 +902,1006 @@ async def ws_apply_holiday(
         {
             "success": True,
             "holiday_id": holiday_obj.get("id") if holiday_obj else None,
+        },
+    )
+
+
+# ==========================================
+# LIGHT STATS ANALYTICS HELPERS & WS COMMAND
+# ==========================================
+
+
+def _safe_float(val: Any) -> Optional[float]:
+    """Parse a value to a finite float, returning None for invalid/unavailable states."""
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        fval = float(val)
+        return None if (math.isnan(fval) or math.isinf(fval)) else fval
+    text = str(val).strip()
+    if not text or text.lower() in ("unknown", "unavailable", "none", "nan", "null"):
+        return None
+    try:
+        fval = float(text)
+    except (ValueError, TypeError):
+        return None
+    return None if (math.isnan(fval) or math.isinf(fval)) else fval
+
+
+def _ensure_utc(ts_raw: Any) -> Optional[datetime]:
+    """Normalize a datetime or ISO timestamp string to timezone-aware UTC."""
+    if ts_raw is None:
+        return None
+    dt_obj: Optional[datetime] = None
+    if isinstance(ts_raw, datetime):
+        dt_obj = ts_raw
+    elif isinstance(ts_raw, str):
+        dt_obj = dt_util.parse_datetime(ts_raw)
+        if dt_obj is None:
+            try:
+                dt_obj = datetime.fromisoformat(ts_raw)
+            except ValueError:
+                return None
+    if dt_obj is None:
+        return None
+    if dt_obj.tzinfo is None:
+        return dt_obj.replace(tzinfo=timezone.utc)
+    return dt_obj.astimezone(timezone.utc)
+
+
+def _extract_state_ts(st: Any) -> Tuple[str, Dict[str, Any], Optional[datetime]]:
+    """Safely extract (state, attributes, timestamp) preferring last_updated over last_changed."""
+    if isinstance(st, Mapping):
+        raw_state = st.get("state")
+        raw_attrs = st.get("attributes")
+        ts_raw = st.get("last_updated") or st.get("last_changed")
+    else:
+        raw_state = getattr(st, "state", None)
+        raw_attrs = getattr(st, "attributes", None)
+        ts_raw = getattr(st, "last_updated", None) or getattr(st, "last_changed", None)
+
+    state_str = str(raw_state) if raw_state is not None else ""
+    attrs = dict(raw_attrs) if isinstance(raw_attrs, Mapping) else {}
+    return state_str, attrs, _ensure_utc(ts_raw)
+
+
+def _resolve_room_floor(
+    hass: HomeAssistant, light_entity: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve (floor_id, floor_name) for a room light entity via HA registries."""
+    if not light_entity:
+        return None, None
+    try:
+        ent_reg = er.async_get(hass)
+        dev_reg = dr.async_get(hass)
+        area_reg = ar.async_get(hass)
+        floor_reg = fr.async_get(hass)
+    except Exception:
+        return None, None
+
+    candidates = [light_entity]
+    for member in get_light_members(hass, light_entity):
+        if member and member not in candidates:
+            candidates.append(member)
+
+    for eid in candidates:
+        ent = ent_reg.async_get(eid) if ent_reg and hasattr(ent_reg, "async_get") else None
+        if not ent:
+            continue
+        area_id = getattr(ent, "area_id", None)
+        if not area_id and getattr(ent, "device_id", None) and dev_reg:
+            dev = dev_reg.async_get(ent.device_id)
+            if dev:
+                area_id = getattr(dev, "area_id", None)
+        if not area_id or not area_reg:
+            continue
+
+        area = (
+            area_reg.async_get_area(area_id)
+            if hasattr(area_reg, "async_get_area")
+            else getattr(area_reg, "areas", {}).get(area_id)
+        )
+        if not area:
+            continue
+        floor_id = getattr(area, "floor_id", None)
+        if not floor_id or not floor_reg:
+            continue
+
+        floor = (
+            floor_reg.async_get_floor(floor_id)
+            if hasattr(floor_reg, "async_get_floor")
+            else getattr(floor_reg, "floors", {}).get(floor_id)
+        )
+        floor_name = getattr(floor, "name", None) if floor else None
+        return str(floor_id), str(floor_name or floor_id)
+
+    return None, None
+
+
+def _bucket_numeric_series(
+    states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    bucket_sec: int,
+    n_buckets: int,
+) -> Tuple[List[Optional[float]], Optional[float], Optional[float], Optional[float]]:
+    """Downsample numeric sensor states into n_buckets using carry-forward and in-bucket mean."""
+    records: List[Tuple[datetime, float]] = []
+    for st in states or []:
+        state_str, _, ts = _extract_state_ts(st)
+        val = _safe_float(state_str)
+        if ts is None or val is None:
+            continue
+        records.append((ts, val))
+    records.sort(key=lambda item: item[0])
+
+    idx = 0
+    n_rec = len(records)
+    carry_val: Optional[float] = None
+    while idx < n_rec and records[idx][0] < start_dt:
+        carry_val = records[idx][1]
+        idx += 1
+
+    all_observed: List[float] = []
+    if carry_val is not None:
+        all_observed.append(carry_val)
+
+    series: List[Optional[float]] = []
+    for b_idx in range(n_buckets):
+        b_end = (
+            end_dt
+            if b_idx == n_buckets - 1
+            else start_dt + timedelta(seconds=(b_idx + 1) * bucket_sec)
+        )
+        bucket_vals: List[float] = []
+        while idx < n_rec:
+            ts, val = records[idx]
+            if (ts <= b_end) if b_idx == n_buckets - 1 else (ts < b_end):
+                bucket_vals.append(val)
+                all_observed.append(val)
+                carry_val = val
+                idx += 1
+            else:
+                break
+
+        if bucket_vals:
+            series.append(round(sum(bucket_vals) / len(bucket_vals), 1))
+        elif carry_val is not None:
+            series.append(round(carry_val, 1))
+        else:
+            series.append(None)
+
+    valid_buckets = [v for v in series if v is not None]
+    if not valid_buckets or not all_observed:
+        return series, None, None, None
+
+    min_val = round(min(all_observed), 1)
+    max_val = round(max(all_observed), 1)
+    avg_val = round(sum(valid_buckets) / len(valid_buckets), 1)
+    return series, min_val, avg_val, max_val
+
+
+def _light_state_to_pct(state_str: str, attrs: Dict[str, Any]) -> int:
+    """Convert a Home Assistant light state and attributes to brightness 0..100."""
+    if state_str.strip().lower() != "on":
+        return 0
+    raw_b = _safe_float(attrs.get("brightness"))
+    if raw_b is not None:
+        return max(1, min(100, int(round((raw_b / 255.0) * 100.0))))
+    raw_bp = _safe_float(attrs.get("brightness_pct"))
+    if raw_bp is not None:
+        return max(1, min(100, int(round(raw_bp))))
+    return 100
+
+
+def _bucket_light_brightness(
+    states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    bucket_sec: int,
+    n_buckets: int,
+) -> Tuple[List[int], float]:
+    """Compute time-weighted per-bucket brightness (0-100) and exact lit_hours."""
+    records: List[Tuple[datetime, int]] = []
+    for st in states or []:
+        state_str, attrs, ts = _extract_state_ts(st)
+        if ts is None or not state_str:
+            continue
+        records.append((ts, _light_state_to_pct(state_str, attrs)))
+    records.sort(key=lambda item: item[0])
+
+    idx = 0
+    n_rec = len(records)
+    cur_pct = 0
+    while idx < n_rec and records[idx][0] <= start_dt:
+        cur_pct = records[idx][1]
+        idx += 1
+
+    # Build piecewise-constant intervals over [start_dt, end_dt]
+    intervals: List[Tuple[datetime, datetime, int]] = []
+    cursor = start_dt
+    while idx < n_rec and records[idx][0] < end_dt:
+        ev_ts, next_pct = records[idx]
+        if ev_ts > cursor:
+            intervals.append((cursor, ev_ts, cur_pct))
+            cursor = ev_ts
+        cur_pct = next_pct
+        idx += 1
+    if cursor < end_dt:
+        intervals.append((cursor, end_dt, cur_pct))
+
+    lit_sec = sum((t1 - t0).total_seconds() for t0, t1, pct in intervals if pct > 0)
+    lit_hours = round(lit_sec / 3600.0, 2)
+
+    series: List[int] = []
+    iv_idx = 0
+    n_iv = len(intervals)
+    for b_idx in range(n_buckets):
+        b_start = start_dt + timedelta(seconds=b_idx * bucket_sec)
+        b_end = (
+            end_dt
+            if b_idx == n_buckets - 1
+            else start_dt + timedelta(seconds=(b_idx + 1) * bucket_sec)
+        )
+        b_dur = max(1.0, (b_end - b_start).total_seconds())
+        while iv_idx < n_iv and intervals[iv_idx][1] <= b_start:
+            iv_idx += 1
+
+        weighted = 0.0
+        scan = iv_idx
+        while scan < n_iv and intervals[scan][0] < b_end:
+            iv_start, iv_end, pct = intervals[scan]
+            ov_start = max(b_start, iv_start)
+            ov_end = min(b_end, iv_end)
+            if ov_end > ov_start and pct > 0:
+                weighted += (ov_end - ov_start).total_seconds() * pct
+            if iv_end <= b_end:
+                iv_idx = scan + 1
+            scan += 1
+
+        series.append(max(0, min(100, int(round(weighted / b_dur)))))
+
+    return series, lit_hours
+
+
+def _compute_mode_timeline(
+    states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    fallback_mode: str = "vacant",
+    hours: int = 24,
+) -> Tuple[List[Dict[str, Any]], Dict[str, float], int]:
+    """Build merged mode segments, exact per-mode durations (sec), and override transition count."""
+    records: List[Tuple[datetime, str]] = []
+    for st in states or []:
+        state_str, _, ts = _extract_state_ts(st)
+        cleaned = state_str.strip().lower()
+        if ts is None or not cleaned or cleaned in ("unknown", "unavailable", "none"):
+            continue
+        records.append((ts, cleaned))
+    records.sort(key=lambda item: item[0])
+
+    total_sec = max(0.0, (end_dt - start_dt).total_seconds())
+    start_ms = int(round(start_dt.timestamp() * 1000))
+    end_ms = int(round(end_dt.timestamp() * 1000))
+
+    if not records:
+        safe_mode = (fallback_mode or "vacant").strip().lower()
+        return (
+            [{"start_ms": start_ms, "end_ms": end_ms, "mode": safe_mode}],
+            {safe_mode: round(total_sec, 3)},
+            0,
+        )
+
+    idx = 0
+    n_rec = len(records)
+    cur_mode: Optional[str] = None
+    while idx < n_rec and records[idx][0] <= start_dt:
+        cur_mode = records[idx][1]
+        idx += 1
+    if cur_mode is None:
+        cur_mode = records[0][1]
+
+    raw_intervals: List[Tuple[datetime, datetime, str]] = []
+    override_events = 0
+    cursor = start_dt
+    prev_mode = cur_mode
+
+    while idx < n_rec and records[idx][0] < end_dt:
+        ev_ts, next_mode = records[idx]
+        if ev_ts > cursor:
+            raw_intervals.append((cursor, ev_ts, cur_mode))
+            cursor = ev_ts
+        if next_mode != prev_mode:
+            if next_mode == "manual_override":
+                override_events += 1
+            prev_mode = next_mode
+        cur_mode = next_mode
+        idx += 1
+
+    # Also catch an event exactly at end_dt for transition counting if distinct
+    while idx < n_rec and records[idx][0] == end_dt:
+        next_mode = records[idx][1]
+        if next_mode != prev_mode:
+            if next_mode == "manual_override":
+                override_events += 1
+            prev_mode = next_mode
+        idx += 1
+
+    if cursor < end_dt:
+        raw_intervals.append((cursor, end_dt, cur_mode))
+
+    # Merge adjacent identical intervals
+    merged_intervals: List[List[Any]] = []
+    for t0, t1, mode in raw_intervals:
+        if t1 <= t0:
+            continue
+        if merged_intervals and merged_intervals[-1][2] == mode:
+            merged_intervals[-1][1] = t1
+        else:
+            merged_intervals.append([t0, t1, mode])
+
+    # Exact durations across the window
+    mode_durations_sec: Dict[str, float] = {}
+    for t0, t1, mode in merged_intervals:
+        dur = (t1 - t0).total_seconds()
+        mode_durations_sec[mode] = mode_durations_sec.get(mode, 0.0) + dur
+    for k in list(mode_durations_sec.keys()):
+        mode_durations_sec[k] = round(mode_durations_sec[k], 3)
+
+    # Smooth transient (< 15s) non-override blips on >=24h views for clean timeline rendering
+    smoothed = [list(iv) for iv in merged_intervals]
+    if hours >= 24 and len(smoothed) > 1:
+        changed = True
+        while changed and len(smoothed) > 1:
+            changed = False
+            for i, (t0, t1, mode) in enumerate(smoothed):
+                if mode != "manual_override" and (t1 - t0).total_seconds() < 15.0:
+                    if i > 0:
+                        smoothed[i - 1][1] = t1
+                    else:
+                        smoothed[i + 1][0] = t0
+                    smoothed.pop(i)
+                    # Re-merge adjacent identical modes
+                    remerged: List[List[Any]] = []
+                    for st0, st1, sm in smoothed:
+                        if remerged and remerged[-1][2] == sm:
+                            remerged[-1][1] = st1
+                        else:
+                            remerged.append([st0, st1, sm])
+                    smoothed = remerged
+                    changed = True
+                    break
+
+    segments = [
+        {
+            "start_ms": int(round(t0.timestamp() * 1000)),
+            "end_ms": int(round(t1.timestamp() * 1000)),
+            "mode": mode,
+        }
+        for t0, t1, mode in smoothed
+    ]
+    return segments, mode_durations_sec, override_events
+
+
+def _compute_daylight_harvest(
+    mode_states: List[Any],
+    light_states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    fallback_mode: str = "vacant",
+    fallback_light_on: bool = False,
+) -> Tuple[float, float]:
+    """Compute (occupied_sec, occupied_lights_off_sec) across [start_dt, end_dt]."""
+    mode_events: List[Tuple[datetime, str]] = []
+    for st in mode_states or []:
+        state_str, _, ts = _extract_state_ts(st)
+        cleaned = state_str.strip().lower()
+        if ts is None or not cleaned or cleaned in ("unknown", "unavailable", "none"):
+            continue
+        mode_events.append((ts, cleaned))
+    mode_events.sort(key=lambda item: item[0])
+
+    light_events: List[Tuple[datetime, bool]] = []
+    for st in light_states or []:
+        state_str, _, ts = _extract_state_ts(st)
+        if ts is None or not state_str:
+            continue
+        light_events.append((ts, state_str.strip().lower() == "on"))
+    light_events.sort(key=lambda item: item[0])
+
+    m_idx = 0
+    cur_mode = (fallback_mode or "vacant").strip().lower()
+    if mode_events:
+        while m_idx < len(mode_events) and mode_events[m_idx][0] <= start_dt:
+            cur_mode = mode_events[m_idx][1]
+            m_idx += 1
+        if m_idx == 0:
+            cur_mode = mode_events[0][1]
+
+    l_idx = 0
+    cur_light_on = bool(fallback_light_on)
+    if light_events:
+        while l_idx < len(light_events) and light_events[l_idx][0] <= start_dt:
+            cur_light_on = light_events[l_idx][1]
+            l_idx += 1
+
+    boundaries = {start_dt, end_dt}
+    for ts, _ in mode_events[m_idx:]:
+        if start_dt < ts < end_dt:
+            boundaries.add(ts)
+    for ts, _ in light_events[l_idx:]:
+        if start_dt < ts < end_dt:
+            boundaries.add(ts)
+
+    sorted_bounds = sorted(boundaries)
+    occupied_sec = 0.0
+    occupied_lights_off_sec = 0.0
+
+    for i in range(len(sorted_bounds) - 1):
+        t0 = sorted_bounds[i]
+        t1 = sorted_bounds[i + 1]
+        while m_idx < len(mode_events) and mode_events[m_idx][0] <= t0:
+            cur_mode = mode_events[m_idx][1]
+            m_idx += 1
+        while l_idx < len(light_events) and light_events[l_idx][0] <= t0:
+            cur_light_on = light_events[l_idx][1]
+            l_idx += 1
+
+        dt_sec = (t1 - t0).total_seconds()
+        if cur_mode == "occupied" and dt_sec > 0:
+            occupied_sec += dt_sec
+            if not cur_light_on:
+                occupied_lights_off_sec += dt_sec
+
+    return round(occupied_sec, 3), round(occupied_lights_off_sec, 3)
+
+
+def _compute_night_bands(
+    sun_states: List[Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[Dict[str, int]]:
+    """Extract below-horizon intervals from sun.sun history clipped to [start_dt, end_dt]."""
+    events: List[Tuple[datetime, str]] = []
+    for st in sun_states or []:
+        state_str, _, ts = _extract_state_ts(st)
+        cleaned = state_str.strip().lower()
+        if ts is None or cleaned not in ("below_horizon", "above_horizon"):
+            continue
+        events.append((ts, cleaned))
+    events.sort(key=lambda item: item[0])
+
+    if not events:
+        return []
+
+    idx = 0
+    n_ev = len(events)
+    cur_state: Optional[str] = None
+    while idx < n_ev and events[idx][0] <= start_dt:
+        cur_state = events[idx][1]
+        idx += 1
+    if cur_state is None:
+        # Infer state prior to first transition within window
+        cur_state = "above_horizon" if events[0][1] == "below_horizon" else "below_horizon"
+
+    bands: List[Dict[str, int]] = []
+    cursor = start_dt
+    while idx < n_ev and events[idx][0] < end_dt:
+        ev_ts, next_state = events[idx]
+        if ev_ts > cursor and cur_state == "below_horizon":
+            s_ms = int(round(cursor.timestamp() * 1000))
+            e_ms = int(round(ev_ts.timestamp() * 1000))
+            if bands and bands[-1]["end_ms"] == s_ms:
+                bands[-1]["end_ms"] = e_ms
+            else:
+                bands.append({"start_ms": s_ms, "end_ms": e_ms})
+        if ev_ts > cursor:
+            cursor = ev_ts
+        cur_state = next_state
+        idx += 1
+
+    if cursor < end_dt and cur_state == "below_horizon":
+        s_ms = int(round(cursor.timestamp() * 1000))
+        e_ms = int(round(end_dt.timestamp() * 1000))
+        if bands and bands[-1]["end_ms"] == s_ms:
+            bands[-1]["end_ms"] = e_ms
+        else:
+            bands.append({"start_ms": s_ms, "end_ms": e_ms})
+
+    return bands
+
+
+def _compute_lights_on_timeline(
+    hist_map: Dict[str, List[Any]],
+    light_ids: List[str],
+    start_dt: datetime,
+    end_dt: datetime,
+    bucket_sec: int,
+    n_buckets: int,
+) -> Dict[str, Any]:
+    """Compute per-bucket peak concurrent lights ON across all tracked lights."""
+    unique_lights = list(dict.fromkeys(eid for eid in light_ids if eid))
+    delta_events: List[Tuple[datetime, int]] = []
+    active = 0
+
+    for eid in unique_lights:
+        states = hist_map.get(eid) or []
+        per_light: List[Tuple[datetime, bool]] = []
+        for st in states:
+            state_str, _, ts = _extract_state_ts(st)
+            if ts is None or not state_str:
+                continue
+            per_light.append((ts, state_str.strip().lower() == "on"))
+        per_light.sort(key=lambda item: item[0])
+
+        idx = 0
+        was_on = False
+        while idx < len(per_light) and per_light[idx][0] <= start_dt:
+            was_on = per_light[idx][1]
+            idx += 1
+        if was_on:
+            active += 1
+
+        while idx < len(per_light) and per_light[idx][0] < end_dt:
+            ev_ts, is_on = per_light[idx]
+            if is_on != was_on:
+                delta_events.append((ev_ts, 1 if is_on else -1))
+                was_on = is_on
+            idx += 1
+
+    delta_events.sort(key=lambda item: item[0])
+    ev_idx = 0
+    n_ev = len(delta_events)
+
+    counts: List[int] = []
+    total_weighted_sec = 0.0
+    for b_idx in range(n_buckets):
+        b_start = start_dt + timedelta(seconds=b_idx * bucket_sec)
+        b_end = (
+            end_dt
+            if b_idx == n_buckets - 1
+            else start_dt + timedelta(seconds=(b_idx + 1) * bucket_sec)
+        )
+        while ev_idx < n_ev and delta_events[ev_idx][0] <= b_start:
+            active = max(0, active + delta_events[ev_idx][1])
+            ev_idx += 1
+
+        b_peak = active
+        cursor = b_start
+        while ev_idx < n_ev and delta_events[ev_idx][0] < b_end:
+            ev_ts, delta = delta_events[ev_idx]
+            if ev_ts > cursor:
+                total_weighted_sec += active * (ev_ts - cursor).total_seconds()
+                cursor = ev_ts
+            active = max(0, active + delta)
+            if active > b_peak:
+                b_peak = active
+            ev_idx += 1
+
+        if b_end > cursor:
+            total_weighted_sec += active * (b_end - cursor).total_seconds()
+
+        counts.append(max(0, b_peak))
+
+    window_sec = max(1.0, (end_dt - start_dt).total_seconds())
+    return {
+        "counts": counts,
+        "peak_on": max(counts) if counts else 0,
+        "avg_on": round(total_weighted_sec / window_sec, 1),
+        "total_tracked": len(unique_lights),
+    }
+
+
+def _build_sun_pref_curve(
+    seed_lux: float, user_prefs: List[Dict[str, Any]]
+) -> List[List[float]]:
+    """Evaluate blended target lux across sun elevations -30..70 degrees."""
+    return [
+        [
+            float(elev),
+            round(calculate_learned_target_lux(seed_lux, user_prefs, float(elev), None), 1),
+        ]
+        for elev in range(-30, 75, 5)
+    ]
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/get_stats",
+        vol.Optional("hours", default=24): vol.All(vol.Coerce(int), vol.In([6, 24, 168])),
+        vol.Optional("light_entities", default=[]): [str],
+    }
+)
+@websocket_api.async_response
+async def ws_get_stats(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    """Return Recorder-backed historical lighting analytics and learned sun preferences."""
+    engine: Optional[PassableLightingEngine] = hass.data.get(DOMAIN, {}).get("engine")
+    if not engine:
+        connection.send_error(
+            msg["id"], "not_found", "Passable Smart Light Engine is not loaded."
+        )
+        return
+
+    hours = int(msg.get("hours", 24))
+    bucket_map = {6: (72, 300), 24: (96, 900), 168: (168, 3600)}
+    n_buckets, bucket_sec = bucket_map.get(hours, (96, 900))
+
+    end_dt = dt_util.utcnow()
+    start_dt = end_dt - timedelta(hours=hours)
+    start_ms = int(round(start_dt.timestamp() * 1000))
+    end_ms = int(round(end_dt.timestamp() * 1000))
+    timestamps_ms = [
+        int(round((start_dt + timedelta(seconds=(i + 0.5) * bucket_sec)).timestamp() * 1000))
+        for i in range(n_buckets)
+    ]
+
+    try:
+        ent_reg = er.async_get(hass)
+    except Exception:
+        ent_reg = None
+
+    sun_state = hass.states.get("sun.sun")
+    elev = _safe_float(sun_state.attributes.get("elevation")) if sun_state else 0.0
+    elev = elev if elev is not None else 0.0
+    azim = (
+        _safe_float(sun_state.attributes.get("azimuth"))
+        if sun_state and "azimuth" in sun_state.attributes
+        else None
+    )
+
+    store = engine.store
+    learning_data = store.data
+
+    # Collect entities to query in Query 1 (room telemetry + sun.sun)
+    room_meta: List[Dict[str, Any]] = []
+    query1_entities: List[str] = ["sun.sun"]
+    for room_id, ctrl in sorted(
+        engine.controllers.items(),
+        key=lambda item: item[0].replace("_", " ").lower(),
+    ):
+        entry_data = ctrl.entry_data
+        light_entity = entry_data.get(CONF_LIGHT_ENTITY)
+        lux_sensor = entry_data.get(CONF_LUX_SENSOR)
+        target_lux_sensor = _resolve_entity_id(
+            ent_reg, "sensor", f"{DOMAIN}_{room_id}_target_lux_sensor"
+        )
+        active_mode_sensor = _resolve_entity_id(
+            ent_reg, "sensor", f"{DOMAIN}_{room_id}_active_mode"
+        )
+        for eid in (lux_sensor, target_lux_sensor, active_mode_sensor, light_entity):
+            if eid and eid not in query1_entities:
+                query1_entities.append(eid)
+
+        sec_lights = entry_data.get(CONF_SECONDARY_LIGHTS, DEFAULT_SECONDARY_LIGHTS) or []
+        if isinstance(sec_lights, str):
+            sec_lights = [sec_lights] if sec_lights else []
+        raw_leaves: List[str] = []
+        if light_entity:
+            raw_leaves.extend(get_light_members(hass, light_entity))
+        for sec in sec_lights:
+            if sec:
+                raw_leaves.extend(get_light_members(hass, sec))
+        leaf_lights = list(dict.fromkeys(raw_leaves))
+
+        room_meta.append(
+            {
+                "room_id": room_id,
+                "ctrl": ctrl,
+                "entry_data": entry_data,
+                "light_entity": light_entity,
+                "leaf_lights": leaf_lights,
+                "lux_sensor": lux_sensor,
+                "target_lux_sensor": target_lux_sensor,
+                "active_mode_sensor": active_mode_sensor,
+            }
+        )
+
+    req_lights = [
+        eid
+        for eid in dict.fromkeys(msg.get("light_entities") or [])
+        if isinstance(eid, str) and eid.startswith("light.")
+    ][:120]
+    if not req_lights:
+        fallback_lights: List[str] = []
+        for rm in room_meta:
+            for lid in rm["leaf_lights"] or ([rm["light_entity"]] if rm["light_entity"] else []):
+                if lid and lid not in fallback_lights:
+                    fallback_lights.append(lid)
+        req_lights = fallback_lights[:120]
+
+    extra_lights = [eid for eid in req_lights if eid not in query1_entities][:120]
+
+    hist_map: Dict[str, List[Any]] = {}
+    recorder_available = True
+
+    def _fetch_room_history() -> Dict[str, List[Any]]:
+        return history.get_significant_states(
+            hass,
+            start_time=start_dt,
+            end_time=end_dt,
+            entity_ids=query1_entities,
+            include_start_time_state=True,
+            significant_changes_only=False,
+        )
+
+    def _fetch_extra_lights_history() -> Dict[str, List[Any]]:
+        try:
+            return history.get_significant_states(
+                hass,
+                start_time=start_dt,
+                end_time=end_dt,
+                entity_ids=extra_lights,
+                include_start_time_state=True,
+                significant_changes_only=True,
+                no_attributes=True,
+            )
+        except TypeError:
+            return history.get_significant_states(
+                hass,
+                start_time=start_dt,
+                end_time=end_dt,
+                entity_ids=extra_lights,
+                include_start_time_state=True,
+                significant_changes_only=True,
+            )
+
+    try:
+        rec = recorder.get_instance(hass)
+        if query1_entities:
+            q1_res = await rec.async_add_executor_job(_fetch_room_history)
+            if isinstance(q1_res, dict):
+                hist_map.update(q1_res)
+        if extra_lights:
+            q2_res = await rec.async_add_executor_job(_fetch_extra_lights_history)
+            if isinstance(q2_res, dict):
+                hist_map.update(q2_res)
+    except Exception as err:
+        _LOGGER.debug("PassableSmartLighting: Recorder stats query unavailable: %s", err)
+        recorder_available = False
+
+    sun_states = hist_map.get("sun.sun") or ([sun_state] if sun_state else [])
+    night_bands = _compute_night_bands(sun_states, start_dt, end_dt)
+
+    floors_dict: Dict[str, str] = {}
+    rooms_stats: List[Dict[str, Any]] = []
+    total_active_sec = 0.0
+    total_override_sec = 0.0
+    total_override_events = 0
+    total_occupied_sec = 0.0
+    total_occupied_off_sec = 0.0
+    total_pref_samples = 0
+
+    for rm in room_meta:
+        room_id = rm["room_id"]
+        ctrl = rm["ctrl"]
+        entry_data = rm["entry_data"]
+        light_entity = rm["light_entity"]
+        lux_sensor = rm["lux_sensor"]
+        target_lux_sensor = rm["target_lux_sensor"]
+        active_mode_sensor = rm["active_mode_sensor"]
+
+        floor_id, floor_name = _resolve_room_floor(hass, light_entity)
+        if floor_id:
+            floors_dict.setdefault(floor_id, floor_name or floor_id)
+
+        seed_lux = float(entry_data.get(CONF_TARGET_LUX, DEFAULT_TARGET_LUX))
+        user_prefs = learning_data.get("user_prefs", {}).get(room_id, [])
+        blended_target_lux = round(
+            calculate_learned_target_lux(seed_lux, user_prefs, elev, azim), 1
+        )
+        curves = learning_data.get("room_curves", {}).get(room_id, {})
+
+        live_mode = compute_room_active_mode(hass, engine, ctrl)
+        live_light_st = hass.states.get(light_entity) if light_entity else None
+        is_light_on = bool(live_light_st and live_light_st.state == "on")
+
+        smoothed_lux = (
+            engine.get_smoothed_lux_optional(room_id, lux_sensor)
+            if lux_sensor
+            else None
+        )
+        ambient_lux = round(smoothed_lux, 1) if smoothed_lux is not None else None
+        if ambient_lux is None and lux_sensor:
+            raw_lux_st = hass.states.get(lux_sensor)
+            ambient_lux = _safe_float(raw_lux_st.state) if raw_lux_st else None
+            if ambient_lux is not None:
+                ambient_lux = round(ambient_lux, 1)
+
+        if lux_sensor:
+            lux_states = hist_map.get(lux_sensor) or (
+                [hass.states.get(lux_sensor)] if hass.states.get(lux_sensor) else []
+            )
+            lux_series, lux_min, lux_avg, lux_max = _bucket_numeric_series(
+                lux_states, start_dt, end_dt, bucket_sec, n_buckets
+            )
+        else:
+            lux_series = [None] * n_buckets
+            lux_min = lux_avg = lux_max = None
+
+        tgt_states = hist_map.get(target_lux_sensor) if target_lux_sensor else []
+        target_lux_series, _, _, _ = _bucket_numeric_series(
+            tgt_states or [], start_dt, end_dt, bucket_sec, n_buckets
+        )
+        if all(v is None for v in target_lux_series):
+            target_lux_series = [blended_target_lux] * n_buckets
+
+        light_states = hist_map.get(light_entity) if light_entity else []
+        if not light_states and live_light_st:
+            light_states = [live_light_st]
+        brightness_series, lit_hours = _bucket_light_brightness(
+            light_states or [], start_dt, end_dt, bucket_sec, n_buckets
+        )
+
+        mode_states = hist_map.get(active_mode_sensor) if active_mode_sensor else []
+        mode_segments, mode_durations_sec, override_events = _compute_mode_timeline(
+            mode_states or [], start_dt, end_dt, fallback_mode=live_mode, hours=hours
+        )
+        mode_hours = {
+            m: round(dur / 3600.0, 2) for m, dur in mode_durations_sec.items() if dur > 0
+        }
+
+        override_sec = mode_durations_sec.get("manual_override", 0.0)
+        override_hours = round(override_sec / 3600.0, 2)
+        room_active_sec = sum(
+            dur
+            for m, dur in mode_durations_sec.items()
+            if m not in ("vacant", "disabled", "forced_off", "frozen")
+        )
+        lit_sec = lit_hours * 3600.0
+        denom_sec = room_active_sec if room_active_sec > 0 else lit_sec
+        if denom_sec > 0:
+            auto_pct = round(max(0.0, min(100.0, 100.0 * (1.0 - override_sec / denom_sec))), 1)
+        else:
+            auto_pct = 100.0 if override_sec == 0 else 0.0
+
+        total_active_sec += denom_sec
+        total_override_sec += override_sec
+        total_override_events += override_events
+
+        occ_sec, occ_off_sec = _compute_daylight_harvest(
+            mode_states or [],
+            light_states or [],
+            start_dt,
+            end_dt,
+            fallback_mode=live_mode,
+            fallback_light_on=is_light_on,
+        )
+        daylight_harvest_pct = (
+            round(100.0 * occ_off_sec / occ_sec, 1) if occ_sec > 0 else None
+        )
+        if lux_sensor and occ_sec > 0:
+            total_occupied_sec += occ_sec
+            total_occupied_off_sec += occ_off_sec
+
+        samples = []
+        for pref in user_prefs:
+            if not isinstance(pref, Mapping):
+                continue
+            p_elev = _safe_float(pref.get("sun_elev"))
+            p_lux = _safe_float(pref.get("preferred_lux"))
+            if p_elev is None or p_lux is None:
+                continue
+            p_azim = _safe_float(pref.get("sun_azimuth"))
+            samples.append(
+                {
+                    "elev": round(p_elev, 1),
+                    "azim": round(p_azim, 1) if p_azim is not None else None,
+                    "lux": round(p_lux, 1),
+                }
+            )
+        total_pref_samples += len(samples)
+
+        rooms_stats.append(
+            {
+                "room_id": room_id,
+                "name": room_id.replace("_", " ").title(),
+                "floor_id": floor_id,
+                "floor_name": floor_name,
+                "light_entity": light_entity,
+                "lux_sensor": lux_sensor,
+                "has_lux_sensor": bool(lux_sensor),
+                "active_mode": live_mode,
+                "is_light_on": is_light_on,
+                "ambient_lux": ambient_lux,
+                "seed_target_lux": int(round(seed_lux)),
+                "blended_target_lux": blended_target_lux,
+                "lux_series": lux_series,
+                "target_lux_series": target_lux_series,
+                "brightness_series": brightness_series,
+                "mode_segments": mode_segments,
+                "mode_hours": mode_hours,
+                "lit_hours": lit_hours,
+                "override_events": override_events,
+                "override_hours": override_hours,
+                "auto_pct": auto_pct,
+                "daylight_harvest_pct": daylight_harvest_pct,
+                "lux_min": lux_min,
+                "lux_avg": lux_avg,
+                "lux_max": lux_max,
+                "curve_points_count": len(curves),
+                "sun_prefs": {
+                    "seed_lux": int(round(seed_lux)),
+                    "blended_lux": blended_target_lux,
+                    "samples": samples,
+                    "curve": _build_sun_pref_curve(seed_lux, user_prefs),
+                },
+            }
+        )
+
+    # Whole-home lights ON timeline
+    # Include fallback current states for lights with empty recorder history
+    for eid in req_lights:
+        if eid not in hist_map:
+            cur_st = hass.states.get(eid)
+            if cur_st is not None:
+                hist_map[eid] = [cur_st]
+    lights_on_timeline = _compute_lights_on_timeline(
+        hist_map, req_lights, start_dt, end_dt, bucket_sec, n_buckets
+    )
+
+    busiest_room = max(rooms_stats, key=lambda r: r["lit_hours"], default=None)
+    busiest_hours = busiest_room["lit_hours"] if busiest_room else 0.0
+
+    try:
+        summary_payload = compute_engine_summary(hass, engine)
+    except Exception:
+        summary_payload = {}
+
+    if total_active_sec > 0:
+        overall_auto_pct = round(
+            max(0.0, min(100.0, 100.0 * (1.0 - total_override_sec / total_active_sec))),
+            1,
+        )
+    else:
+        overall_auto_pct = 100.0 if total_override_sec == 0 else 0.0
+
+    overall_daylight_pct = (
+        round(100.0 * total_occupied_off_sec / total_occupied_sec, 1)
+        if total_occupied_sec > 0
+        else None
+    )
+
+    floors_list = [
+        {"id": fid, "name": fname}
+        for fid, fname in sorted(floors_dict.items(), key=lambda item: item[1].lower())
+    ]
+
+    connection.send_result(
+        msg["id"],
+        {
+            "hours": hours,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "bucket_sec": bucket_sec,
+            "timestamps_ms": timestamps_ms,
+            "recorder_available": recorder_available,
+            "current_sun_elev": round(elev, 1),
+            "current_sun_azim": round(azim, 1) if azim is not None else None,
+            "night_bands": night_bands,
+            "floors": floors_list,
+            "kpis": {
+                "total_lit_hours": round(sum(r["lit_hours"] for r in rooms_stats), 1),
+                "busiest_room_name": (
+                    busiest_room["name"] if busiest_room and busiest_hours > 0 else None
+                ),
+                "busiest_room_hours": round(busiest_hours, 1),
+                "auto_pct": overall_auto_pct,
+                "override_events": total_override_events,
+                "override_hours": round(total_override_sec / 3600.0, 1),
+                "daylight_harvest_pct": overall_daylight_pct,
+                "calibrated_rooms": sum(
+                    1 for r in rooms_stats if r["curve_points_count"] > 0
+                ),
+                "total_rooms": len(rooms_stats),
+                "total_pref_samples": total_pref_samples,
+                "current_circadian_kelvin": summary_payload.get("current_circadian_kelvin"),
+            },
+            "lights_on_timeline": lights_on_timeline,
+            "rooms": rooms_stats,
         },
     )

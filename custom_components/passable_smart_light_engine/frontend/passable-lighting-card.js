@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.9.4";
+const CARD_VERSION = "2.10.0";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -54,6 +54,44 @@ const RESET_TYPE_OPTIONS = [
   { value: "late_night_prefs", label: "Late Night Presets" },
 ];
 
+const STATS_SERIES_COLORS = [
+  "#f59e0b",
+  "#38bdf8",
+  "#10b981",
+  "#a855f7",
+  "#f43f5e",
+  "#eab308",
+  "#06b6d4",
+  "#fb923c",
+  "#818cf8",
+  "#2dd4bf",
+];
+
+const STATS_MODE_COLORS = {
+  occupied: "#22c55e",
+  manual_override: "#f59e0b",
+  media: "#a855f7",
+  late_night: "#6366f1",
+  holiday: "#ec4899",
+  presence_simulation: "#06b6d4",
+  secondary_active: "#14b8a6",
+  notification: "#ef4444",
+  frozen: "#64748b",
+  disabled: "#64748b",
+  forced_off: "#475569",
+  vacant: "rgba(148,163,184,0.16)",
+};
+
+const STATS_USAGE_MODE_ORDER = [
+  "occupied",
+  "manual_override",
+  "media",
+  "late_night",
+  "holiday",
+  "presence_simulation",
+  "secondary_active",
+];
+
 class PassableLightingCard extends LitElement {
   static getConfigElement() {
     return document.createElement("passable-lighting-card-editor");
@@ -69,8 +107,10 @@ class PassableLightingCard extends LitElement {
       show_holiday_banner: false,
       show_master_dimmer: false,
       show_engine_footer: true,
+      show_stats_button: true,
       default_expanded_floor: "",
       stats_navigation_path: "",
+      stats_tap_action: null,
       exclude_entities: [],
       alerts: [],
       floors: [],
@@ -97,6 +137,18 @@ class PassableLightingCard extends LitElement {
       _draggingSliders: { state: true },
       _toastMsg: { state: true },
       _tickNow: { state: true },
+      _statsModalOpen: { state: true },
+      _statsTab: { state: true },
+      _statsHours: { state: true },
+      _statsData: { state: true },
+      _statsLoading: { state: true },
+      _statsError: { state: true },
+      _statsSelectedRoom: { state: true },
+      _statsCompareFloor: { state: true },
+      _statsCompareScale: { state: true },
+      _statsHiddenRooms: { state: true },
+      _statsUsageSort: { state: true },
+      _statsHoverIdx: { state: true },
     };
   }
 
@@ -122,6 +174,19 @@ class PassableLightingCard extends LitElement {
     this._draggingSliders = {};
     this._toastMsg = null;
     this._tickNow = Date.now();
+    this._statsModalOpen = false;
+    this._statsTab = "inspector";
+    this._statsHours = 24;
+    this._statsData = null;
+    this._statsLoading = false;
+    this._statsError = null;
+    this._statsSelectedRoom = null;
+    this._statsCompareFloor = "all";
+    this._statsCompareScale = "raw";
+    this._statsHiddenRooms = {};
+    this._statsUsageSort = "lit";
+    this._statsHoverIdx = {};
+    this._statsCache = {};
     this._countdownInterval = null;
     this._closeModalTimer = null;
     this._toastTimer = null;
@@ -144,8 +209,9 @@ class PassableLightingCard extends LitElement {
     this._onOverlayTouchStart = this._onOverlayTouchStart.bind(this);
     this._onOverlayTouchMove = this._onOverlayTouchMove.bind(this);
     this._onKeyDown = (ev) => {
-      if (ev.key === "Escape" && this._modalOpen) {
-        this._closeModal();
+      if (ev.key === "Escape") {
+        if (this._modalOpen) this._closeModal();
+        if (this._statsModalOpen) this._closeStatsModal();
       }
     };
   }
@@ -163,8 +229,10 @@ class PassableLightingCard extends LitElement {
       show_holiday_banner: false,
       show_master_dimmer: false,
       show_engine_footer: true,
+      show_stats_button: true,
       default_expanded_floor: "",
       stats_navigation_path: "",
+      stats_tap_action: null,
       exclude_entities: [],
       alerts: [],
       floors: [],
@@ -213,7 +281,7 @@ class PassableLightingCard extends LitElement {
     if (changedProps.has("hass") && this.hass && !this._wsUnsub && !this._wsSubscribing && !this._wsData) {
       this._subscribeEngine();
     }
-    if (this._modalOpen) {
+    if (this._modalOpen || this._statsModalOpen) {
       this._attachOverlayScrollGuard();
     } else {
       this._detachOverlayScrollGuard();
@@ -1159,6 +1227,10 @@ class PassableLightingCard extends LitElement {
 
   _openModal(tab = "lights", floorFilter = null, expandRoomId = null) {
     this._fireHaptic("light");
+    if (this._statsModalOpen) {
+      this._statsModalOpen = false;
+      this._statsHoverIdx = {};
+    }
     this._modalTab = tab || "lights";
     if (floorFilter) {
       this._modalFloorFilter = floorFilter;
@@ -1200,6 +1272,102 @@ class PassableLightingCard extends LitElement {
       this._unlockBackgroundScroll();
       this._syncCountdownTimer();
     }, 180);
+  }
+
+  _openStatsModal(tab = null, roomId = null) {
+    this._fireHaptic("light");
+    if (this._modalOpen) {
+      this._modalOpen = false;
+      this._showModalDimmer = false;
+      this._expandedScenesEntity = null;
+      this._confirmResetRoom = null;
+    }
+    if (tab) {
+      this._statsTab = tab;
+    }
+    if (roomId) {
+      this._statsSelectedRoom = roomId;
+    }
+    this._statsHoverIdx = {};
+    clearTimeout(this._closeModalTimer);
+    clearTimeout(this._swipeResetTimer);
+    this._statsModalOpen = true;
+    this._lockBackgroundScroll();
+    this._syncCountdownTimer();
+    this._fetchStats(this._statsHours, false);
+  }
+
+  _closeStatsModal() {
+    this._fireHaptic("light");
+    clearTimeout(this._swipeResetTimer);
+    const overlay = this.shadowRoot?.querySelector(".popup-overlay");
+    const content = this.shadowRoot?.querySelector(".popup-content");
+    if (overlay) overlay.classList.add("closing");
+    if (content) content.classList.add("closing");
+
+    clearTimeout(this._closeModalTimer);
+    this._closeModalTimer = setTimeout(() => {
+      this._statsModalOpen = false;
+      this._statsHoverIdx = {};
+      this._detachOverlayScrollGuard();
+      this._unlockBackgroundScroll();
+      this._syncCountdownTimer();
+    }, 180);
+  }
+
+  _ensureSelectedStatsRoom(data) {
+    const rooms = data?.rooms || [];
+    if (!rooms.length) {
+      this._statsSelectedRoom = null;
+      return;
+    }
+    if (
+      this._statsSelectedRoom &&
+      rooms.some((r) => r.room_id === this._statsSelectedRoom)
+    ) {
+      return;
+    }
+    const preferred =
+      rooms.find((r) => r.has_lux_sensor && r.is_light_on) ||
+      rooms.find((r) => r.has_lux_sensor) ||
+      rooms[0];
+    this._statsSelectedRoom = preferred?.room_id || null;
+  }
+
+  async _fetchStats(hours = this._statsHours, force = false) {
+    if (!this.hass) return;
+    const reqHours = [6, 24, 168].includes(Number(hours)) ? Number(hours) : 24;
+    const cached = this._statsCache[reqHours];
+    if (!force && cached && Date.now() - cached.fetchedAt < 60000) {
+      this._statsData = cached.data;
+      this._statsError = null;
+      this._statsLoading = false;
+      this._ensureSelectedStatsRoom(cached.data);
+      return;
+    }
+
+    this._statsLoading = true;
+    this._statsError = null;
+    try {
+      const allLeaves = this._getAllLeafLights(this._resolveFloors()).slice(0, 120);
+      const res = await this.hass.callWS({
+        type: `${ENGINE_DOMAIN}/get_stats`,
+        hours: reqHours,
+        light_entities: allLeaves,
+      });
+      this._statsCache[reqHours] = { fetchedAt: Date.now(), data: res };
+      if (this._statsHours !== reqHours) return;
+      this._statsData = res;
+      this._ensureSelectedStatsRoom(res);
+    } catch (err) {
+      if (this._statsHours === reqHours) {
+        this._statsError = err?.message || "Failed to load Light Stats";
+      }
+    } finally {
+      if (this._statsHours === reqHours) {
+        this._statsLoading = false;
+      }
+    }
   }
 
   _lockBackgroundScroll() {
@@ -1355,6 +1523,7 @@ class PassableLightingCard extends LitElement {
   _handlePopupTouchStart(e) {
     if (!e.touches || e.touches.length !== 1) return;
     if (e.target?.closest?.('input[type="range"]')) return;
+    if (e.target?.closest?.(".stats-chart-interactive")) return;
     const popupContent = e.currentTarget;
     const scrollArea = popupContent.querySelector(".modal-scroll-area");
     const inScroll = Boolean(scrollArea && e.target && scrollArea.contains(e.target));
@@ -1447,6 +1616,8 @@ class PassableLightingCard extends LitElement {
       clearTimeout(this._closeModalTimer);
       this._closeModalTimer = setTimeout(() => {
         this._modalOpen = false;
+        this._statsModalOpen = false;
+        this._statsHoverIdx = {};
         this._showModalDimmer = false;
         this._expandedScenesEntity = null;
         this._confirmResetRoom = null;
@@ -1732,12 +1903,18 @@ class PassableLightingCard extends LitElement {
               `
             : ""}
 
-          ${this.config?.stats_navigation_path
+          ${this.config?.show_stats_button !== false
             ? html`
                 <button
                   type="button"
                   class="icon-circle-btn"
-                  @click=${() => this._navigateTo(this.config.stats_navigation_path)}
+                  @click=${() => {
+                    if (this.config?.stats_tap_action?.action) {
+                      this._executeActionConfig(this.config.stats_tap_action);
+                    } else {
+                      this._openStatsModal();
+                    }
+                  }}
                   title="Open Light Stats"
                 >
                   <ha-icon icon="mdi:chart-line" style="--mdc-icon-size:16px;"></ha-icon>
@@ -3589,6 +3766,1779 @@ class PassableLightingCard extends LitElement {
     `;
   }
 
+  // ==========================================
+  // LIGHT STATS MODAL & SVG ANALYTICS
+  // ==========================================
+
+  _formatStatsAxisTime(tsMs, hours) {
+    if (!tsMs) return "";
+    const d = new Date(tsMs);
+    if (hours >= 168) {
+      return d.toLocaleDateString([], { weekday: "short" });
+    }
+    if (hours <= 6) {
+      return d
+        .toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+        .replace(":00 ", " ");
+    }
+    return d.toLocaleTimeString([], { hour: "numeric" });
+  }
+
+  _formatStatsTooltipTime(tsMs, hours) {
+    if (!tsMs) return "";
+    const d = new Date(tsMs);
+    if (hours >= 168) {
+      return d.toLocaleString([], {
+        weekday: "short",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+    }
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+
+  _formatHoursShort(hrs) {
+    const n = Number(hrs);
+    if (isNaN(n) || n <= 0) return "0.0h";
+    if (n < 1) {
+      return `${Math.max(1, Math.round(n * 60))}m`;
+    }
+    return `${n.toFixed(1)}h`;
+  }
+
+  _formatCompactNum(val) {
+    if (val === null || val === undefined || isNaN(Number(val))) return "--";
+    const n = Number(val);
+    if (n >= 1000) {
+      const k = n / 1000;
+      return Number.isInteger(k) ? `${k}k` : `${k.toFixed(1)}k`;
+    }
+    const r = Math.round(n * 10) / 10;
+    return Number.isInteger(r) ? String(r) : r.toFixed(1).replace(/\.0$/, "");
+  }
+
+  _computeNiceAxis(maxVal, steps = 4) {
+    const safeMax = Math.max(1, Number(maxVal) || 1);
+    const rawStep = safeMax / steps;
+    const niceSteps = [
+      0.5, 1, 2, 2.5, 5, 10, 15, 20, 25, 40, 50, 75, 100, 150, 200, 250, 500, 1000, 2000,
+    ];
+    const step =
+      niceSteps.find((v) => v >= rawStep) ?? Math.ceil(rawStep / 500) * 500;
+    const yMax = step * steps;
+    const ticks = [];
+    for (let i = 0; i <= steps; i++) {
+      ticks.push(Math.round(step * i * 10) / 10);
+    }
+    return { yMax, ticks };
+  }
+
+  _getStatsModeColor(mode) {
+    return (
+      STATS_MODE_COLORS[String(mode || "vacant").toLowerCase()] ||
+      "rgba(148,163,184,0.28)"
+    );
+  }
+
+  _getStatsModeLabel(mode) {
+    const key = String(mode || "vacant").toLowerCase();
+    return MODE_LABELS[key] || key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  _getModeAtTimestamp(segments, tsMs, fallbackMode = "vacant") {
+    if (!Array.isArray(segments) || segments.length === 0 || tsMs == null) {
+      return fallbackMode;
+    }
+    for (const seg of segments) {
+      if (tsMs >= seg.start_ms && tsMs <= seg.end_ms) {
+        return seg.mode || fallbackMode;
+      }
+    }
+    return fallbackMode;
+  }
+
+  _buildSegmentedPolylines(values, timestampsMs, toX, toY) {
+    const segments = [];
+    const points = [];
+    let curSeg = [];
+    for (let i = 0; i < timestampsMs.length; i++) {
+      const val = values?.[i];
+      if (val === null || val === undefined || isNaN(Number(val))) {
+        if (curSeg.length > 0) {
+          segments.push(curSeg);
+          curSeg = [];
+        }
+        points.push(null);
+        continue;
+      }
+      const x = toX(timestampsMs[i]);
+      const y = toY(Number(val));
+      const pt = { x, y, val: Number(val), idx: i };
+      curSeg.push(pt);
+      points.push(pt);
+    }
+    if (curSeg.length > 0) segments.push(curSeg);
+
+    const polylines = segments
+      .filter((seg) => seg.length >= 2)
+      .map((seg) => seg.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" "));
+    return { polylines, points, segments };
+  }
+
+  _buildAreaPaths(values, timestampsMs, toX, toY, yBase) {
+    const { segments } = this._buildSegmentedPolylines(values, timestampsMs, toX, toY);
+    return segments
+      .filter((seg) => seg.length >= 2)
+      .map((seg) => {
+        const first = seg[0];
+        const last = seg[seg.length - 1];
+        return (
+          `M ${first.x.toFixed(1)} ${yBase.toFixed(1)} ` +
+          seg.map((p) => `L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ") +
+          ` L ${last.x.toFixed(1)} ${yBase.toFixed(1)} Z`
+        );
+      });
+  }
+
+  _handleChartScrub(chartKey, ev, padLeft, plotW, svgW, data) {
+    const timestamps = data?.timestamps_ms || [];
+    const count = timestamps.length;
+    if (!count) return;
+    const rect = ev.currentTarget?.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0) return;
+
+    const clientX =
+      ev.touches && ev.touches.length > 0
+        ? ev.touches[0].clientX
+        : ev.changedTouches && ev.changedTouches.length > 0
+          ? ev.changedTouches[0].clientX
+          : ev.clientX;
+    if (clientX === undefined) return;
+
+    const svgX = ((clientX - rect.left) / rect.width) * svgW;
+    const clamped = Math.max(padLeft, Math.min(padLeft + plotW, svgX));
+    const frac = (clamped - padLeft) / plotW;
+    const startMs = data.start_ms ?? timestamps[0];
+    const endMs = data.end_ms ?? timestamps[count - 1];
+    const targetMs = startMs + frac * Math.max(1, endMs - startMs);
+
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < count; i++) {
+      const dist = Math.abs(timestamps[i] - targetMs);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+      }
+    }
+    if (this._statsHoverIdx?.[chartKey] !== bestIdx) {
+      this._statsHoverIdx = { ...this._statsHoverIdx, [chartKey]: bestIdx };
+    }
+  }
+
+  _clearChartScrub(chartKey) {
+    if (this._statsHoverIdx?.[chartKey] != null) {
+      this._statsHoverIdx = { ...this._statsHoverIdx, [chartKey]: null };
+    }
+  }
+
+  _renderTimeGridSvg(data, padLeft, plotW, padTop, y0, labelY, toTimeX) {
+    const startMs = data.start_ms;
+    const endMs = data.end_ms;
+    const hours = data.hours || 24;
+    const spanMs = Math.max(1, endMs - startMs);
+    const nightBands = Array.isArray(data.night_bands) ? data.night_bands : [];
+
+    const tickFracs = hours >= 168 ? [0, 1 / 7, 2 / 7, 3 / 7, 4 / 7, 5 / 7, 6 / 7, 1] : [0, 0.25, 0.5, 0.75, 1];
+
+    return svg`
+      ${nightBands.map((band) => {
+        const x1 = toTimeX(Math.max(startMs, band.start_ms));
+        const x2 = toTimeX(Math.min(endMs, band.end_ms));
+        const w = x2 - x1;
+        if (w <= 0.5) return "";
+        return svg`
+          <rect
+            x="${x1.toFixed(1)}"
+            y="${padTop}"
+            width="${w.toFixed(1)}"
+            height="${(y0 - padTop).toFixed(1)}"
+            fill="rgba(99, 102, 241, 0.08)"
+          ></rect>
+        `;
+      })}
+
+      ${tickFracs.map((frac, idx) => {
+        const ts = startMs + frac * spanMs;
+        const x = toTimeX(ts);
+        const anchor = idx === 0 ? "start" : idx === tickFracs.length - 1 ? "end" : "middle";
+        return svg`
+          <line
+            x1="${x.toFixed(1)}"
+            y1="${padTop}"
+            x2="${x.toFixed(1)}"
+            y2="${y0}"
+            stroke="rgba(148, 163, 184, 0.14)"
+            stroke-dasharray="3 3"
+            stroke-width="1"
+          ></line>
+          <text
+            x="${x.toFixed(1)}"
+            y="${labelY}"
+            text-anchor="${anchor}"
+            fill="var(--secondary-text-color)"
+            font-size="9.5"
+          >${this._formatStatsAxisTime(ts, hours)}</text>
+        `;
+      })}
+    `;
+  }
+
+  _renderSunPrefsSvg(room, currentSunElev) {
+    const sunPrefs = room?.sun_prefs || {};
+    const samples = Array.isArray(sunPrefs.samples) ? sunPrefs.samples : [];
+    const curve = Array.isArray(sunPrefs.curve) ? sunPrefs.curve : [];
+    const seedLux = Number(sunPrefs.seed_lux ?? room?.seed_target_lux ?? 40);
+    const blendedLux = Number(sunPrefs.blended_lux ?? room?.blended_target_lux ?? seedLux);
+
+    const allLuxVals = [
+      seedLux,
+      blendedLux,
+      ...samples.map((s) => Number(s.lux)).filter((v) => !isNaN(v)),
+      ...curve.map(([, l]) => Number(l)).filter((v) => !isNaN(v)),
+    ];
+    const maxLux = Math.max(10, ...allLuxVals);
+    const { yMax, ticks: yTicks } = this._computeNiceAxis(maxLux * 1.15, 4);
+
+    const svgW = 560;
+    const svgH = 158;
+    const padLeft = 44;
+    const padRight = 18;
+    const padTop = 14;
+    const padBottom = 32;
+    const plotW = svgW - padLeft - padRight;
+    const plotH = svgH - padTop - padBottom;
+    const y0 = padTop + plotH;
+
+    const minElev = -30;
+    const maxElev = 70;
+    const toX = (elev) =>
+      padLeft +
+      (Math.max(0, Math.min(1, (Number(elev) - minElev) / (maxElev - minElev)))) * plotW;
+    const toY = (lux) =>
+      padTop + plotH - Math.max(0, Math.min(1, Number(lux) / yMax)) * plotH;
+
+    const curvePts = curve
+      .map(([elev, lux]) => `${toX(elev).toFixed(1)},${toY(lux).toFixed(1)}`)
+      .join(" ");
+    const xTicks = [-30, -15, 0, 15, 30, 45, 60];
+    const horizonX = toX(0);
+    const seedY = toY(seedLux);
+    const nowElev = Number(currentSunElev ?? 0);
+    const nowX = toX(nowElev);
+    const nowY = toY(blendedLux);
+
+    return html`
+      <div class="passable-section-card">
+        <div class="stats-chart-header">
+          <div class="stats-chart-title-wrap">
+            <span class="stats-chart-title">Sun-Elevation Target Learning</span>
+            <span class="zone-inline-chip neutral">
+              ${samples.length} sample${samples.length === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div class="stats-chart-submeta">
+            Seed ${Math.round(seedLux)} lx • Now ${this._formatCompactNum(blendedLux)} lx
+          </div>
+        </div>
+
+        <svg
+          viewBox="0 0 ${svgW} ${svgH}"
+          class="stats-svg"
+          role="img"
+          aria-label="Learned target lux across sun elevation"
+        >
+          <rect
+            x="${padLeft}"
+            y="${padTop}"
+            width="${Math.max(0, horizonX - padLeft).toFixed(1)}"
+            height="${plotH}"
+            fill="rgba(99, 102, 241, 0.08)"
+          ></rect>
+
+          ${yTicks.map((val) => {
+            const y = toY(val);
+            return svg`
+              <line
+                x1="${padLeft}"
+                y1="${y.toFixed(1)}"
+                x2="${padLeft + plotW}"
+                y2="${y.toFixed(1)}"
+                stroke="${val === 0 ? "rgba(148,163,184,0.32)" : "rgba(148,163,184,0.14)"}"
+                stroke-dasharray="${val === 0 ? "none" : "3 3"}"
+                stroke-width="1"
+              ></line>
+              <text
+                x="${padLeft - 6}"
+                y="${(y + 3.5).toFixed(1)}"
+                text-anchor="end"
+                fill="var(--secondary-text-color)"
+                font-size="9.5"
+              >${this._formatCompactNum(val)} lx</text>
+            `;
+          })}
+
+          ${xTicks.map((deg) => {
+            const x = toX(deg);
+            const isHorizon = deg === 0;
+            return svg`
+              <line
+                x1="${x.toFixed(1)}"
+                y1="${padTop}"
+                x2="${x.toFixed(1)}"
+                y2="${y0}"
+                stroke="${isHorizon ? "rgba(148,163,184,0.38)" : "rgba(148,163,184,0.12)"}"
+                stroke-dasharray="${isHorizon ? "4 2" : "3 3"}"
+                stroke-width="1"
+              ></line>
+              <text
+                x="${x.toFixed(1)}"
+                y="${y0 + 13}"
+                text-anchor="middle"
+                fill="var(--secondary-text-color)"
+                font-size="9.5"
+              >${deg}°</text>
+            `;
+          })}
+
+          <text
+            x="${padLeft + plotW / 2}"
+            y="${y0 + 27}"
+            text-anchor="middle"
+            fill="var(--secondary-text-color)"
+            font-size="9.5"
+            font-weight="600"
+          >Sun Elevation (Night &lt; 0° • Daylight &gt; 0°)</text>
+
+          <line
+            x1="${padLeft}"
+            y1="${seedY.toFixed(1)}"
+            x2="${padLeft + plotW}"
+            y2="${seedY.toFixed(1)}"
+            stroke="rgba(148, 163, 184, 0.55)"
+            stroke-dasharray="5 3"
+            stroke-width="1.3"
+          ></line>
+
+          ${curvePts
+            ? svg`
+                <polyline
+                  fill="none"
+                  stroke="#38bdf8"
+                  stroke-width="2.2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  points="${curvePts}"
+                ></polyline>
+              `
+            : ""}
+
+          ${samples.map((s) => {
+            const cx = toX(s.elev);
+            const cy = toY(s.lux);
+            return svg`
+              <circle
+                cx="${cx.toFixed(1)}"
+                cy="${cy.toFixed(1)}"
+                r="3.2"
+                fill="rgba(245, 158, 11, 0.55)"
+                stroke="#f59e0b"
+                stroke-width="1"
+              ></circle>
+            `;
+          })}
+
+          <line
+            x1="${nowX.toFixed(1)}"
+            y1="${padTop}"
+            x2="${nowX.toFixed(1)}"
+            y2="${y0}"
+            stroke="#a855f7"
+            stroke-dasharray="3 3"
+            stroke-width="1.3"
+          ></line>
+
+          <circle
+            cx="${nowX.toFixed(1)}"
+            cy="${nowY.toFixed(1)}"
+            r="4.5"
+            fill="#38bdf8"
+            stroke="#ffffff"
+            stroke-width="1.6"
+          ></circle>
+        </svg>
+
+        <div class="stats-legend-row">
+          <span class="stats-legend-item">
+            <span class="stats-legend-line" style="background:#38bdf8;"></span>Learned Target
+          </span>
+          <span class="stats-legend-item">
+            <span class="stats-legend-dash" style="border-color:rgba(148,163,184,0.7);"></span>Seed (${Math.round(seedLux)} lx)
+          </span>
+          <span class="stats-legend-item">
+            <span class="stats-legend-dot" style="background:#f59e0b;"></span>Pref Samples
+          </span>
+          <span class="stats-legend-item">
+            <span class="stats-legend-dot" style="background:#a855f7;"></span>Now (${Math.round(nowElev)}°)
+          </span>
+        </div>
+
+        ${samples.length === 0
+          ? html`
+              <div class="stats-muted-note">
+                No manual preference samples yet — using ${Math.round(seedLux)} lx seed until manual adjustments are learned.
+              </div>
+            `
+          : ""}
+      </div>
+    `;
+  }
+
+  _renderStatsInspectorTab(data) {
+    const rooms = data?.rooms || [];
+    if (rooms.length === 0) {
+      return html`
+        <div class="modal-empty-state">No Smart Light Engine rooms configured yet.</div>
+      `;
+    }
+
+    const room =
+      rooms.find((r) => r.room_id === this._statsSelectedRoom) || rooms[0];
+    const timestamps = data.timestamps_ms || [];
+    const startMs = data.start_ms;
+    const endMs = data.end_ms;
+    const spanMs = Math.max(1, endMs - startMs);
+
+    const svgW = 560;
+    const svgH = 232;
+    const padLeft = 44;
+    const padRight = 38;
+    const padTop = 14;
+    const plotH = 152;
+    const y0 = padTop + plotH; // 166
+    const plotW = svgW - padLeft - padRight; // 478
+    const ribbonY = 176;
+    const ribbonH = 14;
+    const axisLabelY = 212;
+
+    const toTimeX = (ms) =>
+      padLeft + Math.max(0, Math.min(1, (ms - startMs) / spanMs)) * plotW;
+    const toPctY = (pct) =>
+      padTop + plotH - (Math.max(0, Math.min(100, Number(pct) || 0)) / 100) * plotH;
+
+    const luxVals = (room.lux_series || []).filter((v) => v !== null && !isNaN(v));
+    const tgtVals = (room.target_lux_series || []).filter((v) => v !== null && !isNaN(v));
+    const maxLux = Math.max(
+      10,
+      room.blended_target_lux || 40,
+      ...luxVals,
+      ...tgtVals
+    );
+    const { yMax: luxYMax, ticks: luxTicks } = this._computeNiceAxis(maxLux * 1.12, 4);
+    const toLuxY = (lux) =>
+      padTop + plotH - Math.max(0, Math.min(1, Number(lux) / luxYMax)) * plotH;
+
+    const brightAreaPaths = this._buildAreaPaths(
+      room.brightness_series || [],
+      timestamps,
+      toTimeX,
+      toPctY,
+      y0
+    );
+    const brightLines = this._buildSegmentedPolylines(
+      room.brightness_series || [],
+      timestamps,
+      toTimeX,
+      toPctY
+    );
+    const luxLines = room.has_lux_sensor
+      ? this._buildSegmentedPolylines(room.lux_series || [], timestamps, toTimeX, toLuxY)
+      : { polylines: [], points: [] };
+    const tgtLines = room.has_lux_sensor
+      ? this._buildSegmentedPolylines(
+          room.target_lux_series || [],
+          timestamps,
+          toTimeX,
+          toLuxY
+        )
+      : { polylines: [], points: [] };
+
+    const hoverIdx = this._statsHoverIdx?.inspector;
+    const hasHover =
+      hoverIdx !== null &&
+      hoverIdx !== undefined &&
+      hoverIdx >= 0 &&
+      hoverIdx < timestamps.length;
+    const hoverTs = hasHover ? timestamps[hoverIdx] : null;
+    const hoverLux = hasHover ? room.lux_series?.[hoverIdx] : null;
+    const hoverTgt = hasHover ? room.target_lux_series?.[hoverIdx] : null;
+    const hoverPct = hasHover ? room.brightness_series?.[hoverIdx] ?? 0 : null;
+    const hoverMode = hasHover
+      ? this._getModeAtTimestamp(room.mode_segments, hoverTs, room.active_mode)
+      : room.active_mode;
+    const hoverX = hasHover ? toTimeX(hoverTs) : 0;
+
+    const clipId = `statsModeClip-${String(room.room_id || "room").replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+
+    return html`
+      <div class="stats-room-pills thin-scroll">
+        ${rooms.map((r) => {
+          const isSel = r.room_id === room.room_id;
+          return html`
+            <button
+              type="button"
+              class="stats-room-pill ${isSel ? "active" : ""}"
+              @click=${() => {
+                this._fireHaptic("light");
+                this._statsSelectedRoom = r.room_id;
+                this._clearChartScrub("inspector");
+              }}
+            >
+              <span class="away-light-dot ${r.is_light_on ? "lit" : ""}"></span>
+              <span class="stats-room-pill-name">${r.name}</span>
+              <span class="stats-room-pill-meta">
+                ${r.has_lux_sensor
+                  ? `${r.ambient_lux ?? "--"}/${Math.round(r.blended_target_lux)} lx`
+                  : "No lux"}
+              </span>
+            </button>
+          `;
+        })}
+      </div>
+
+      <div class="passable-section-card">
+        <div class="stats-chart-header">
+          <div class="stats-chart-title-wrap">
+            <span class="stats-chart-title">${room.name}</span>
+            <span
+              class="stats-mode-chip"
+              style="color:${this._getStatsModeColor(room.active_mode)}; border-color:color-mix(in srgb, ${this._getStatsModeColor(room.active_mode)} 40%, transparent); background:color-mix(in srgb, ${this._getStatsModeColor(room.active_mode)} 14%, transparent);"
+            >
+              ${this._getStatsModeLabel(room.active_mode)}
+            </span>
+          </div>
+          <button
+            type="button"
+            class="stats-tune-btn"
+            @click=${() => this._openModal("engine", null, room.room_id)}
+          >
+            Tune Room →
+          </button>
+        </div>
+
+        <div class="stats-scrub-bar">
+          ${hasHover
+            ? html`
+                <span class="stats-scrub-time">
+                  ${this._formatStatsTooltipTime(hoverTs, data.hours)}
+                </span>
+                ${room.has_lux_sensor
+                  ? html`
+                      <span class="stats-scrub-item">
+                        <span class="stats-legend-dot" style="background:#10b981;"></span>
+                        Lux: <strong>${hoverLux != null ? `${hoverLux} lx` : "--"}</strong>
+                      </span>
+                      <span class="stats-scrub-item">
+                        <span class="stats-legend-dot" style="background:#38bdf8;"></span>
+                        Target: <strong>${hoverTgt != null ? `${hoverTgt} lx` : "--"}</strong>
+                      </span>
+                    `
+                  : ""}
+                <span class="stats-scrub-item">
+                  <span class="stats-legend-dot" style="background:#f59e0b;"></span>
+                  Dim: <strong>${hoverPct}%</strong>
+                </span>
+                <span class="stats-scrub-item">
+                  Mode: <strong>${this._getStatsModeLabel(hoverMode)}</strong>
+                </span>
+              `
+            : html`
+                <span class="stats-scrub-hint">Hover or drag chart to inspect</span>
+                <span class="stats-scrub-summary">
+                  ${room.has_lux_sensor
+                    ? `Live: ${room.ambient_lux ?? "--"} lx • Target: ${room.blended_target_lux} lx`
+                    : "No lux sensor — showing brightness & mode"}
+                </span>
+              `}
+        </div>
+
+        <svg
+          viewBox="0 0 ${svgW} ${svgH}"
+          class="stats-svg stats-chart-interactive"
+          role="img"
+          aria-label="Room illuminance, brightness, and mode timeline"
+          @mousemove=${(ev) =>
+            this._handleChartScrub("inspector", ev, padLeft, plotW, svgW, data)}
+          @mouseleave=${() => this._clearChartScrub("inspector")}
+          @touchstart=${(ev) =>
+            this._handleChartScrub("inspector", ev, padLeft, plotW, svgW, data)}
+          @touchmove=${(ev) =>
+            this._handleChartScrub("inspector", ev, padLeft, plotW, svgW, data)}
+          @touchend=${() => this._clearChartScrub("inspector")}
+          @touchcancel=${() => this._clearChartScrub("inspector")}
+        >
+          <defs>
+            <linearGradient id="statsBrightGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.34" />
+              <stop offset="100%" stop-color="#f59e0b" stop-opacity="0.04" />
+            </linearGradient>
+            <clipPath id="${clipId}">
+              <rect
+                x="${padLeft}"
+                y="${ribbonY}"
+                width="${plotW}"
+                height="${ribbonH}"
+                rx="4"
+              ></rect>
+            </clipPath>
+          </defs>
+
+          ${this._renderTimeGridSvg(data, padLeft, plotW, padTop, y0, axisLabelY, toTimeX)}
+
+          ${room.has_lux_sensor
+            ? luxTicks.map((val) => {
+                const y = toLuxY(val);
+                return svg`
+                  <line
+                    x1="${padLeft}"
+                    y1="${y.toFixed(1)}"
+                    x2="${padLeft + plotW}"
+                    y2="${y.toFixed(1)}"
+                    stroke="${val === 0 ? "rgba(148,163,184,0.32)" : "rgba(148,163,184,0.14)"}"
+                    stroke-dasharray="${val === 0 ? "none" : "3 3"}"
+                    stroke-width="1"
+                  ></line>
+                  <text
+                    x="${padLeft - 6}"
+                    y="${(y + 3.5).toFixed(1)}"
+                    text-anchor="end"
+                    fill="var(--secondary-text-color)"
+                    font-size="9.5"
+                  >${this._formatCompactNum(val)} lx</text>
+                `;
+              })
+            : [0, 50, 100].map((pct) => {
+                const y = toPctY(pct);
+                return svg`
+                  <line
+                    x1="${padLeft}"
+                    y1="${y.toFixed(1)}"
+                    x2="${padLeft + plotW}"
+                    y2="${y.toFixed(1)}"
+                    stroke="${pct === 0 ? "rgba(148,163,184,0.32)" : "rgba(148,163,184,0.14)"}"
+                    stroke-dasharray="${pct === 0 ? "none" : "3 3"}"
+                    stroke-width="1"
+                  ></line>
+                `;
+              })}
+
+          ${[0, 50, 100].map((pct) => {
+            const y = toPctY(pct);
+            return svg`
+              <text
+                x="${padLeft + plotW + 6}"
+                y="${(y + 3.5).toFixed(1)}"
+                text-anchor="start"
+                fill="rgba(245, 158, 11, 0.85)"
+                font-size="9"
+              >${pct}%</text>
+            `;
+          })}
+
+          ${brightAreaPaths.map(
+            (d) => svg`<path d="${d}" fill="url(#statsBrightGrad)"></path>`
+          )}
+          ${brightLines.polylines.map(
+            (pts) => svg`
+              <polyline
+                fill="none"
+                stroke="rgba(245, 158, 11, 0.72)"
+                stroke-width="1.5"
+                stroke-linejoin="round"
+                points="${pts}"
+              ></polyline>
+            `
+          )}
+
+          ${tgtLines.polylines.map(
+            (pts) => svg`
+              <polyline
+                fill="none"
+                stroke="#38bdf8"
+                stroke-width="1.6"
+                stroke-dasharray="5 3"
+                stroke-linejoin="round"
+                points="${pts}"
+              ></polyline>
+            `
+          )}
+
+          ${luxLines.polylines.map(
+            (pts) => svg`
+              <polyline
+                fill="none"
+                stroke="#10b981"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                points="${pts}"
+              ></polyline>
+            `
+          )}
+
+          <text
+            x="${padLeft - 6}"
+            y="${ribbonY + 10.5}"
+            text-anchor="end"
+            fill="var(--secondary-text-color)"
+            font-size="9"
+            font-weight="600"
+          >Mode</text>
+
+          <g clip-path="url(#${clipId})">
+            <rect
+              x="${padLeft}"
+              y="${ribbonY}"
+              width="${plotW}"
+              height="${ribbonH}"
+              fill="rgba(148, 163, 184, 0.14)"
+            ></rect>
+            ${(room.mode_segments || []).map((seg) => {
+              const x1 = toTimeX(Math.max(startMs, seg.start_ms));
+              const x2 = toTimeX(Math.min(endMs, seg.end_ms));
+              const w = x2 - x1;
+              if (w <= 0.3) return "";
+              return svg`
+                <rect
+                  x="${x1.toFixed(1)}"
+                  y="${ribbonY}"
+                  width="${w.toFixed(1)}"
+                  height="${ribbonH}"
+                  fill="${this._getStatsModeColor(seg.mode)}"
+                ></rect>
+              `;
+            })}
+          </g>
+
+          ${hasHover
+            ? svg`
+                <line
+                  x1="${hoverX.toFixed(1)}"
+                  y1="${padTop}"
+                  x2="${hoverX.toFixed(1)}"
+                  y2="${ribbonY + ribbonH}"
+                  stroke="var(--primary-text-color)"
+                  stroke-opacity="0.45"
+                  stroke-width="1.2"
+                ></line>
+                ${hoverPct !== null
+                  ? svg`
+                      <circle
+                        cx="${hoverX.toFixed(1)}"
+                        cy="${toPctY(hoverPct).toFixed(1)}"
+                        r="3.2"
+                        fill="#f59e0b"
+                        stroke="#ffffff"
+                        stroke-width="1.3"
+                      ></circle>
+                    `
+                  : ""}
+                ${room.has_lux_sensor && hoverTgt != null
+                  ? svg`
+                      <circle
+                        cx="${hoverX.toFixed(1)}"
+                        cy="${toLuxY(hoverTgt).toFixed(1)}"
+                        r="3.2"
+                        fill="#38bdf8"
+                        stroke="#ffffff"
+                        stroke-width="1.3"
+                      ></circle>
+                    `
+                  : ""}
+                ${room.has_lux_sensor && hoverLux != null
+                  ? svg`
+                      <circle
+                        cx="${hoverX.toFixed(1)}"
+                        cy="${toLuxY(hoverLux).toFixed(1)}"
+                        r="4"
+                        fill="#10b981"
+                        stroke="#ffffff"
+                        stroke-width="1.5"
+                      ></circle>
+                    `
+                  : ""}
+              `
+            : ""}
+        </svg>
+
+        <div class="stats-legend-row">
+          ${room.has_lux_sensor
+            ? html`
+                <span class="stats-legend-item">
+                  <span class="stats-legend-line" style="background:#10b981;"></span>Ambient Lux
+                </span>
+                <span class="stats-legend-item">
+                  <span class="stats-legend-dash" style="border-color:#38bdf8;"></span>Target Lux
+                </span>
+              `
+            : ""}
+          <span class="stats-legend-item">
+            <span class="stats-legend-dot" style="background:#f59e0b;"></span>Brightness %
+          </span>
+          <span class="stats-legend-item">
+            <span class="stats-legend-dot" style="background:rgba(99,102,241,0.55);"></span>Night
+          </span>
+        </div>
+
+        <div class="stats-mini-metrics">
+          <div class="stats-mini-metric">
+            <span class="mini-label">Lit Time</span>
+            <span class="mini-val">${this._formatHoursShort(room.lit_hours)}</span>
+          </div>
+          <div class="stats-mini-metric">
+            <span class="mini-label">Lux Min / Avg / Max</span>
+            <span class="mini-val">
+              ${room.has_lux_sensor && room.lux_avg != null
+                ? `${this._formatCompactNum(room.lux_min)} / ${this._formatCompactNum(room.lux_avg)} / ${this._formatCompactNum(room.lux_max)}`
+                : "--"}
+            </span>
+          </div>
+          <div class="stats-mini-metric">
+            <span class="mini-label">Overrides</span>
+            <span class="mini-val">
+              ${room.override_events} (${this._formatHoursShort(room.override_hours)})
+            </span>
+          </div>
+          <div class="stats-mini-metric">
+            <span class="mini-label">Daylight Met</span>
+            <span class="mini-val">
+              ${room.daylight_harvest_pct != null ? `${room.daylight_harvest_pct}%` : "--"}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      ${this._renderSunPrefsSvg(room, data.current_sun_elev)}
+    `;
+  }
+
+  _renderStatsCompareTab(data) {
+    const allRooms = data?.rooms || [];
+    if (allRooms.length === 0) {
+      return html`
+        <div class="modal-empty-state">No Smart Light Engine rooms configured yet.</div>
+      `;
+    }
+
+    const floors = Array.isArray(data.floors) ? data.floors : [];
+    const colorByRoom = {};
+    allRooms.forEach((r, idx) => {
+      colorByRoom[r.room_id] = STATS_SERIES_COLORS[idx % STATS_SERIES_COLORS.length];
+    });
+
+    const luxRooms = allRooms.filter((r) => r.has_lux_sensor);
+    const noLuxRooms = allRooms.filter((r) => !r.has_lux_sensor);
+    const filteredRooms =
+      this._statsCompareFloor === "all"
+        ? luxRooms
+        : luxRooms.filter((r) => r.floor_id === this._statsCompareFloor);
+    const visibleRooms = filteredRooms.filter(
+      (r) => !this._statsHiddenRooms?.[r.room_id]
+    );
+
+    const scale = this._statsCompareScale || "raw";
+    const transformVal = (rawVal, room) => {
+      if (rawVal === null || rawVal === undefined || isNaN(Number(rawVal))) return null;
+      const v = Math.max(0, Number(rawVal));
+      if (scale === "log") {
+        return Math.log10(v + 1);
+      }
+      if (scale === "pct_target") {
+        const tgt = Math.max(1, Number(room.blended_target_lux || room.seed_target_lux || 40));
+        return (v / tgt) * 100;
+      }
+      return v;
+    };
+
+    const transformedByRoom = {};
+    const allTransformed = [];
+    let maxRawObserved = 10;
+    for (const r of visibleRooms) {
+      const arr = (r.lux_series || []).map((v) => {
+        if (v !== null && !isNaN(Number(v))) {
+          maxRawObserved = Math.max(maxRawObserved, Number(v));
+        }
+        const tv = transformVal(v, r);
+        if (tv !== null) allTransformed.push(tv);
+        return tv;
+      });
+      transformedByRoom[r.room_id] = arr;
+    }
+
+    const svgW = 560;
+    const svgH = 242;
+    const padLeft = 46;
+    const padRight = 16;
+    const padTop = 14;
+    const padBottom = 30;
+    const plotW = svgW - padLeft - padRight;
+    const plotH = svgH - padTop - padBottom;
+    const y0 = padTop + plotH;
+
+    const timestamps = data.timestamps_ms || [];
+    const startMs = data.start_ms;
+    const endMs = data.end_ms;
+    const spanMs = Math.max(1, endMs - startMs);
+    const toTimeX = (ms) =>
+      padLeft + Math.max(0, Math.min(1, (ms - startMs) / spanMs)) * plotW;
+
+    let yMax = 100;
+    let yTicks = [];
+    if (scale === "log") {
+      const candidates = [0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2000];
+      const cap = candidates.find((c) => c >= Math.max(50, maxRawObserved)) || 2000;
+      yMax = Math.log10(cap + 1);
+      const rawTicks = candidates.filter((c) => c <= cap);
+      const minPixelGap = 17;
+      let lastY = Infinity;
+      yTicks = [];
+      for (const tickLux of rawTicks) {
+        const ty = padTop + plotH - (Math.log10(tickLux + 1) / yMax) * plotH;
+        if (lastY - ty >= minPixelGap || tickLux === cap) {
+          yTicks.push({
+            pos: Math.log10(tickLux + 1),
+            label: `${this._formatCompactNum(tickLux)} lx`,
+            isZero: tickLux === 0,
+          });
+          lastY = ty;
+        }
+      }
+    } else if (scale === "pct_target") {
+      const peakPct = Math.max(120, ...(allTransformed.length ? allTransformed : [120]));
+      const nice = this._computeNiceAxis(peakPct * 1.08, 4);
+      yMax = Math.max(100, nice.yMax);
+      yTicks = nice.ticks.map((t) => ({
+        pos: t,
+        label: `${this._formatCompactNum(t)}%`,
+        isZero: t === 0,
+      }));
+    } else {
+      const peakLux = Math.max(10, ...(allTransformed.length ? allTransformed : [40]));
+      const nice = this._computeNiceAxis(peakLux * 1.12, 4);
+      yMax = nice.yMax;
+      yTicks = nice.ticks.map((t) => ({
+        pos: t,
+        label: `${this._formatCompactNum(t)} lx`,
+        isZero: t === 0,
+      }));
+    }
+
+    const toY = (val) =>
+      padTop + plotH - Math.max(0, Math.min(1, Number(val) / yMax)) * plotH;
+
+    const hoverIdx = this._statsHoverIdx?.compare;
+    const hasHover =
+      hoverIdx !== null &&
+      hoverIdx !== undefined &&
+      hoverIdx >= 0 &&
+      hoverIdx < timestamps.length;
+    const hoverTs = hasHover ? timestamps[hoverIdx] : null;
+    const hoverX = hasHover ? toTimeX(hoverTs) : 0;
+
+    const hoverEntries = hasHover
+      ? visibleRooms
+          .map((r) => {
+            const raw = r.lux_series?.[hoverIdx];
+            const trans = transformedByRoom[r.room_id]?.[hoverIdx];
+            return { room: r, raw, trans };
+          })
+          .filter((e) => e.raw !== null && e.raw !== undefined)
+          .sort((a, b) => (b.trans ?? -1) - (a.trans ?? -1))
+      : [];
+
+    return html`
+      <div class="stats-compare-toolbar">
+        ${floors.length > 0
+          ? html`
+              <div class="modal-filter-pills">
+                <button
+                  type="button"
+                  class="modal-filter-pill ${this._statsCompareFloor === "all" ? "active" : ""}"
+                  @click=${() => {
+                    this._fireHaptic("light");
+                    this._statsCompareFloor = "all";
+                  }}
+                >
+                  All
+                </button>
+                ${floors.map(
+                  (f) => html`
+                    <button
+                      type="button"
+                      class="modal-filter-pill ${this._statsCompareFloor === f.id ? "active" : ""}"
+                      @click=${() => {
+                        this._fireHaptic("light");
+                        this._statsCompareFloor = f.id;
+                      }}
+                    >
+                      ${f.name}
+                    </button>
+                  `
+                )}
+              </div>
+            `
+          : html`<span></span>`}
+
+        <div class="stats-segmented">
+          ${[
+            { id: "raw", label: "Raw (lx)" },
+            { id: "log", label: "Log (lx)" },
+            { id: "pct_target", label: "% Target" },
+          ].map(
+            (opt) => html`
+              <button
+                type="button"
+                class="stats-seg-btn ${scale === opt.id ? "active" : ""}"
+                @click=${() => {
+                  this._fireHaptic("light");
+                  this._statsCompareScale = opt.id;
+                }}
+              >
+                ${opt.label}
+              </button>
+            `
+          )}
+        </div>
+      </div>
+
+      <div class="passable-section-card">
+        <div class="stats-scrub-bar">
+          ${hasHover
+            ? html`
+                <span class="stats-scrub-time">
+                  ${this._formatStatsTooltipTime(hoverTs, data.hours)}
+                </span>
+                ${hoverEntries.length > 0
+                  ? hoverEntries.slice(0, 4).map(
+                      (entry) => html`
+                        <span class="stats-scrub-item">
+                          <span
+                            class="stats-legend-dot"
+                            style="background:${colorByRoom[entry.room.room_id]};"
+                          ></span>
+                          ${entry.room.name}:
+                          <strong>
+                            ${scale === "pct_target"
+                              ? `${Math.round(entry.trans)}%`
+                              : `${entry.raw} lx`}
+                          </strong>
+                        </span>
+                      `
+                    )
+                  : html`<span class="stats-scrub-hint">No sensor readings</span>`}
+              `
+            : html`
+                <span class="stats-scrub-hint">
+                  Tap a room chip below to toggle visibility, or → to inspect
+                </span>
+              `}
+        </div>
+
+        <svg
+          viewBox="0 0 ${svgW} ${svgH}"
+          class="stats-svg stats-chart-interactive"
+          role="img"
+          aria-label="Multi-room illuminance comparison"
+          @mousemove=${(ev) =>
+            this._handleChartScrub("compare", ev, padLeft, plotW, svgW, data)}
+          @mouseleave=${() => this._clearChartScrub("compare")}
+          @touchstart=${(ev) =>
+            this._handleChartScrub("compare", ev, padLeft, plotW, svgW, data)}
+          @touchmove=${(ev) =>
+            this._handleChartScrub("compare", ev, padLeft, plotW, svgW, data)}
+          @touchend=${() => this._clearChartScrub("compare")}
+          @touchcancel=${() => this._clearChartScrub("compare")}
+        >
+          ${this._renderTimeGridSvg(data, padLeft, plotW, padTop, y0, y0 + 14, toTimeX)}
+
+          ${yTicks.map((t) => {
+            const y = toY(t.pos);
+            return svg`
+              <line
+                x1="${padLeft}"
+                y1="${y.toFixed(1)}"
+                x2="${padLeft + plotW}"
+                y2="${y.toFixed(1)}"
+                stroke="${t.isZero ? "rgba(148,163,184,0.32)" : "rgba(148,163,184,0.14)"}"
+                stroke-dasharray="${t.isZero ? "none" : "3 3"}"
+                stroke-width="1"
+              ></line>
+              <text
+                x="${padLeft - 6}"
+                y="${(y + 3.5).toFixed(1)}"
+                text-anchor="end"
+                fill="var(--secondary-text-color)"
+                font-size="9.5"
+              >${t.label}</text>
+            `;
+          })}
+
+          ${scale === "pct_target"
+            ? svg`
+                <line
+                  x1="${padLeft}"
+                  y1="${toY(100).toFixed(1)}"
+                  x2="${padLeft + plotW}"
+                  y2="${toY(100).toFixed(1)}"
+                  stroke="#38bdf8"
+                  stroke-dasharray="5 3"
+                  stroke-width="1.4"
+                ></line>
+                <text
+                  x="${padLeft + plotW - 4}"
+                  y="${(toY(100) - 4).toFixed(1)}"
+                  text-anchor="end"
+                  fill="#38bdf8"
+                  font-size="9"
+                  font-weight="700"
+                >100% Target</text>
+              `
+            : ""}
+
+          ${visibleRooms.map((r) => {
+            const color = colorByRoom[r.room_id];
+            const series = transformedByRoom[r.room_id] || [];
+            const { polylines } = this._buildSegmentedPolylines(
+              series,
+              timestamps,
+              toTimeX,
+              toY
+            );
+            return polylines.map(
+              (pts) => svg`
+                <polyline
+                  fill="none"
+                  stroke="${color}"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  points="${pts}"
+                ></polyline>
+              `
+            );
+          })}
+
+          ${hasHover
+            ? svg`
+                <line
+                  x1="${hoverX.toFixed(1)}"
+                  y1="${padTop}"
+                  x2="${hoverX.toFixed(1)}"
+                  y2="${y0}"
+                  stroke="var(--primary-text-color)"
+                  stroke-opacity="0.45"
+                  stroke-width="1.2"
+                ></line>
+                ${hoverEntries.map((entry) => {
+                  const cy = toY(entry.trans);
+                  return svg`
+                    <circle
+                      cx="${hoverX.toFixed(1)}"
+                      cy="${cy.toFixed(1)}"
+                      r="3.4"
+                      fill="${colorByRoom[entry.room.room_id]}"
+                      stroke="#ffffff"
+                      stroke-width="1.3"
+                    ></circle>
+                  `;
+                })}
+              `
+            : ""}
+        </svg>
+
+        ${visibleRooms.length === 0
+          ? html`
+              <div class="stats-muted-note">
+                ${filteredRooms.length === 0
+                  ? "No illuminance sensors on this floor."
+                  : "All rooms hidden — tap a room chip below to show."}
+              </div>
+            `
+          : ""}
+
+        <div class="stats-compare-legend">
+          ${filteredRooms.map((r) => {
+            const hidden = Boolean(this._statsHiddenRooms?.[r.room_id]);
+            const color = colorByRoom[r.room_id];
+            const liveVal =
+              scale === "pct_target" && r.ambient_lux != null
+                ? `${Math.round((r.ambient_lux / Math.max(1, r.blended_target_lux || 40)) * 100)}%`
+                : r.ambient_lux != null
+                  ? `${r.ambient_lux} lx`
+                  : "--";
+            return html`
+              <div class="stats-compare-chip ${hidden ? "hidden-series" : ""}">
+                <button
+                  type="button"
+                  class="stats-compare-toggle"
+                  @click=${() => {
+                    this._fireHaptic("light");
+                    this._statsHiddenRooms = {
+                      ...this._statsHiddenRooms,
+                      [r.room_id]: !hidden,
+                    };
+                  }}
+                >
+                  <span class="stats-legend-dot" style="background:${color};"></span>
+                  <span class="stats-compare-name">${r.name}</span>
+                  <span class="stats-compare-val">${liveVal}</span>
+                </button>
+                <button
+                  type="button"
+                  class="stats-compare-jump"
+                  title="Inspect ${r.name}"
+                  @click=${() => {
+                    this._fireHaptic("light");
+                    this._statsSelectedRoom = r.room_id;
+                    this._statsTab = "inspector";
+                    this._clearChartScrub("inspector");
+                  }}
+                >
+                  →
+                </button>
+              </div>
+            `;
+          })}
+        </div>
+
+        ${noLuxRooms.length > 0
+          ? html`
+              <div class="stats-muted-note">
+                Without lux sensor: ${noLuxRooms.map((r) => r.name).join(", ")}
+              </div>
+            `
+          : ""}
+      </div>
+    `;
+  }
+
+  _renderStatsUsageTab(data) {
+    if (!data) {
+      return html`
+        <div class="modal-empty-state">No lighting telemetry available yet.</div>
+      `;
+    }
+    const rooms = data.rooms || [];
+    const timeline = data.lights_on_timeline || {
+      counts: [],
+      peak_on: 0,
+      avg_on: 0,
+      total_tracked: 0,
+    };
+    const sortBy = this._statsUsageSort || "lit";
+
+    const sortedRooms = [...rooms].sort((a, b) => {
+      if (sortBy === "overrides") {
+        if (b.override_hours !== a.override_hours) {
+          return b.override_hours - a.override_hours;
+        }
+        if (b.override_events !== a.override_events) {
+          return b.override_events - a.override_events;
+        }
+      }
+      return (b.lit_hours || 0) - (a.lit_hours || 0);
+    });
+
+    const roomActiveTotal = (r) =>
+      STATS_USAGE_MODE_ORDER.reduce(
+        (sum, mode) => sum + Number(r.mode_hours?.[mode] || 0),
+        0
+      );
+    const maxScaleHrs = Math.max(
+      0.5,
+      ...sortedRooms.map((r) => Math.max(roomActiveTotal(r), r.lit_hours || 0))
+    );
+
+    const usedModes = STATS_USAGE_MODE_ORDER.filter((m) =>
+      sortedRooms.some((r) => Number(r.mode_hours?.[m] || 0) > 0)
+    );
+    const legendModes = usedModes.length > 0 ? usedModes : ["occupied", "manual_override"];
+
+    // Whole-home lights ON chart geometry
+    const timestamps = data.timestamps_ms || [];
+    const counts = Array.isArray(timeline.counts) ? timeline.counts : [];
+    const svgW = 560;
+    const svgH = 155;
+    const padLeft = 36;
+    const padRight = 14;
+    const padTop = 14;
+    const padBottom = 28;
+    const plotW = svgW - padLeft - padRight;
+    const plotH = svgH - padTop - padBottom;
+    const y0 = padTop + plotH;
+
+    const startMs = data.start_ms || 0;
+    const endMs = data.end_ms || 1;
+    const spanMs = Math.max(1, endMs - startMs);
+    const toTimeX = (ms) =>
+      padLeft + Math.max(0, Math.min(1, (ms - startMs) / spanMs)) * plotW;
+
+    const maxCount = Math.max(2, timeline.peak_on || 0, ...counts);
+    const { yMax, ticks: yTicks } = this._computeNiceAxis(maxCount, 4);
+    const toY = (val) =>
+      padTop + plotH - Math.max(0, Math.min(1, Number(val) / yMax)) * plotH;
+
+    const areaPaths = this._buildAreaPaths(counts, timestamps, toTimeX, toY, y0);
+    const countLines = this._buildSegmentedPolylines(counts, timestamps, toTimeX, toY);
+
+    const hoverIdx = this._statsHoverIdx?.homeLights;
+    const hasHover =
+      hoverIdx !== null &&
+      hoverIdx !== undefined &&
+      hoverIdx >= 0 &&
+      hoverIdx < timestamps.length;
+    const hoverTs = hasHover ? timestamps[hoverIdx] : null;
+    const hoverCount = hasHover ? counts[hoverIdx] ?? 0 : null;
+    const hoverX = hasHover ? toTimeX(hoverTs) : 0;
+
+    return html`
+      ${sortedRooms.length > 0
+        ? html`
+            <div class="passable-section-card">
+              <div class="stats-chart-header">
+                <span class="stats-chart-title">Room Activity & Mode Breakdown</span>
+                <div class="stats-segmented">
+                  <button
+                    type="button"
+                    class="stats-seg-btn ${sortBy === "lit" ? "active" : ""}"
+                    @click=${() => {
+                      this._fireHaptic("light");
+                      this._statsUsageSort = "lit";
+                    }}
+                  >
+                    Lit Time
+                  </button>
+                  <button
+                    type="button"
+                    class="stats-seg-btn ${sortBy === "overrides" ? "active" : ""}"
+                    @click=${() => {
+                      this._fireHaptic("light");
+                      this._statsUsageSort = "overrides";
+                    }}
+                  >
+                    Overrides
+                  </button>
+                </div>
+              </div>
+
+              <div class="stats-usage-list">
+                ${sortedRooms.map((r) => {
+                  const totalModeHrs = roomActiveTotal(r);
+                  const denom = maxScaleHrs;
+                  return html`
+                    <button
+                      type="button"
+                      class="stats-usage-row"
+                      @click=${() => {
+                        this._fireHaptic("light");
+                        this._statsSelectedRoom = r.room_id;
+                        this._statsTab = "inspector";
+                        this._clearChartScrub("inspector");
+                      }}
+                    >
+                      <div class="stats-usage-row-top">
+                        <div class="stats-usage-name-wrap">
+                          <span class="stats-usage-name">${r.name}</span>
+                          <span class="zone-inline-chip neutral">${r.auto_pct ?? 100}% Auto</span>
+                          ${r.override_events > 0
+                            ? html`
+                                <span class="zone-inline-chip warning">
+                                  ${r.override_events} ovr
+                                </span>
+                              `
+                            : ""}
+                        </div>
+                        <span class="stats-usage-lit">
+                          Lit ${this._formatHoursShort(r.lit_hours)}
+                          ${totalModeHrs > 0
+                            ? ` · Act ${this._formatHoursShort(totalModeHrs)}`
+                            : ""}
+                        </span>
+                      </div>
+
+                      <div class="stats-stacked-track">
+                        ${STATS_USAGE_MODE_ORDER.map((mode) => {
+                          const hrs = Number(r.mode_hours?.[mode] || 0);
+                          if (hrs <= 0) return "";
+                          const widthPct = Math.max(1.5, (hrs / denom) * 100);
+                          return html`
+                            <span
+                              class="stats-stacked-seg"
+                              style="width:${widthPct.toFixed(2)}%; background:${this._getStatsModeColor(mode)};"
+                              title="${this._getStatsModeLabel(mode)}: ${this._formatHoursShort(hrs)}"
+                            ></span>
+                          `;
+                        })}
+                      </div>
+                    </button>
+                  `;
+                })}
+              </div>
+
+              <div class="stats-legend-row">
+                ${legendModes.map(
+                  (mode) => html`
+                    <span class="stats-legend-item">
+                      <span
+                        class="stats-legend-dot"
+                        style="background:${this._getStatsModeColor(mode)};"
+                      ></span>
+                      ${this._getStatsModeLabel(mode)}
+                    </span>
+                  `
+                )}
+              </div>
+            </div>
+          `
+        : ""}
+
+      <div class="passable-section-card">
+        <div class="stats-chart-header">
+          <div class="stats-chart-title-wrap">
+            <span class="stats-chart-title">Whole-Home Lights On</span>
+            <span class="zone-inline-chip neutral">Peak ${timeline.peak_on ?? 0}</span>
+            <span class="zone-inline-chip neutral">Avg ${timeline.avg_on ?? 0}</span>
+          </div>
+          <span class="stats-chart-submeta">${timeline.total_tracked ?? 0} lights tracked</span>
+        </div>
+
+        <div class="stats-scrub-bar">
+          ${hasHover
+            ? html`
+                <span class="stats-scrub-time">
+                  ${this._formatStatsTooltipTime(hoverTs, data.hours)}
+                </span>
+                <span class="stats-scrub-item">
+                  <span class="stats-legend-dot" style="background:#f59e0b;"></span>
+                  <strong>${hoverCount}</strong> light${hoverCount === 1 ? "" : "s"} on
+                </span>
+              `
+            : html`
+                <span class="stats-scrub-hint">
+                  Hover or drag to inspect concurrent lights ON
+                </span>
+              `}
+        </div>
+
+        <svg
+          viewBox="0 0 ${svgW} ${svgH}"
+          class="stats-svg stats-chart-interactive"
+          role="img"
+          aria-label="Whole-home concurrent lights on timeline"
+          @mousemove=${(ev) =>
+            this._handleChartScrub("homeLights", ev, padLeft, plotW, svgW, data)}
+          @mouseleave=${() => this._clearChartScrub("homeLights")}
+          @touchstart=${(ev) =>
+            this._handleChartScrub("homeLights", ev, padLeft, plotW, svgW, data)}
+          @touchmove=${(ev) =>
+            this._handleChartScrub("homeLights", ev, padLeft, plotW, svgW, data)}
+          @touchend=${() => this._clearChartScrub("homeLights")}
+          @touchcancel=${() => this._clearChartScrub("homeLights")}
+        >
+          <defs>
+            <linearGradient id="statsHomeLightsGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.34" />
+              <stop offset="100%" stop-color="#f59e0b" stop-opacity="0.03" />
+            </linearGradient>
+          </defs>
+
+          ${this._renderTimeGridSvg(data, padLeft, plotW, padTop, y0, y0 + 14, toTimeX)}
+
+          ${yTicks.map((val) => {
+            const y = toY(val);
+            return svg`
+              <line
+                x1="${padLeft}"
+                y1="${y.toFixed(1)}"
+                x2="${padLeft + plotW}"
+                y2="${y.toFixed(1)}"
+                stroke="${val === 0 ? "rgba(148,163,184,0.32)" : "rgba(148,163,184,0.14)"}"
+                stroke-dasharray="${val === 0 ? "none" : "3 3"}"
+                stroke-width="1"
+              ></line>
+              <text
+                x="${padLeft - 6}"
+                y="${(y + 3.5).toFixed(1)}"
+                text-anchor="end"
+                fill="var(--secondary-text-color)"
+                font-size="9.5"
+              >${Math.round(val)}</text>
+            `;
+          })}
+
+          ${areaPaths.map(
+            (d) => svg`<path d="${d}" fill="url(#statsHomeLightsGrad)"></path>`
+          )}
+          ${countLines.polylines.map(
+            (pts) => svg`
+              <polyline
+                fill="none"
+                stroke="#f59e0b"
+                stroke-width="2"
+                stroke-linejoin="round"
+                points="${pts}"
+              ></polyline>
+            `
+          )}
+
+          ${hasHover
+            ? svg`
+                <line
+                  x1="${hoverX.toFixed(1)}"
+                  y1="${padTop}"
+                  x2="${hoverX.toFixed(1)}"
+                  y2="${y0}"
+                  stroke="var(--primary-text-color)"
+                  stroke-opacity="0.45"
+                  stroke-width="1.2"
+                ></line>
+                <circle
+                  cx="${hoverX.toFixed(1)}"
+                  cy="${toY(hoverCount).toFixed(1)}"
+                  r="4"
+                  fill="#f59e0b"
+                  stroke="#ffffff"
+                  stroke-width="1.5"
+                ></circle>
+              `
+            : ""}
+        </svg>
+      </div>
+    `;
+  }
+
+  _renderStatsModal(metrics) {
+    if (!this._statsModalOpen) return "";
+
+    const data = this._statsData;
+    const kpis = data?.kpis || {};
+    const hoursLabel =
+      this._statsHours === 168 ? "7d" : `${this._statsHours || 24}h`;
+    const roomCount = kpis.total_rooms ?? metrics.totalRooms ?? 0;
+    const kelvin =
+      kpis.current_circadian_kelvin ?? metrics.circadianKelvin ?? null;
+
+    const tabs = [
+      { id: "inspector", label: "Room Inspector", icon: "mdi:chart-areaspline" },
+      { id: "compare", label: "All Rooms", icon: "mdi:chart-multiple" },
+      { id: "usage", label: "Usage & Overrides", icon: "mdi:chart-bar-stacked" },
+    ];
+
+    return html`
+      <div
+        class="popup-overlay"
+        @click=${(ev) => {
+          if (ev.target === ev.currentTarget) this._closeStatsModal();
+        }}
+      >
+        <div
+          class="popup-content stats-modal"
+          @touchstart=${this._handlePopupTouchStart}
+          @touchmove=${this._handlePopupTouchMove}
+          @touchend=${this._handlePopupTouchEnd}
+          @touchcancel=${this._handlePopupTouchCancel}
+        >
+          <div class="drag-handle"></div>
+
+          <div class="popup-header">
+            <div class="popup-header-left">
+              <div class="light-zone-icon-wrap lit">
+                <ha-icon icon="mdi:chart-line" style="--mdc-icon-size:20px;"></ha-icon>
+              </div>
+              <div>
+                <h3>Light Stats</h3>
+                <div class="popup-header-sub">
+                  Last ${hoursLabel}
+                  ${roomCount > 0 ? ` • ${roomCount} Room${roomCount === 1 ? "" : "s"}` : ""}
+                  ${kelvin ? ` • ${kelvin}K` : ""}
+                </div>
+              </div>
+            </div>
+
+            <div class="popup-header-actions">
+              <div class="stats-segmented">
+                ${[
+                  { h: 6, label: "6h" },
+                  { h: 24, label: "24h" },
+                  { h: 168, label: "7d" },
+                ].map(
+                  (opt) => html`
+                    <button
+                      type="button"
+                      class="stats-seg-btn ${this._statsHours === opt.h ? "active" : ""}"
+                      @click=${() => {
+                        this._fireHaptic("light");
+                        if (this._statsHours !== opt.h) {
+                          this._statsHours = opt.h;
+                          this._statsHoverIdx = {};
+                          this._fetchStats(opt.h, false);
+                        }
+                      }}
+                    >
+                      ${opt.label}
+                    </button>
+                  `
+                )}
+              </div>
+
+              <button
+                type="button"
+                class="icon-circle-btn ${this._statsLoading ? "spinning" : ""}"
+                @click=${() => {
+                  this._fireHaptic("light");
+                  this._fetchStats(this._statsHours, true);
+                }}
+                title="Refresh stats"
+                aria-label="Refresh stats"
+              >
+                <ha-icon icon="mdi:refresh" style="--mdc-icon-size:16px;"></ha-icon>
+              </button>
+
+              <button
+                type="button"
+                class="close-button"
+                @click=${() => this._closeStatsModal()}
+                aria-label="Close"
+              >
+                <ha-icon icon="mdi:close"></ha-icon>
+              </button>
+            </div>
+          </div>
+
+          ${this._statsLoading && !data
+            ? html`
+                <div class="stats-loading-state">
+                  <ha-icon icon="mdi:chart-timeline-variant" style="--mdc-icon-size:28px; color:var(--primary-color);"></ha-icon>
+                  <span>Loading ${hoursLabel} lighting telemetry...</span>
+                </div>
+              `
+            : this._statsError && !data
+              ? html`
+                  <div class="stats-error-state">
+                    <span>${this._statsError}</span>
+                    <button
+                      type="button"
+                      class="primary-action-btn"
+                      @click=${() => this._fetchStats(this._statsHours, true)}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                `
+              : !data
+                ? html`
+                    <div class="stats-loading-state">
+                      <span>Waiting for lighting telemetry...</span>
+                    </div>
+                  `
+                : html`
+                    ${data.recorder_available === false
+                    ? html`
+                        <div class="stats-warn-banner">
+                          Recorder history unavailable — showing live snapshots only.
+                        </div>
+                      `
+                    : ""}
+
+                  <div class="light-kpi-grid">
+                    <div class="light-kpi-card">
+                      <span class="kpi-label">LIT TIME</span>
+                      <span class="kpi-val">
+                        ${this._formatHoursShort(kpis.total_lit_hours)}
+                      </span>
+                      <span class="kpi-sub">
+                        ${kpis.busiest_room_name
+                          ? `Top: ${kpis.busiest_room_name} (${this._formatHoursShort(kpis.busiest_room_hours)})`
+                          : "All idle"}
+                      </span>
+                    </div>
+
+                    <div class="light-kpi-card">
+                      <span class="kpi-label">AUTOMATION</span>
+                      <span
+                        class="kpi-val ${(kpis.auto_pct ?? 100) >= 90 ? "green" : "amber"}"
+                      >
+                        ${kpis.auto_pct ?? 100}%
+                      </span>
+                      <span class="kpi-sub">
+                        ${kpis.override_events > 0
+                          ? `${kpis.override_events} ovr (${this._formatHoursShort(kpis.override_hours)})`
+                          : "0 overrides"}
+                      </span>
+                    </div>
+
+                    <div class="light-kpi-card">
+                      <span class="kpi-label">DAYLIGHT</span>
+                      <span class="kpi-val sky">
+                        ${kpis.daylight_harvest_pct != null
+                          ? `${kpis.daylight_harvest_pct}%`
+                          : "--"}
+                      </span>
+                      <span class="kpi-sub">Occupied w/o lights</span>
+                    </div>
+
+                    <div class="light-kpi-card">
+                      <span class="kpi-label">LEARNING</span>
+                      <span class="kpi-val">
+                        ${kpis.calibrated_rooms ?? 0}/${kpis.total_rooms ?? 0}
+                      </span>
+                      <span class="kpi-sub">
+                        ${kpis.total_pref_samples ?? 0} pref sample${kpis.total_pref_samples === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div class="popup-tabs three-col">
+                    ${tabs.map(
+                      (t) => html`
+                        <button
+                          type="button"
+                          class="popup-tab ${this._statsTab === t.id ? "active-tab" : ""}"
+                          @click=${() => {
+                            this._fireHaptic("light");
+                            this._statsTab = t.id;
+                          }}
+                        >
+                          <ha-icon icon="${t.icon}"></ha-icon>
+                          <span>${t.label}</span>
+                        </button>
+                      `
+                    )}
+                  </div>
+
+                  <div class="modal-scroll-area thin-scroll">
+                    ${this._statsTab === "inspector"
+                      ? this._renderStatsInspectorTab(data)
+                      : this._statsTab === "compare"
+                        ? this._renderStatsCompareTab(data)
+                        : this._renderStatsUsageTab(data)}
+                  </div>
+                `}
+        </div>
+      </div>
+    `;
+  }
+
   render() {
     if (!this.hass || !this.config) return html``;
 
@@ -3649,6 +5599,7 @@ class PassableLightingCard extends LitElement {
         ${this._toastMsg ? html`<div class="card-toast">${this._toastMsg}</div>` : ""}
 
         ${this._renderModal(floors, allLeaves, leafToRoom, leafGroupName, metrics)}
+        ${this._renderStatsModal(metrics)}
       </ha-card>
     `;
   }
@@ -5440,6 +7391,389 @@ class PassableLightingCard extends LitElement {
         text-overflow: ellipsis;
       }
 
+      /* LIGHT STATS MODAL */
+      .popup-content.stats-modal {
+        max-width: 640px;
+      }
+      .popup-content.stats-modal .modal-scroll-area {
+        flex: 1 1 auto;
+        min-height: 0;
+        max-height: 60vh;
+      }
+      .popup-tabs.three-col {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .kpi-sub {
+        font-size: 11px;
+        color: var(--secondary-text-color);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .stats-segmented {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px;
+        border-radius: 999px;
+        background: var(--secondary-background-color, rgba(128, 128, 128, 0.14));
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.20));
+        gap: 2px;
+        flex-shrink: 0;
+      }
+      .stats-seg-btn {
+        border: none;
+        background: transparent;
+        color: var(--secondary-text-color);
+        font-family: inherit;
+        font-size: 11.5px;
+        font-weight: 700;
+        padding: 3px 9px;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+      .stats-seg-btn.active {
+        background: var(--primary-color, #3b82f6);
+        color: var(--text-primary-color, #ffffff);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+      }
+      .icon-circle-btn.spinning ha-icon {
+        animation: statsSpin 0.9s linear infinite;
+      }
+      @keyframes statsSpin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+      .stats-loading-state,
+      .stats-error-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        padding: 36px 16px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--secondary-text-color);
+      }
+      .stats-warn-banner {
+        padding: 7px 11px;
+        border-radius: 10px;
+        font-size: 12px;
+        font-weight: 600;
+        background: rgba(245, 158, 11, 0.12);
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        color: #f59e0b;
+      }
+      .stats-room-pills {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        overflow-x: auto;
+        padding-bottom: 3px;
+        flex-shrink: 0;
+      }
+      .stats-room-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.22));
+        background: var(--secondary-background-color, rgba(128, 128, 128, 0.10));
+        color: var(--primary-text-color);
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+        flex-shrink: 0;
+        transition: all 0.15s ease;
+      }
+      .stats-room-pill.active {
+        background: var(--primary-color, #3b82f6);
+        border-color: var(--primary-color, #3b82f6);
+        color: var(--text-primary-color, #ffffff);
+      }
+      .stats-room-pill-meta {
+        font-size: 11px;
+        opacity: 0.78;
+        font-variant-numeric: tabular-nums;
+      }
+      .stats-chart-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+      }
+      .stats-chart-title-wrap {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .stats-chart-title {
+        font-size: 13.5px;
+        font-weight: 700;
+        color: var(--primary-text-color);
+      }
+      .stats-chart-submeta {
+        font-size: 11.5px;
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+      }
+      .stats-mode-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .stats-tune-btn {
+        border: 1px solid rgba(var(--rgb-primary-color, 59, 130, 246), 0.38);
+        background: rgba(var(--rgb-primary-color, 59, 130, 246), 0.12);
+        color: var(--primary-color, #3b82f6);
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-family: inherit;
+        font-size: 11.5px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .stats-scrub-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        min-height: 22px;
+        padding: 4px 8px;
+        border-radius: 8px;
+        background: var(--card-background-color, rgba(128, 128, 128, 0.08));
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.14));
+        font-size: 11.5px;
+        font-variant-numeric: tabular-nums;
+      }
+      .stats-scrub-time {
+        font-weight: 800;
+        color: var(--primary-text-color);
+      }
+      .stats-scrub-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: var(--secondary-text-color);
+      }
+      .stats-scrub-item strong {
+        color: var(--primary-text-color);
+      }
+      .stats-scrub-hint {
+        color: var(--secondary-text-color);
+        font-size: 11.5px;
+      }
+      .stats-scrub-summary {
+        margin-left: auto;
+        font-weight: 600;
+        color: var(--primary-text-color);
+        font-size: 11.5px;
+      }
+      .stats-svg {
+        width: 100%;
+        height: auto;
+        display: block;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      .stats-chart-interactive {
+        cursor: crosshair;
+        touch-action: pan-y;
+      }
+      .stats-legend-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--secondary-text-color);
+      }
+      .stats-legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .stats-legend-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        display: inline-block;
+        flex-shrink: 0;
+      }
+      .stats-legend-line {
+        width: 12px;
+        height: 2.5px;
+        border-radius: 2px;
+        display: inline-block;
+        flex-shrink: 0;
+      }
+      .stats-legend-dash {
+        width: 12px;
+        height: 0;
+        border-top: 2px dashed;
+        display: inline-block;
+        flex-shrink: 0;
+      }
+      .stats-mini-metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 6px;
+        padding-top: 2px;
+      }
+      .stats-mini-metric {
+        background: var(--card-background-color, rgba(128, 128, 128, 0.08));
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.14));
+        border-radius: 9px;
+        padding: 5px 7px;
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+      }
+      .mini-label {
+        font-size: 10.5px;
+        font-weight: 600;
+        color: var(--secondary-text-color);
+      }
+      .mini-val {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--primary-text-color);
+        font-variant-numeric: tabular-nums;
+      }
+      .stats-compare-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .stats-compare-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .stats-compare-chip {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.22));
+        background: var(--card-background-color, rgba(128, 128, 128, 0.10));
+        overflow: hidden;
+        transition: opacity 0.15s ease;
+      }
+      .stats-compare-chip.hidden-series {
+        opacity: 0.48;
+      }
+      .stats-compare-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border: none;
+        background: transparent;
+        color: var(--primary-text-color);
+        font-family: inherit;
+        font-size: 11.5px;
+        font-weight: 600;
+        padding: 4px 7px 4px 9px;
+        cursor: pointer;
+      }
+      .stats-compare-val {
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+        font-size: 11px;
+      }
+      .stats-compare-jump {
+        border: none;
+        border-left: 1px solid var(--divider-color, rgba(128, 128, 128, 0.18));
+        background: transparent;
+        color: var(--secondary-text-color);
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 700;
+        padding: 4px 8px 4px 6px;
+        cursor: pointer;
+      }
+      .stats-compare-jump:hover {
+        color: var(--primary-color, #3b82f6);
+      }
+      .stats-muted-note {
+        font-size: 11.5px;
+        color: var(--secondary-text-color);
+        text-align: center;
+        padding-top: 2px;
+      }
+      .stats-usage-list {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+      }
+      .stats-usage-row {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        width: 100%;
+        padding: 7px 9px;
+        border-radius: 10px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.14));
+        background: var(--card-background-color, rgba(128, 128, 128, 0.08));
+        text-align: left;
+        font-family: inherit;
+        cursor: pointer;
+        transition: border-color 0.15s ease;
+      }
+      .stats-usage-row:hover {
+        border-color: rgba(var(--rgb-primary-color, 59, 130, 246), 0.45);
+      }
+      .stats-usage-row-top {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+      }
+      .stats-usage-name-wrap {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .stats-usage-name {
+        font-size: 12.5px;
+        font-weight: 700;
+        color: var(--primary-text-color);
+      }
+      .stats-usage-lit {
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+      }
+      .stats-stacked-track {
+        width: 100%;
+        height: 9px;
+        border-radius: 999px;
+        background: rgba(148, 163, 184, 0.16);
+        overflow: hidden;
+        display: flex;
+        gap: 1px;
+      }
+      .stats-stacked-seg {
+        height: 100%;
+        display: block;
+      }
+
       @media (max-width: 768px) {
         .popup-overlay {
           align-items: flex-end;
@@ -5473,6 +7807,15 @@ class PassableLightingCard extends LitElement {
         .light-kpi-grid {
           grid-template-columns: repeat(2, minmax(0, 1fr));
         }
+        .popup-content.stats-modal {
+          max-width: 100%;
+        }
+        .popup-content.stats-modal .modal-scroll-area {
+          max-height: none;
+        }
+        .stats-mini-metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
       }
 
       @media (max-width: 420px) {
@@ -5484,6 +7827,9 @@ class PassableLightingCard extends LitElement {
         }
         .popup-tabs {
           grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .popup-tabs.three-col {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
         }
       }
 
@@ -5685,6 +8031,14 @@ class PassableLightingCardEditor extends LitElement {
               @change=${(ev) => this._onFieldChange(ev, "show_engine_footer")}
             ></ha-switch>
           </div>
+
+          <div class="switch-row">
+            <label class="form-label">Show Light Stats Button</label>
+            <ha-switch
+              .checked=${c.show_stats_button !== false}
+              @change=${(ev) => this._onFieldChange(ev, "show_stats_button")}
+            ></ha-switch>
+          </div>
         </div>
 
         <div class="section-box">
@@ -5713,10 +8067,13 @@ class PassableLightingCardEditor extends LitElement {
           ></ha-textfield>
 
           <ha-textfield
-            label="Stats Shortcut Path (e.g. /dashboard-home/light-stats)"
+            label="Legacy Stats Navigation Path (deprecated — built-in Light Stats popup used by default)"
             .value=${c.stats_navigation_path || ""}
             @input=${(ev) => this._onFieldChange(ev, "stats_navigation_path")}
           ></ha-textfield>
+          <p class="form-help">
+            The Light Stats button opens the built-in analytics popup with zero config (or configure stats_tap_action in YAML to override).
+          </p>
         </div>
 
         <div class="section-box">
