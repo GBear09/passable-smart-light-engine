@@ -199,7 +199,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
     engine: Optional[PassableLightingEngine] = data.get("engine")
     if not engine:
         return {
-            "version": data.get("version") or "2.10.0",
+            "version": data.get("version") or "2.10.1",
             "summary": {},
             "rooms": [],
             "holiday_exterior": {},
@@ -472,7 +472,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
         summary_payload = {}
 
     return {
-        "version": data.get("version") or "2.10.0",
+        "version": data.get("version") or "2.10.1",
         "summary": summary_payload,
         "rooms": rooms_payload,
         "holiday_exterior": holiday_payload,

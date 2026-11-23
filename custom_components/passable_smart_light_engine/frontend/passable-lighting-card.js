@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.10.0";
+const CARD_VERSION = "2.10.1";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -187,6 +187,7 @@ class PassableLightingCard extends LitElement {
     this._statsUsageSort = "lit";
     this._statsHoverIdx = {};
     this._statsCache = {};
+    this._returnModalTab = null;
     this._countdownInterval = null;
     this._closeModalTimer = null;
     this._toastTimer = null;
@@ -1265,6 +1266,7 @@ class PassableLightingCard extends LitElement {
     clearTimeout(this._closeModalTimer);
     this._closeModalTimer = setTimeout(() => {
       this._modalOpen = false;
+      this._returnModalTab = null;
       this._showModalDimmer = false;
       this._expandedScenesEntity = null;
       this._confirmResetRoom = null;
@@ -1277,10 +1279,13 @@ class PassableLightingCard extends LitElement {
   _openStatsModal(tab = null, roomId = null) {
     this._fireHaptic("light");
     if (this._modalOpen) {
+      this._returnModalTab = this._modalTab || "lights";
       this._modalOpen = false;
       this._showModalDimmer = false;
       this._expandedScenesEntity = null;
       this._confirmResetRoom = null;
+    } else {
+      this._returnModalTab = null;
     }
     if (tab) {
       this._statsTab = tab;
@@ -1308,6 +1313,7 @@ class PassableLightingCard extends LitElement {
     clearTimeout(this._closeModalTimer);
     this._closeModalTimer = setTimeout(() => {
       this._statsModalOpen = false;
+      this._returnModalTab = null;
       this._statsHoverIdx = {};
       this._detachOverlayScrollGuard();
       this._unlockBackgroundScroll();
@@ -1617,6 +1623,7 @@ class PassableLightingCard extends LitElement {
       this._closeModalTimer = setTimeout(() => {
         this._modalOpen = false;
         this._statsModalOpen = false;
+        this._returnModalTab = null;
         this._statsHoverIdx = {};
         this._showModalDimmer = false;
         this._expandedScenesEntity = null;
@@ -3725,6 +3732,26 @@ class PassableLightingCard extends LitElement {
                     </button>
                   `
                 : ""}
+              ${this.config?.show_stats_button !== false
+                ? html`
+                    <button
+                      type="button"
+                      class="icon-circle-btn"
+                      @click=${() => {
+                        if (this.config?.stats_tap_action?.action) {
+                          this._closeModal();
+                          this._executeActionConfig(this.config.stats_tap_action);
+                        } else {
+                          this._openStatsModal();
+                        }
+                      }}
+                      title="Switch to Light Stats"
+                      aria-label="Switch to Light Stats"
+                    >
+                      <ha-icon icon="mdi:chart-line" style="--mdc-icon-size:16px;"></ha-icon>
+                    </button>
+                  `
+                : ""}
               <button
                 type="button"
                 class="close-button"
@@ -5412,6 +5439,16 @@ class PassableLightingCard extends LitElement {
                 aria-label="Refresh stats"
               >
                 <ha-icon icon="mdi:refresh" style="--mdc-icon-size:16px;"></ha-icon>
+              </button>
+
+              <button
+                type="button"
+                class="icon-circle-btn"
+                @click=${() => this._openModal(this._returnModalTab || "lights")}
+                title="Switch to Lighting Command Center"
+                aria-label="Switch to Lighting Command Center"
+              >
+                <ha-icon icon="mdi:tune-variant" style="--mdc-icon-size:16px;"></ha-icon>
               </button>
 
               <button
@@ -7394,6 +7431,13 @@ class PassableLightingCard extends LitElement {
       /* LIGHT STATS MODAL */
       .popup-content.stats-modal {
         max-width: 640px;
+      }
+      .popup-content.stats-modal .popup-header {
+        flex-wrap: wrap;
+        row-gap: 8px;
+      }
+      .popup-content.stats-modal .popup-header-actions {
+        margin-left: auto;
       }
       .popup-content.stats-modal .modal-scroll-area {
         flex: 1 1 auto;
