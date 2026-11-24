@@ -507,6 +507,26 @@
     "preview_holiday": {
       "name": "Preview Holiday",
       "description": "Previews a holiday lighting scene and effects across configured lights for a short test period."
+    },
+    "clear_manual_override": {
+      "name": "Clear Manual Override",
+      "description": "Clears an active manual override lockout for a specific room or all rooms and smoothly resumes adaptive lighting evaluation.",
+      "fields": {
+        "room_id": {
+          "name": "Room ID",
+          "description": "Optional room ID to clear (e.g. 'kitchen'). Omit or pass 'all' to clear manual overrides across all rooms."
+        }
+      }
+    },
+    "clear_notification": {
+      "name": "Clear Visual Notification",
+      "description": "Clears an active or pending visual notification light for a specific room or all rooms, turns off boolean/switch notification triggers, and restores adaptive room lighting.",
+      "fields": {
+        "room_id": {
+          "name": "Room ID",
+          "description": "Optional room ID to clear (e.g. 'living_room'). Omit or pass 'all' to clear visual notifications across all rooms."
+        }
+      }
     }
   }
 }

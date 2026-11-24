@@ -202,7 +202,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
     engine: Optional[PassableLightingEngine] = data.get("engine")
     if not engine:
         return {
-            "version": data.get("version") or "2.10.2",
+            "version": data.get("version") or "2.10.3",
             "summary": {},
             "rooms": [],
             "holiday_exterior": {},
@@ -359,6 +359,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
                     "notification_showing": ctrl.is_notification_showing,
                     "notification_pending": ctrl.is_notification_pending,
                     "notification_light_entity": ctrl.notification_light_entity,
+                    "notification_trigger_entity": ctrl.notification_trigger_entity,
                     "media_target_pct": media_target_pct,
                     "late_night_target_pct": late_night_target_pct,
                     "base_presence_timeout_min": int(
@@ -479,7 +480,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
         summary_payload = {}
 
     return {
-        "version": data.get("version") or "2.10.2",
+        "version": data.get("version") or "2.10.3",
         "summary": summary_payload,
         "rooms": rooms_payload,
         "holiday_exterior": holiday_payload,
@@ -499,6 +500,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_stats)
     websocket_api.async_register_command(hass, ws_subscribe)
     websocket_api.async_register_command(hass, ws_clear_override)
+    websocket_api.async_register_command(hass, ws_clear_notification)
     websocket_api.async_register_command(hass, ws_set_room_auto)
     websocket_api.async_register_command(hass, ws_set_room_circadian)
     websocket_api.async_register_command(hass, ws_set_target_lux)
@@ -618,6 +620,30 @@ async def ws_clear_override(
         return
 
     cleared = await engine.async_clear_manual_override(msg.get("room_id"))
+    connection.send_result(msg["id"], {"success": True, "cleared": cleared})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/clear_notification",
+        vol.Optional("room_id"): vol.Any(str, None),
+    }
+)
+@websocket_api.async_response
+async def ws_clear_notification(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    """Clear active or pending visual notification for one room or all rooms."""
+    engine: Optional[PassableLightingEngine] = hass.data.get(DOMAIN, {}).get("engine")
+    if not engine:
+        connection.send_error(
+            msg["id"], "not_found", "Passable Smart Light Engine is not loaded."
+        )
+        return
+
+    cleared = await engine.async_clear_notification(msg.get("room_id"))
     connection.send_result(msg["id"], {"success": True, "cleared": cleared})
 
 

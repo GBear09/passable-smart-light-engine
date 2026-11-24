@@ -147,7 +147,7 @@ class PassableLightingBaseSensor(SensorEntity):
             name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Smart Lighting Engine v2",
-            sw_version="2.10.2",
+            sw_version="2.10.3",
         )
 
 
@@ -287,6 +287,8 @@ class PassableLightingActiveModeSensor(PassableLightingBaseSensor):
             "notification_pending": self._controller.is_notification_pending,
             "notification_showing": self._controller.is_notification_showing,
             "notification_light_entity": self._controller.notification_light_entity,
+            "notification_trigger_entity": self._controller.notification_trigger_entity,
+            "notification_dismissed": self._controller.notification_dismissed,
             "media_learning_enabled": media_learn,
             "media_preferences": media_prefs,
             "media_target_pct": media_target,
@@ -459,7 +461,7 @@ class PassableLightingEngineReadySensor(SensorEntity):
             name="Passable Smart Light Engine",
             manufacturer="Passable",
             model="Smart Lighting Engine Hub",
-            sw_version="2.10.2",
+            sw_version="2.10.3",
         )
 
     @property
@@ -500,7 +502,7 @@ class PassableLightingSummarySensor(SensorEntity):
             name="Passable Smart Light Engine",
             manufacturer="Passable",
             model="Smart Lighting Engine Hub",
-            sw_version="2.10.2",
+            sw_version="2.10.3",
         )
 
     async def async_added_to_hass(self) -> None:

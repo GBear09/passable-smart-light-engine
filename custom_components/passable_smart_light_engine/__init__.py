@@ -22,6 +22,7 @@ from .const import (
     ATTR_CALIBRATE_ROOM_ID,
     ATTR_DURATION_SEC,
     ATTR_HOLIDAY_NAME,
+    ATTR_NOTIFICATION_ROOM_ID,
     ATTR_OVERRIDE_ROOM_ID,
     ATTR_RESET_ROOM_ID,
     ATTR_RESET_TYPE,
@@ -59,6 +60,7 @@ from .const import (
     SERVICE_APPLY_HOLIDAY_LIGHTING,
     SERVICE_CALIBRATE_ROOM_CURVE,
     SERVICE_CLEAR_MANUAL_OVERRIDE,
+    SERVICE_CLEAR_NOTIFICATION,
     SERVICE_PREVIEW_HOLIDAY,
     SERVICE_RESET_LEARNING_DATA,
     SERVICE_START_PRESENCE_SIMULATION,
@@ -109,15 +111,21 @@ CLEAR_OVERRIDE_SERVICE_SCHEMA = vol.Schema(
     }
 )
 
+CLEAR_NOTIFICATION_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_NOTIFICATION_ROOM_ID): vol.Any(cv.string, None),
+    }
+)
+
 
 def _get_integration_version() -> str:
     """Read integration version from manifest.json."""
     try:
         manifest_path = pathlib.Path(__file__).parent / "manifest.json"
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return str(data.get("version", "2.10.2"))
+        return str(data.get("version", "2.10.3"))
     except Exception:
-        return "2.10.2"
+        return "2.10.3"
 
 
 async def _async_register_lovelace_resource(
@@ -352,6 +360,18 @@ async def async_setup(hass: HomeAssistant, config: Dict[str, Any]) -> bool:
         SERVICE_CLEAR_MANUAL_OVERRIDE,
         _async_handle_clear_manual_override,
         schema=CLEAR_OVERRIDE_SERVICE_SCHEMA,
+    )
+
+    async def _async_handle_clear_notification(call: ServiceCall) -> None:
+        """Clear active or pending visual notification for a specific room or all rooms."""
+        room_id = call.data.get(ATTR_NOTIFICATION_ROOM_ID)
+        await engine.async_clear_notification(room_id)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CLEAR_NOTIFICATION,
+        _async_handle_clear_notification,
+        schema=CLEAR_NOTIFICATION_SERVICE_SCHEMA,
     )
 
     # Ensure a single unified general system entry holds all system devices & entities

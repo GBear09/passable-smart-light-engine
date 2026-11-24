@@ -226,8 +226,8 @@ When configured via the Native UI, the integration provisions a room Device with
 - **Whole-Home Control & Recursive Drill-Down:** Automatically expands nested floor/room light groups (or falls back to Home Assistant's Floor & Area registry) with an inline active-light and per-floor drawer to toggle or dim individual bulbs in 1–2 taps.
 - **3 Selectable Floor Layouts:** Choose `tiles` (default compact 2-column HVAC-matched tiles), `rings` (5-across progress rings), or `rows` (full-width stacked rows) via the visual card editor or YAML.
 - **Built-In 4-Tab Command Center Modal:**
-  - **Lights:** Filter by `Active` or floor, toggle room `Auto` / `Circadian`, clear active overrides, and control individual lamps.
-  - **Engine:** Adjust room Target Lux steppers, inspect learned Lux Yield Curves (`lx/%`), trigger curve calibration, and reset learning datasets.
+  - **Lights:** Filter by `Active` or floor, toggle room `Auto` / `Circadian`, clear active overrides and visual notifications, and control individual lamps.
+  - **Engine:** Adjust room Target Lux steppers, inspect learned Lux Yield Curves (`lx/%`), trigger curve calibration, clear active overrides or notifications, and reset learning datasets.
   - **Holiday & Ext:** Toggle Dusk-to-Dawn, Holiday Lighting, and Decor Plugs, and preview or apply holidays from your catalog.
   - **Away Sim:** Start/stop presence simulation and inspect active simulated fixtures.
 - **Built-In Light Stats Analytics Popup (`mdi:chart-line`):**
@@ -315,6 +315,15 @@ Clears an active manual override lockout for a specific `room_id` (or all rooms 
 service: passable_smart_light_engine.clear_manual_override
 data:
   room_id: "kitchen" # Optional: omit or pass 'all' to clear all rooms
+```
+
+### `passable_smart_light_engine.clear_notification`
+Clears an active or pending visual notification for a specific `room_id` (or all rooms when omitted), turns off `input_boolean`/`switch` notification triggers, and restores adaptive room lighting.
+
+```yaml
+service: passable_smart_light_engine.clear_notification
+data:
+  room_id: "living_room" # Optional: omit or pass 'all' to clear all rooms
 ```
 
 ---

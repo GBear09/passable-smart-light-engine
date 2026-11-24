@@ -102,3 +102,15 @@ clear_manual_override:
       selector:
         text:
 
+clear_notification:
+  name: Clear Visual Notification
+  description: Clears an active or pending visual notification light for a specific room or all rooms, turns off boolean/switch notification triggers, and restores adaptive room lighting.
+  fields:
+    room_id:
+      name: Room ID
+      description: Optional room ID to clear (e.g. 'living_room'). Omit or pass 'all' to clear visual notifications across all rooms.
+      example: "living_room"
+      required: false
+      selector:
+        text:
+

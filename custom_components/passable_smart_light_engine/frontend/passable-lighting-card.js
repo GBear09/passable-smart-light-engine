@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.10.2";
+const CARD_VERSION = "2.10.3";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -353,6 +353,8 @@ class PassableLightingCard extends LitElement {
       for (const r of this._wsData.rooms) {
         if (r.light_entity) watched.add(r.light_entity);
         if (r.lux_sensor) watched.add(r.lux_sensor);
+        if (r.notification_light_entity) watched.add(r.notification_light_entity);
+        if (r.notification_trigger_entity) watched.add(r.notification_trigger_entity);
         (r.secondary_lights || []).forEach((id) => id && watched.add(id));
         (r.leaf_lights || []).forEach((id) => id && watched.add(id));
         if (r.entities) {
@@ -1001,7 +1003,9 @@ class PassableLightingCard extends LitElement {
       ? Math.round(active.reduce((sum, id) => sum + this._getLightPct(id), 0) / on)
       : 0;
     const hasOverride = floor.leaves.some((id) => leafToRoom[id]?.override_active);
-    const hasNotify = floor.leaves.some((id) => leafToRoom[id]?.notification_showing);
+    const hasNotify = floor.leaves.some((id) =>
+      Boolean(leafToRoom[id]?.notification_showing || leafToRoom[id]?.notification_pending)
+    );
     return { total, on, pct, hasOverride, hasNotify };
   }
 
@@ -1043,6 +1047,19 @@ class PassableLightingCard extends LitElement {
     const overrideCount = wsSummary.manual_overrides_count ?? summaryAttr.manual_overrides_count ?? 0;
     const circadianKelvin = wsSummary.current_circadian_kelvin ?? summaryAttr.current_circadian_kelvin ?? null;
 
+    const activeNotifyRooms =
+      wsSummary.notification_active_rooms ?? summaryAttr.notification_active_rooms;
+    const pendingNotifyRooms =
+      wsSummary.notification_pending_rooms ?? summaryAttr.notification_pending_rooms;
+    const notifyRoomIds = new Set([
+      ...(Array.isArray(activeNotifyRooms) ? activeNotifyRooms : []),
+      ...(Array.isArray(pendingNotifyRooms) ? pendingNotifyRooms : []),
+      ...(this._wsData?.rooms || [])
+        .filter((r) => r.notification_showing || r.notification_pending)
+        .map((r) => r.room_id),
+    ]);
+    const notifyCount = notifyRoomIds.size;
+
     return {
       totalLights,
       onLights,
@@ -1051,6 +1068,7 @@ class PassableLightingCard extends LitElement {
       totalRooms,
       autoRooms,
       overrideCount,
+      notifyCount,
       circadianKelvin,
     };
   }
@@ -1696,6 +1714,15 @@ class PassableLightingCard extends LitElement {
     );
   }
 
+  _clearNotification(roomId = null, ev = null) {
+    if (ev) ev.stopPropagation();
+    this._fireHaptic("medium");
+    this._callEngineWS(
+      { type: `${ENGINE_DOMAIN}/clear_notification`, room_id: roomId },
+      roomId ? "Notification cleared" : "All notifications cleared"
+    );
+  }
+
   _toggleRoomAuto(room, ev = null) {
     if (ev) ev.stopPropagation();
     this._fireHaptic("light");
@@ -1832,6 +1859,9 @@ class PassableLightingCard extends LitElement {
     const anyOn = metrics.onLights > 0;
     const alerts = this._getActiveAlerts();
     const overrideRoom = (this._wsData?.rooms || []).find((r) => r.override_active);
+    const notifyRooms = (this._wsData?.rooms || []).filter(
+      (r) => r.notification_showing || r.notification_pending
+    );
 
     return html`
       <div class="light-summary-strip">
@@ -1879,6 +1909,25 @@ class PassableLightingCard extends LitElement {
                   title="Manual override active — tap to manage or clear"
                 >
                   ${metrics.overrideCount} Override
+                </button>
+              `
+            : ""}
+
+          ${metrics.notifyCount > 0
+            ? html`
+                <button
+                  type="button"
+                  class="zone-inline-chip info clickable"
+                  @click=${(ev) =>
+                    this._clearNotification(
+                      notifyRooms.length === 1 ? notifyRooms[0].room_id : null,
+                      ev
+                    )}
+                  title="${notifyRooms.length === 1
+                    ? `Visual notification in ${notifyRooms[0].name} — tap to clear`
+                    : "Visual notifications active — tap to clear all"}"
+                >
+                  ${metrics.notifyCount > 1 ? `${metrics.notifyCount} Notify ✕` : "Notify ✕"}
                 </button>
               `
             : ""}
@@ -2093,6 +2142,9 @@ class PassableLightingCard extends LitElement {
                       ${fs.hasOverride
                         ? html`<span class="override-dot" title="Manual override active"></span>`
                         : ""}
+                      ${fs.hasNotify
+                        ? html`<span class="notify-dot" title="Visual notification active"></span>`
+                        : ""}
                     </div>
                     <div class="tile-sub ${isOn ? "lit" : ""}">
                       <span>${fs.on}/${fs.total} on</span>
@@ -2172,6 +2224,7 @@ class PassableLightingCard extends LitElement {
               <span class="ring-count ${isOn ? "lit" : ""}">
                 ${fs.on}/${fs.total}
                 ${fs.hasOverride ? html`<span class="override-dot"></span>` : ""}
+                ${fs.hasNotify ? html`<span class="notify-dot" title="Visual notification active"></span>` : ""}
               </span>
             </button>
           `;
@@ -2202,6 +2255,9 @@ class PassableLightingCard extends LitElement {
                     <span class="row-title">${f.name}</span>
                     ${fs.hasOverride
                       ? html`<span class="zone-inline-chip warning">Override</span>`
+                      : ""}
+                    ${fs.hasNotify
+                      ? html`<span class="zone-inline-chip info">Notify</span>`
                       : ""}
                   </div>
                   <div class="row-sub">
@@ -2238,6 +2294,10 @@ class PassableLightingCard extends LitElement {
     const name = this._getLightName(entityId);
     const room = leafToRoom[entityId];
     const isNotifClaimed = room?.notification_showing && room?.notification_light_entity === entityId;
+    const isNotifPendingOnBulb =
+      !isNotifClaimed &&
+      Boolean(room?.notification_pending) &&
+      room?.notification_light_entity === entityId;
     const effects = this._getLightEffects(entityId);
     const scenes = this._getScenesForRoomOrLight(entityId, room, leafGroupName[entityId]);
     const hasScenesOrEffects = effects.length > 0 || scenes.length > 0;
@@ -2281,8 +2341,17 @@ class PassableLightingCard extends LitElement {
                 >
                   ${name}
                 </button>
-                ${isNotifClaimed
-                  ? html`<span class="zone-inline-chip info">Notify</span>`
+                ${isNotifClaimed || isNotifPendingOnBulb
+                  ? html`
+                      <button
+                        type="button"
+                        class="zone-inline-chip info clickable"
+                        @click=${(ev) => this._clearNotification(room.room_id, ev)}
+                        title="Clear visual notification for ${room.name}"
+                      >
+                        ${isNotifClaimed ? "Notify ✕" : "Notify Pending ✕"}
+                      </button>
+                    `
                   : ""}
                 ${room?.override_active
                   ? html`
@@ -3004,8 +3073,31 @@ class PassableLightingCard extends LitElement {
                                   >
                                     Override ${this._formatCountdown(this._getOverrideRemainingSec(r))} ✕
                                   </button>
+                                  ${r.notification_showing || r.notification_pending
+                                    ? html`
+                                        <button
+                                          type="button"
+                                          class="zone-inline-chip info clickable"
+                                          @click=${(ev) => this._clearNotification(r.room_id, ev)}
+                                          title="Tap to clear visual notification"
+                                        >
+                                          ${r.notification_showing ? "Notify ✕" : "Notify Pending ✕"}
+                                        </button>
+                                      `
+                                    : ""}
                                 `
-                              : html`<span class="zone-inline-chip neutral">${modeLabel}</span>`}
+                              : r.notification_showing || r.notification_pending
+                                ? html`
+                                    <button
+                                      type="button"
+                                      class="zone-inline-chip info clickable"
+                                      @click=${(ev) => this._clearNotification(r.room_id, ev)}
+                                      title="Tap to clear visual notification"
+                                    >
+                                      ${r.notification_showing ? "Notify ✕" : "Notify Pending ✕"}
+                                    </button>
+                                  `
+                                : html`<span class="zone-inline-chip neutral">${modeLabel}</span>`}
                             <button
                               type="button"
                               class="room-pill-toggle ${r.is_enabled ? "green" : ""}"
@@ -3118,7 +3210,18 @@ class PassableLightingCard extends LitElement {
                     <span class="accordion-main-text">${r.name}</span>
                     ${r.override_active
                       ? html`<span class="zone-inline-chip warning">Override ${this._formatCountdown(this._getOverrideRemainingSec(r))}</span>`
-                      : html`<span class="accordion-mode-sub">${MODE_LABELS[r.active_mode] || r.active_mode}</span>`}
+                      : r.notification_showing || r.notification_pending
+                        ? html`
+                            <button
+                              type="button"
+                              class="zone-inline-chip info clickable"
+                              @click=${(ev) => this._clearNotification(r.room_id, ev)}
+                              title="Tap to clear visual notification"
+                            >
+                              ${r.notification_showing ? "Notify ✕" : "Notify Pending ✕"}
+                            </button>
+                          `
+                        : html`<span class="accordion-mode-sub">${MODE_LABELS[r.active_mode] || r.active_mode}</span>`}
                     <ha-icon
                       icon="${isExpanded ? "mdi:chevron-up" : "mdi:chevron-down"}"
                       style="--mdc-icon-size:18px; color:var(--secondary-text-color);"
@@ -3169,6 +3272,17 @@ class PassableLightingCard extends LitElement {
                                     @click=${(ev) => this._clearOverride(r.room_id, ev)}
                                   >
                                     Clear Override ✕
+                                  </button>
+                                `
+                              : ""}
+                            ${r.notification_showing || r.notification_pending
+                              ? html`
+                                  <button
+                                    type="button"
+                                    class="zone-inline-chip info clickable"
+                                    @click=${(ev) => this._clearNotification(r.room_id, ev)}
+                                  >
+                                    Clear Notify ✕
                                   </button>
                                 `
                               : ""}
@@ -6023,6 +6137,12 @@ class PassableLightingCard extends LitElement {
       .zone-inline-chip.clickable {
         cursor: pointer;
       }
+      .zone-inline-chip.info.clickable:hover {
+        background: rgba(14, 165, 233, 0.26);
+      }
+      .zone-inline-chip.warning.clickable:hover {
+        background: rgba(245, 158, 11, 0.26);
+      }
 
       .alert-pill-btn,
       .all-off-pill-btn {
@@ -6295,6 +6415,14 @@ class PassableLightingCard extends LitElement {
         height: 6px;
         border-radius: 50%;
         background: #f59e0b;
+        display: inline-block;
+        flex-shrink: 0;
+      }
+      .notify-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #0ea5e9;
         display: inline-block;
         flex-shrink: 0;
       }

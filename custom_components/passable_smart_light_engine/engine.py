@@ -464,6 +464,7 @@ def compute_engine_summary(
     frozen_rooms_count = 0
     occupied_rooms_count = 0
     notification_active_rooms: List[str] = []
+    notification_pending_rooms: List[str] = []
     room_modes: Dict[str, str] = {}
 
     for room_id, ctrl in controllers.items():
@@ -484,6 +485,8 @@ def compute_engine_summary(
             occupied_rooms_count += 1
         if ctrl.is_notification_showing:
             notification_active_rooms.append(room_id)
+        if ctrl.is_notification_pending:
+            notification_pending_rooms.append(room_id)
 
     sun_state = hass.states.get("sun.sun")
     sun_elevation: Optional[float] = None
@@ -506,7 +509,10 @@ def compute_engine_summary(
         "circadian_rooms_count": circadian_rooms_count,
         "frozen_rooms_count": frozen_rooms_count,
         "occupied_rooms_count": occupied_rooms_count,
+        "notifications_count": len(notification_active_rooms),
         "notification_active_rooms": notification_active_rooms,
+        "notifications_pending_count": len(notification_pending_rooms),
+        "notification_pending_rooms": notification_pending_rooms,
         "current_circadian_kelvin": get_circadian_temp(hass),
         "sun_elevation": sun_elevation,
         "holiday_enabled": bool(holiday_coord.enabled) if holiday_coord else False,
@@ -966,6 +972,50 @@ class PassableLightingEngine:
                 ctrl.notify_entities()
             cleared.append(rid)
 
+        return cleared
+
+    async def async_clear_notification(
+        self, room_id: Optional[str] = None, reevaluate: bool = True
+    ) -> List[str]:
+        """Clear an active or pending visual notification for a room or all rooms."""
+        if room_id and room_id not in ("all", "*", ""):
+            targets = [room_id] if room_id in self._controllers else []
+        else:
+            targets = list(self._controllers.keys())
+
+        cleared: List[str] = []
+        for rid in targets:
+            ctrl = self._controllers.get(rid)
+            if not ctrl or not ctrl.is_notification_enabled:
+                continue
+
+            trigger_ent = ctrl.notification_trigger_entity
+            was_showing = ctrl.is_notification_showing or self._notification_showing_active.get(rid, False)
+            was_pending = ctrl.is_notification_pending
+            trigger_st = self.hass.states.get(trigger_ent) if trigger_ent else None
+            trigger_is_active = bool(
+                trigger_st and str(trigger_st.state).lower() in ("on", "true", "active")
+            )
+            if not was_showing and not was_pending and not trigger_is_active:
+                continue
+
+            ctrl.dismiss_notification()
+            if (
+                trigger_ent
+                and trigger_is_active
+                and trigger_ent.split(".")[0] in ("input_boolean", "switch")
+            ):
+                await self.async_sync_helper(trigger_ent, False)
+
+            _LOGGER.info("PassableSmartLighting [%s]: 🔔 Visual notification CLEARED", rid)
+            if reevaluate:
+                await ctrl.async_evaluate("notification_cleared")
+            else:
+                ctrl.notify_entities()
+            cleared.append(rid)
+
+        if cleared:
+            self.notify_summary_listeners()
         return cleared
 
     async def async_turn_on_light(
@@ -1891,21 +1941,76 @@ class PassableLightingEngine:
         elif was_notif_showing and not notif_showing:
             self._notification_showing_active[room_id] = False
             if notif_light:
-                if is_occupied and is_light_on:
-                    _LOGGER.info(
-                        "PassableSmartLighting [%s]: Notification ended in occupied room. Restoring %s to circadian white.",
-                        room_id,
-                        notif_light,
-                    )
-                    min_temp = int(p.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP))
-                    max_temp = int(p.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP))
-                    await self.async_apply_circadian_to_entity(
-                        room_id,
-                        notif_light,
-                        get_circadian_temp(self.hass, min_temp, max_temp),
-                        force_color_mode=True,
-                    )
+                min_temp = int(p.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP))
+                max_temp = int(p.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP))
+                all_members = get_light_members(self.hass, light_entity)
+                other_members = [m for m in all_members if m != notif_light]
+
+                if notif_light in all_members and other_members:
+                    other_on_states = [
+                        st
+                        for m in other_members
+                        if (st := self.hass.states.get(m)) is not None and st.state == "on"
+                    ]
+                    if is_occupied and other_on_states:
+                        if self._last_engine_target.get(room_id) is None:
+                            pcts = [
+                                int(round(((st.attributes.get("brightness") or 0) / 255.0) * 100))
+                                for st in other_on_states
+                            ]
+                            avg_other_pct = int(round(sum(pcts) / len(pcts))) if pcts else 100
+                            self._last_engine_target[room_id] = max(1, min(100, avg_other_pct))
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Notification ended in occupied room. Restoring %s to circadian white.",
+                            room_id,
+                            notif_light,
+                        )
+                        restored = await self.async_apply_circadian_to_entity(
+                            room_id,
+                            notif_light,
+                            get_circadian_temp(self.hass, min_temp, max_temp),
+                            force_color_mode=True,
+                        )
+                        if not restored:
+                            await self.async_turn_on_light(
+                                room_id,
+                                notif_light,
+                                self._last_engine_target.get(room_id, 100),
+                                circadian_enabled,
+                                min_temp,
+                                max_temp,
+                                transition=float(p.get("transition", 1.0)),
+                            )
+                    else:
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Notification ended with other room lights off; turning off %s.",
+                            room_id,
+                            notif_light,
+                        )
+                        await self.async_turn_off_light(room_id, notif_light)
+                        is_light_on = False
+                        current_pct = 0
+                elif notif_light in all_members:
+                    if is_occupied and is_light_on:
+                        _LOGGER.info(
+                            "PassableSmartLighting [%s]: Notification ended in occupied room. Restoring %s to circadian white.",
+                            room_id,
+                            notif_light,
+                        )
+                        await self.async_apply_circadian_to_entity(
+                            room_id,
+                            notif_light,
+                            get_circadian_temp(self.hass, min_temp, max_temp),
+                            force_color_mode=True,
+                        )
+                    else:
+                        await self.async_turn_off_light(room_id, notif_light)
                 else:
+                    _LOGGER.info(
+                        "PassableSmartLighting [%s]: Dedicated notification light ended; turning off %s.",
+                        room_id,
+                        notif_light,
+                    )
                     await self.async_turn_off_light(room_id, notif_light)
 
         # 6. Mode & Target Calculation (Occupied Room)
@@ -2040,6 +2145,8 @@ class PassableLightingEngine:
             "media_change",
             "late_night_change",
             "override_expired",
+            "notification_trigger_change",
+            "notification_cleared",
         )
 
         sun_state = self.hass.states.get("sun.sun")
@@ -2882,6 +2989,7 @@ class RoomController:
         self._entity_listeners: List[Callable[[], None]] = []
         self._is_enabled = True
         self._freeze_bypass_active = False
+        self._notification_dismissed: bool = False
         self._vacancy_cancel: Optional[CALLBACK_TYPE] = None
         self._debounce_cancels: Dict[str, CALLBACK_TYPE] = {}
         self._recent_turn_on_ts: float = 0.0
@@ -3033,6 +3141,27 @@ class RoomController:
         return self.entry_data.get(CONF_NOTIFICATION_LIGHT_ENTITY)
 
     @property
+    def notification_trigger_entity(self) -> Optional[str]:
+        """Return the notification trigger entity if configured."""
+        return self.entry_data.get(CONF_NOTIFICATION_TRIGGER_ENTITY)
+
+    @property
+    def notification_dismissed(self) -> bool:
+        """Return whether the current active notification trigger has been manually dismissed."""
+        return self._notification_dismissed
+
+    def dismiss_notification(self) -> None:
+        """Dismiss the current notification until the trigger resets or re-triggers."""
+        self._notification_dismissed = True
+        self.notify_entities()
+
+    def reset_notification_dismissal(self) -> None:
+        """Clear any manual notification dismissal latch."""
+        if self._notification_dismissed:
+            self._notification_dismissed = False
+            self.notify_entities()
+
+    @property
     def is_notification_suppressed(self) -> bool:
         """Check whether visual notification is suppressed by sleep or explicit suppression entities."""
         if self._freeze_bypass_active:
@@ -3074,7 +3203,9 @@ class RoomController:
         if not trigger_ent:
             return False
         st = self.hass.states.get(trigger_ent)
-        if not st or st.state not in ("on", "true", "active"):
+        if not st or str(st.state).lower() not in ("on", "true", "active"):
+            return False
+        if self._notification_dismissed:
             return False
         if self.is_notification_suppressed:
             return False
@@ -3443,6 +3574,10 @@ class RoomController:
                     return
                 if new_st.state == old_st.state:
                     return
+                new_active = str(new_st.state).lower() in ("on", "true", "active")
+                old_active = str(old_st.state).lower() in ("on", "true", "active")
+                if not new_active or (new_active and not old_active):
+                    self._notification_dismissed = False
                 self.schedule_evaluation("notification_trigger_change", delay_sec=0.05)
 
             self._unsub_listeners.append(

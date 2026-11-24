@@ -162,6 +162,9 @@ ATTR_CALIBRATE_FORCE = "force"
 SERVICE_CLEAR_MANUAL_OVERRIDE = "clear_manual_override"
 ATTR_OVERRIDE_ROOM_ID = "room_id"
 
+SERVICE_CLEAR_NOTIFICATION = "clear_notification"
+ATTR_NOTIFICATION_ROOM_ID = "room_id"
+
 # Presence Simulation configuration keys
 CONF_SIMULATION_ENABLED = "simulation_enabled"
 CONF_SIMULATION_LABEL = "simulation_label"
