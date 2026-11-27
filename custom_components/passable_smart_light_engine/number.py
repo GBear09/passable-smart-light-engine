@@ -6,7 +6,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ROOM_ID, CONF_TARGET_LUX, DEFAULT_TARGET_LUX, DOMAIN
+from .const import CONF_ROOM_ID, CONF_ROOM_NAME, CONF_TARGET_LUX, DEFAULT_TARGET_LUX, DOMAIN
 from .engine import RoomController
 
 
@@ -31,7 +31,10 @@ class PassableLightingTargetLuxNumber(NumberEntity):
         self._entry = entry
         self._controller = controller
         self._room_id = entry.data[CONF_ROOM_ID]
-        self._room_title = self._room_id.replace("_", " ").title()
+        self._room_title = (
+            str(entry.data.get(CONF_ROOM_NAME) or "").strip()
+            or self._room_id.replace("_", " ").title()
+        )
 
         self._attr_unique_id = f"{DOMAIN}_{self._room_id}_target_lux_number"
         self._attr_name = f"{self._room_title} Target Lux Setting"

@@ -27,6 +27,7 @@ from .const import (
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
     CONF_PRESENCE_TIMEOUT_MIN,
     CONF_ROOM_ID,
+    CONF_ROOM_NAME,
     CONF_SECONDARY_LIGHTS,
     CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
@@ -128,7 +129,10 @@ class PassableLightingBaseSensor(SensorEntity):
         self._controller = controller
         self._engine = engine
         self._room_id = entry.data[CONF_ROOM_ID]
-        self._room_title = self._room_id.replace("_", " ").title()
+        self._room_title = (
+            str(entry.data.get(CONF_ROOM_NAME) or "").strip()
+            or self._room_id.replace("_", " ").title()
+        )
 
     async def async_added_to_hass(self) -> None:
         """Register storage and controller update listeners so attributes refresh live."""

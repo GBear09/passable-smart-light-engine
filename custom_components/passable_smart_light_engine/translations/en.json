@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Passable Adaptive Smart Lighting",
-        "description": "Choose setup type:",
+        "description": "Choose what you would like to set up:",
         "menu_options": {
           "room": "Add Smart Lighting Room",
           "presence_simulation": "Configure Presence Simulation",
@@ -12,166 +12,220 @@
       },
       "holiday_lighting": {
         "title": "Holiday & Exterior Lighting Subsystem",
-        "description": "Initialize the Holiday & Exterior Lighting Subsystem. Once added, you can manage dusk-to-dawn exterior lighting, active holidays, Philips Hue scenes, bulb effects, and decoration plugs from the options flow."
+        "description": "Initialize the Holiday & Exterior Lighting Subsystem. Once added, you can manage dusk-to-dawn exterior lighting, active holidays, Philips Hue scenes, bulb effects, and decoration plugs from Configure."
       },
       "room": {
-        "title": "Passable Adaptive Smart Lighting - Room Setup",
-        "description": "Configure the core hardware and lux targets for this room.",
+        "title": "Add Smart Lighting Room — Step 1: Hardware & Presence",
+        "description": "Configure the primary light, occupancy sensors, and ambient lux sensor for this room. Optional tuning (secondary lamps, task floor, timeout scaling) is collapsed below.",
         "data": {
-          "room_id": "Room ID (Internal key, e.g. living_room)",
-          "light_entity": "Light Entity to Control",
-          "secondary_lights": "Secondary / Auxiliary Lights",
-          "suppress_main_when_secondary_on": "Turn Off Main Lights When Secondary Light is ON",
+          "room_name": "Room Display Name (e.g. Living Room)",
+          "light_entity": "Primary Light or Light Group",
           "presence_entity": "Presence / Motion Sensors",
           "lux_sensor": "Ambient Illuminance Sensor (Lux)",
           "target_lux": "Target Ambient Lux (Seed)",
-          "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
-          "presence_timeout_min": "Vacancy Timeout (Minutes)",
-          "timeout_scale_entities": "Timeout Scaling Entities (e.g. Guest Mode)",
-          "timeout_scale_factor": "Vacancy Timeout Multiplier (When Scaling Active)",
-          "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)"
+          "presence_timeout_min": "Vacancy Timeout (Minutes)"
+        },
+        "data_description": {
+          "room_name": "Friendly name shown on dashboards and devices. An internal Room ID is automatically created from this name.",
+          "light_entity": "Main overhead light or light group controlled automatically by this room.",
+          "presence_entity": "One or more motion, mmWave, or occupancy sensors. Room is considered occupied if ANY selected sensor is active.",
+          "lux_sensor": "Illuminance sensor (lx) used to harvest natural daylight and calibrate bulb yield.",
+          "target_lux": "Baseline target illuminance while occupied. Over time, manual adjustments refine this by sun angle.",
+          "presence_timeout_min": "Minutes with no detected presence before lights automatically turn off."
+        },
+        "sections": {
+          "auxiliary_tuning": {
+            "name": "🔧 Auxiliary Lights, Task Floor & Tuning (Optional)",
+            "description": "Fine-tune secondary lamps, guest timeout scaling, and initial brightness calibration.",
+            "data": {
+              "room_id": "Custom Room ID (Optional — auto-generated if blank)",
+              "secondary_lights": "Secondary / Auxiliary Lights (Lamps)",
+              "suppress_main_when_secondary_on": "Turn Off Primary Light When a Secondary Light is ON",
+              "timeout_scale_entities": "Vacancy Timeout Multiplier Entities (Optional)",
+              "timeout_scale_factor": "Vacancy Timeout Multiplier (When Active)",
+              "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)",
+              "default_lux_ratio": "Initial Lux-per-1% Estimate (Before Calibration)"
+            },
+            "data_description": {
+              "room_id": "Leave blank to auto-generate (e.g. 'living_room'). Only lowercase letters, numbers, and underscores are used.",
+              "secondary_lights": "Optional floor/table lamps. Swept off on vacancy (outside freeze) and excluded from main bulb yield learning.",
+              "suppress_main_when_secondary_on": "When enabled, turning on any secondary lamp turns off the main overhead light for cozy lamp-only lighting.",
+              "timeout_scale_entities": "Optional entities (e.g. Guest Mode switch) that multiply the vacancy timeout when ON or ACTIVE.",
+              "timeout_scale_factor": "Multiplier applied to Vacancy Timeout whenever any selected scaling entity is active (e.g. 3.0x).",
+              "min_occupied_pct": "Minimum brightness floor while occupied, even during bright daylight (useful for kitchens or offices). Set 0 to allow full daylight shutoff.",
+              "default_lux_ratio": "Estimated room lux added per 1% brightness before the engine finishes learning your room curve."
+            }
+          }
+        }
+      },
+      "room_features": {
+        "title": "Add Smart Lighting Room — Step 2: Optional Features",
+        "description": "Enable optional features for **{room_name}**. Only the features you enable here will show follow-up settings.\n\n**Mode Priority (Highest → Lowest):** Manual Override → Force-Off / Freeze → Visual Notification → Media Playback → Late Night → Occupied Ambient Lux.",
+        "data": {
+          "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
+          "min_color_temp": "Warmest Color Temp (Night / Sunrise / Sunset)",
+          "max_color_temp": "Coolest Color Temp (Solar Noon)",
+          "late_night_enabled": "Enable Late Night Mode",
+          "late_night_condition_type": "Late Night Trigger Mode",
+          "media_entities": "Media Players for Auto-Dimming (Optional)",
+          "configure_bypasses": "Configure Overrides, Bypasses & Sensor Safeguards",
+          "notification_light_enabled": "Enable Visual Notification Light"
+        },
+        "data_description": {
+          "circadian_enabled": "Smoothly shifts color temperature throughout the day based on sun elevation.",
+          "min_color_temp": "Applied at night and around sunrise/sunset when Circadian Rhythm is enabled.",
+          "max_color_temp": "Applied near solar noon when Circadian Rhythm is enabled.",
+          "late_night_enabled": "Overrides daytime lux targeting with a dim nighttime brightness preset.",
+          "late_night_condition_type": "Choose how Late Night starts & stops: fixed clock times, dynamic input_datetime helpers, or an entity/home state.",
+          "media_entities": "If selected, lights dim to a movie/TV preset whenever any chosen media player is playing or paused.",
+          "configure_bypasses": "Enable to customize override timeout, native override/freeze switches, force-off helpers, or slow lux sensor cooldown.",
+          "notification_light_enabled": "Claim a single bulb to display a colored alert (e.g. laundry ready) while other lights work normally."
+        }
+      },
+      "room_late_night": {
+        "title": "Late Night Mode — {mode_label}",
+        "description": "Configure target brightness and the trigger inputs for **{mode_label}**.",
+        "data": {
+          "late_night_pct": "Late Night Brightness % (Seed)",
+          "late_night_learn_prefs": "Learn Manual Brightness Adjustments",
+          "late_night_start_time": "Late Night Start Time",
+          "late_night_stop_time": "Late Night Stop Time",
+          "late_night_start_entity": "Start Time Helper (input_datetime)",
+          "late_night_stop_entity": "Stop Time Helper (input_datetime)",
+          "late_night_entity": "Trigger Entity / Group / Home State",
+          "late_night_entity_states": "Active Trigger States (Optional, comma-separated)"
+        },
+        "data_description": {
+          "late_night_pct": "Target brightness when Late Night Mode is active and room is occupied.",
+          "late_night_learn_prefs": "When enabled, manual dimming during Late Night is remembered and averaged over time. Disable to keep brightness locked to the seed %.",
+          "late_night_start_time": "Daily clock time when Late Night begins (supports overnight windows such as 22:00 to 06:00).",
+          "late_night_stop_time": "Daily clock time when Late Night ends and normal daytime lux targeting resumes.",
+          "late_night_start_entity": "input_datetime helper defining when Late Night begins. Listeners update automatically if you change the helper time.",
+          "late_night_stop_entity": "input_datetime helper defining when Late Night ends.",
+          "late_night_entity": "Entity or group whose state activates Late Night (e.g. input_boolean.bedtime, binary_sensor, schedule, or input_select.home_state).",
+          "late_night_entity_states": "Leave blank to match standard active states (on, true, home, active, sleep, bedtime, pre-sleep), or enter exact states like 'sleep, pre-sleep'."
+        }
+      },
+      "room_media": {
+        "title": "Media Player Dimming Settings",
+        "description": "Configure how lights behave when one of your selected media players is active.",
+        "data": {
+          "media_seed_pct": "Media Brightness % (Seed)",
+          "media_respect_ambient_lux": "Respect Natural Daylight (Keep / Turn Off in Daylight)",
+          "media_learn_prefs": "Learn Manual Media Adjustments"
+        },
+        "data_description": {
+          "media_seed_pct": "Target brightness when media is playing (set 0% to turn lights off while watching).",
+          "media_respect_ambient_lux": "When enabled, media lighting stays off if natural daylight already meets your room's Target Lux.",
+          "media_learn_prefs": "When enabled, manual dimming during media playback is learned over time. Disable to lock to the seed %."
+        }
+      },
+      "room_bypasses": {
+        "title": "Overrides, Bypasses & Sensor Safeguards",
+        "description": "Manual wall-switch or app changes are **always detected automatically**—optional switches and helpers below let you view or trigger locks from dashboards and automations.",
+        "sections": {
+          "override_behavior": {
+            "name": "🔒 Manual Override Behavior",
+            "description": "Control how long automatic lighting pauses after a manual adjustment.",
+            "data": {
+              "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
+              "ignore_max_brightness_override": "Treat Turning On to 100% from Off as Normal On",
+              "create_override_switch": "Create Built-In Override Switch Entity",
+              "manual_override_entity": "External Override Helper (Optional)"
+            },
+            "data_description": {
+              "override_timeout_min": "Minutes to pause automatic dimming after a manual wall-switch or app change (cleared early if the room becomes vacant).",
+              "ignore_max_brightness_override": "When enabled, flipping a wall switch to 100% from off lets the engine settle to adaptive brightness instead of locking manual override.",
+              "create_override_switch": "Creates a dedicated switch.<room>_manual_override entity in Home Assistant to view or toggle the override lock.",
+              "manual_override_entity": "Optional existing input_boolean or switch synced two-way with the room's override state."
+            }
+          },
+          "bypass_entities": {
+            "name": "🛑 Freeze & Force-Off Bypasses",
+            "description": "Pause automation temporarily or force lights off during Away / Sleep modes.",
+            "data": {
+              "create_freeze_switch": "Create Built-In Freeze Bypass Switch Entity",
+              "bypass_freeze_entities": "Freeze Bypass Entities (Hold Current State)",
+              "bypass_off_entities": "Force-Off Bypass Entities (e.g. Away Mode)"
+            },
+            "data_description": {
+              "create_freeze_switch": "Creates a dedicated switch.<room>_freeze_bypass entity to hold lights in their current state without turning them off.",
+              "bypass_freeze_entities": "Entities that pause all automation and hold lights as-is while ON/active (e.g. sleeping_in_living_room).",
+              "bypass_off_entities": "Entities that pause automation and turn all room lights OFF while ON/active (e.g. Away Mode)."
+            }
+          },
+          "hardware_safeguards": {
+            "name": "⚡ Sensor Cooldown & Power Outage Guard",
+            "description": "Prevent oscillation with slow lux sensors and false overrides after power restoration.",
+            "data": {
+              "settling_cooldown_sec": "Lux Sensor Settling Cooldown (Seconds)",
+              "power_grid_entity": "Power Grid Status Entity (Optional)"
+            },
+            "data_description": {
+              "settling_cooldown_sec": "Wait time between closed-loop lux trims so slow Zigbee/Matter sensors can report updated readings.",
+              "power_grid_entity": "Optional sensor/binary_sensor indicating grid power; halts evaluation while offline so power-restoration spikes do not lock overrides."
+            }
+          }
+        }
+      },
+      "room_notification": {
+        "title": "Visual Notification Light Settings",
+        "description": "Claim an individual bulb out of the room to display a visual color alert while the remaining room lights continue adaptive dimming.",
+        "data": {
+          "notification_trigger_entity": "Notification Trigger Entity",
+          "notification_light_entity": "Target Notification Bulb",
+          "notification_color": "Alert RGB Color",
+          "notification_brightness_pct": "Alert Brightness %",
+          "notification_presence_gated": "Presence-Gated (Show Only When Room Is Occupied)",
+          "notification_suppression_entities": "Sleep / Quiet Suppression Entities"
+        },
+        "data_description": {
+          "notification_trigger_entity": "Entity (e.g. input_boolean.laundry_washer_pending) that activates the alert when ON or active.",
+          "notification_light_entity": "Specific bulb or fixture to claim for notifications (if part of the room light group, other bulbs keep working normally).",
+          "notification_color": "RGB color displayed while the notification is active.",
+          "notification_brightness_pct": "Brightness percentage for the alert bulb.",
+          "notification_presence_gated": "When enabled, the alert only illuminates while the room is occupied and turns off on vacancy.",
+          "notification_suppression_entities": "Entities (e.g. home_state or sleep boolean) that suppress the alert during sleep or quiet hours."
         }
       },
       "presence_simulation": {
-        "title": "Presence Simulation Configuration",
+        "title": "Presence Simulation — Step 1: Target & Strategy",
         "description": "Configure house-wide presence simulation.\n\n{lights_summary}",
         "data": {
           "simulation_enabled": "Enable Presence Simulation",
           "simulation_label": "Target Light Label",
-          "simulation_mode": "Simulation Strategy",
-          "simulation_lookback_days": "History Lookback Days",
-          "simulation_jitter_min": "Time Jitter Window (Minutes +/-)",
-          "simulation_arrival_grace_min": "Night Arrival Grace Period (Minutes)",
-          "simulation_max_brightness_pct": "Max Simulated Brightness %"
+          "simulation_mode": "Simulation Strategy"
+        },
+        "data_description": {
+          "simulation_enabled": "Master toggle enabling away-mode lighting simulation.",
+          "simulation_label": "All Home Assistant light entities carrying this label are automatically included.",
+          "simulation_mode": "Hybrid replays your real occupied history and falls back to synthetic evening routines if history is unavailable."
         }
       },
-      "advanced": {
-        "title": "Advanced Settings, Overrides & Bypasses",
-        "description": "Configure optional features: circadian rhythm, late night mode, media player watching, and bypasses.",
-        "sections": {
-          "circadian": {
-            "name": "☀️ Circadian Rhythm",
-            "description": "Dynamic sun-elevation-based color temperature adjustment.",
-            "data": {
-              "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
-              "min_color_temp": "Warmest Temp (Kelvin)",
-              "max_color_temp": "Coolest Temp (Kelvin)"
-            },
-            "data_description": {
-              "min_color_temp": "Active when Circadian Rhythm is enabled. Applied during night and sunrise/sunset.",
-              "max_color_temp": "Active when Circadian Rhythm is enabled. Applied during peak solar noon."
-            }
-          },
-          "late_night": {
-            "name": "🌙 Late Night Mode",
-            "description": "Dim nighttime preset triggered by schedule or bedtime helper.",
-            "data": {
-              "late_night_enabled": "Enable Late Night Mode",
-              "late_night_learn_prefs": "Enable Late Night Preference Learning",
-              "late_night_pct": "Late Night Brightness % (Seed)",
-              "late_night_condition_type": "Late Night Trigger Mode",
-              "late_night_entity": "Late Night Active Helper Entity / Group",
-              "late_night_start_time": "Late Night Start Time (Fixed)",
-              "late_night_start_entity": "Late Night Start Entity (input_datetime)",
-              "late_night_stop_time": "Late Night Stop Time (Fixed)",
-              "late_night_stop_entity": "Late Night Stop Entity (input_datetime)"
-            },
-            "data_description": {
-              "late_night_learn_prefs": "When enabled, manual brightness adjustments made during Late Night mode are learned and averaged over time. When disabled, brightness remains fixed to the seed percentage.",
-              "late_night_pct": "Active when Late Night Mode is enabled. Target brightness during late night window.",
-              "late_night_condition_type": "Choose between fixed clock time or an entity/group state helper.",
-              "late_night_entity": "Binary sensor or boolean switch that triggers Late Night when ON.",
-              "late_night_start_entity": "Optional input_datetime helper to override fixed start time.",
-              "late_night_stop_entity": "Optional input_datetime helper to override fixed stop time."
-            }
-          },
-          "media": {
-            "name": "📺 Media Control",
-            "description": "Dim room lights automatically when media players are active.",
-            "data": {
-              "media_entities": "Media Player Entities",
-              "media_learn_prefs": "Enable Media Preference Learning",
-              "media_seed_pct": "Media Brightness % (Seed)",
-              "media_respect_ambient_lux": "Respect Natural Daylight (Keep / Turn Off in Daylight)"
-            },
-            "data_description": {
-              "media_entities": "Select media players to watch. When playing, lights transition to media brightness.",
-              "media_learn_prefs": "When enabled, manual brightness adjustments made during Media playback are learned and averaged over time. When disabled, brightness remains fixed to the seed percentage.",
-              "media_seed_pct": "Baseline brightness percentage applied when media is playing.",
-              "media_respect_ambient_lux": "When enabled, media lighting only turns on when ambient lux is below the target threshold. If natural daylight is sufficient, lights remain off."
-            }
-          },
-          "bypasses": {
-            "name": "🛑 Bypasses & Overrides",
-            "description": "Configure physical switch overrides, freeze holds, force-off bypasses, and power grid status.",
-            "data": {
-              "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
-              "create_override_switch": "Create Dedicated Native Manual Override Switch",
-              "bypass_freeze_entities": "Freeze Bypasses (Hold current state)",
-              "create_freeze_switch": "Create Dedicated Native Freeze Switch",
-              "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
-              "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
-              "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
-              "power_grid_entity": "Power Grid Status Entity",
-              "settling_cooldown_sec": "Sensor Settling Cooldown (Seconds)"
-            },
-            "data_description": {
-              "bypass_freeze_entities": "Entities that pause automations and hold current light level when active.",
-              "bypass_off_entities": "Entities (e.g. Away Mode) that pause automations and force lights off.",
-              "override_timeout_min": "Minutes to keep manual override active before resuming automatic control.",
-              "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout.",
-              "settling_cooldown_sec": "Time to wait for slow illuminance sensors (e.g. Aqara Matter, battery Zigbee) to report before making another closed-loop brightness adjustment."
-            }
-          },
-          "notification_light": {
-            "name": "🔔 Visual Notification Lights",
-            "description": "Configure an individual light bulb to display visual notifications (e.g. laundry alert) while other room lights operate normally.",
-            "data": {
-              "notification_light_enabled": "Enable Visual Notification Light",
-              "notification_trigger_entity": "Notification Trigger Entity (e.g. input_boolean.laundry_washer_pending)",
-              "notification_light_entity": "Target Notification Light (Individual Bulb)",
-              "notification_color": "Notification RGB Color",
-              "notification_brightness_pct": "Notification Brightness %",
-              "notification_presence_gated": "Presence-Gated (Only illuminate when room is occupied)",
-              "notification_suppression_entities": "Sleep / Quiet Suppression Entities"
-            },
-            "data_description": {
-              "notification_light_enabled": "When enabled, the selected light bulb will display the visual alert color when the trigger is active.",
-              "notification_trigger_entity": "Entity that triggers the visual notification when ON or ACTIVE.",
-              "notification_light_entity": "Specific light fixture or bulb (e.g. overhead pendant) to claim out of the room group.",
-              "notification_color": "RGB color to display for the visual notification.",
-              "notification_brightness_pct": "Brightness percentage for the visual notification.",
-              "notification_presence_gated": "When enabled, the notification bulb turns on only when room presence is detected, and turns off when vacant.",
-              "notification_suppression_entities": "Entities that suppress the notification when active (e.g. input_boolean.sleeping_in_living_room or input_select.home_state)."
-            }
-          }
-        },
+      "presence_simulation_tuning": {
+        "title": "Presence Simulation — Step 2: Timing & Brightness",
+        "description": "Fine-tune timing and brightness for the selected simulation strategy.\n\n{lights_summary}",
         "data": {
-          "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
-          "create_override_switch": "Create Dedicated Native Manual Override Switch",
-          "bypass_freeze_entities": "Freeze Bypasses (Hold current state)",
-          "create_freeze_switch": "Create Dedicated Native Freeze Switch",
-          "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
-          "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
-          "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
-          "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
-          "min_color_temp": "Warmest Temp (Kelvin)",
-          "max_color_temp": "Coolest Temp (Kelvin)",
-          "media_entities": "Media Player Entities",
-          "media_learn_prefs": "Enable Media Preference Learning",
-          "media_seed_pct": "Media Brightness % (Seed)",
-          "late_night_enabled": "Enable Late Night Mode",
-          "late_night_learn_prefs": "Enable Late Night Preference Learning",
-          "late_night_pct": "Late Night Brightness % (Seed)",
-          "late_night_condition_type": "Late Night Trigger Mode",
-          "late_night_entity": "Late Night Active Helper Entity / Group",
-          "late_night_start_time": "Late Night Start Time (Fixed)",
-          "late_night_start_entity": "Late Night Start Entity (input_datetime)",
-          "late_night_stop_time": "Late Night Stop Time (Fixed)",
-          "late_night_stop_entity": "Late Night Stop Entity (input_datetime)",
-          "power_grid_entity": "Power Grid Status Entity"
+          "simulation_lookback_days": "History Lookback Window (Days)",
+          "simulation_jitter_min": "Time Jitter Window (Minutes +/-)",
+          "simulation_arrival_grace_min": "Night Arrival Handover Grace Period (Minutes)",
+          "simulation_max_brightness_pct": "Max Simulated Brightness %"
+        },
+        "data_description": {
+          "simulation_lookback_days": "Number of past days searched in Home Assistant Recorder for genuine occupied lighting history.",
+          "simulation_jitter_min": "Random +/- minute offset applied to scheduled transitions so lights don't switch at the exact same minute daily.",
+          "simulation_arrival_grace_min": "Vacancy countdown applied to already-lit rooms when you arrive home after dark.",
+          "simulation_max_brightness_pct": "Upper brightness cap applied to simulated lights."
         }
       }
+    },
+    "error": {
+      "invalid_room_id": "Please enter a valid Room Name containing letters or numbers.",
+      "missing_late_night_entity": "Please select a Trigger Entity / Group for Entity State mode.",
+      "missing_datetime_helper": "Please select both Start and Stop input_datetime helpers.",
+      "missing_schedule_time": "Please provide both Start and Stop clock times.",
+      "missing_notification_trigger": "Please select a Notification Trigger Entity.",
+      "missing_notification_light": "Please select a Target Notification Bulb."
     },
     "abort": {
       "already_configured": "This room ID is already configured in Passable Smart Light Engine."
@@ -181,165 +235,204 @@
     "step": {
       "init": {
         "title": "Configure Smart Lighting Room Settings",
-        "description": "Adjust hardware, lux targets, circadian rhythm, media control, or bypasses.",
-        "sections": {
-          "hardware_presence": {
-            "name": "⚙️ Hardware & Presence",
-            "description": "Core room light entity, motion sensors, and lux targets.",
-            "data": {
-              "light_entity": "Light Entity to Control",
-              "secondary_lights": "Secondary / Auxiliary Lights",
-              "suppress_main_when_secondary_on": "Turn Off Main Lights When Secondary Light is ON",
-              "presence_entity": "Presence / Motion Sensors",
-              "lux_sensor": "Ambient Illuminance Sensor (Lux)",
-              "target_lux": "Target Ambient Lux (Seed)",
-              "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
-              "presence_timeout_min": "Vacancy Timeout (Minutes)",
-              "timeout_scale_entities": "Timeout Scaling Entities (e.g. Guest Mode)",
-              "timeout_scale_factor": "Vacancy Timeout Multiplier (When Scaling Active)",
-              "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)"
-            },
-            "data_description": {
-              "secondary_lights": "Optional secondary fixtures (e.g. bedside lamps). The engine sweeps them off on vacancy (outside bedtime) and shields yield learning.",
-              "suppress_main_when_secondary_on": "When enabled, turning on any secondary light automatically turns off the overhead ceiling fixture for cozy lamp-only light.",
-              "target_lux": "The baseline lux level the room maintains when occupied.",
-              "default_lux_ratio": "Lux produced per 1% brightness before learning completes (e.g. 1.0).",
-              "presence_timeout_min": "Minutes of no motion before turning lights off.",
-              "timeout_scale_entities": "Optional entities (e.g. input_boolean.guest_mode) that scale the vacancy timeout when ON.",
-              "timeout_scale_factor": "Multiplier applied to the vacancy timeout when any Timeout Scaling Entity is active (e.g. 3.0x).",
-              "min_occupied_pct": "Minimum brightness floor while occupied, even on bright sunny days."
-            }
-          },
-          "circadian": {
-            "name": "☀️ Circadian Rhythm",
-            "description": "Dynamic sun-elevation-based color temperature adjustment.",
-            "data": {
-              "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
-              "min_color_temp": "Warmest Temp (Kelvin)",
-              "max_color_temp": "Coolest Temp (Kelvin)"
-            },
-            "data_description": {
-              "min_color_temp": "Active when Circadian Rhythm is enabled. Applied during night and sunrise/sunset.",
-              "max_color_temp": "Active when Circadian Rhythm is enabled. Applied during peak solar noon."
-            }
-          },
-          "late_night": {
-            "name": "🌙 Late Night Mode",
-            "description": "Dim nighttime preset triggered by schedule or bedtime helper.",
-            "data": {
-              "late_night_enabled": "Enable Late Night Mode",
-              "late_night_learn_prefs": "Enable Late Night Preference Learning",
-              "late_night_pct": "Late Night Brightness % (Seed)",
-              "late_night_condition_type": "Late Night Trigger Mode",
-              "late_night_entity": "Late Night Active Helper Entity / Group",
-              "late_night_start_time": "Late Night Start Time (Fixed)",
-              "late_night_start_entity": "Late Night Start Entity (input_datetime)",
-              "late_night_stop_time": "Late Night Stop Time (Fixed)",
-              "late_night_stop_entity": "Late Night Stop Entity (input_datetime)"
-            },
-            "data_description": {
-              "late_night_learn_prefs": "When enabled, manual brightness adjustments made during Late Night mode are learned and averaged over time. When disabled, brightness remains fixed to the seed percentage.",
-              "late_night_pct": "Active when Late Night Mode is enabled. Target brightness during late night window.",
-              "late_night_condition_type": "Choose between fixed clock time or an entity/group state helper.",
-              "late_night_entity": "Binary sensor or boolean switch that triggers Late Night when ON.",
-              "late_night_start_entity": "Optional input_datetime helper to override fixed start time.",
-              "late_night_stop_entity": "Optional input_datetime helper to override fixed stop time."
-            }
-          },
-          "media": {
-            "name": "📺 Media Control",
-            "description": "Dim room lights automatically when media players are active.",
-            "data": {
-              "media_entities": "Media Player Entities",
-              "media_learn_prefs": "Enable Media Preference Learning",
-              "media_seed_pct": "Media Brightness % (Seed)",
-              "media_respect_ambient_lux": "Respect Natural Daylight (Keep / Turn Off in Daylight)"
-            },
-            "data_description": {
-              "media_entities": "Select media players to watch. When playing, lights transition to media brightness.",
-              "media_learn_prefs": "When enabled, manual brightness adjustments made during Media playback are learned and averaged over time. When disabled, brightness remains fixed to the seed percentage.",
-              "media_seed_pct": "Baseline brightness percentage applied when media is playing.",
-              "media_respect_ambient_lux": "When enabled, media lighting only turns on when ambient lux is below the target threshold. If natural daylight is sufficient, lights remain off."
-            }
-          },
-          "bypasses": {
-            "name": "🛑 Bypasses & Overrides",
-            "description": "Configure physical switch overrides, freeze holds, force-off bypasses, and power grid status.",
-            "data": {
-              "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
-              "create_override_switch": "Create Dedicated Native Manual Override Switch",
-              "bypass_freeze_entities": "Freeze Bypasses (Hold current state)",
-              "create_freeze_switch": "Create Dedicated Native Freeze Switch",
-              "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
-              "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
-              "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
-              "power_grid_entity": "Power Grid Status Entity",
-              "settling_cooldown_sec": "Sensor Settling Cooldown (Seconds)"
-            },
-            "data_description": {
-              "bypass_freeze_entities": "Entities that pause automations and hold current light level when active.",
-              "bypass_off_entities": "Entities (e.g. Away Mode) that pause automations and force lights off.",
-              "override_timeout_min": "Minutes to keep manual override active before resuming automatic control.",
-              "ignore_max_brightness_override": "When enabled, turning lights to 100% is treated as normal on rather than a manual lockout.",
-              "settling_cooldown_sec": "Time to wait for slow illuminance sensors (e.g. Aqara Matter, battery Zigbee) to report before making another closed-loop brightness adjustment."
-            }
-          },
-          "notification_light": {
-            "name": "🔔 Visual Notification Lights",
-            "description": "Configure an individual light bulb to display visual notifications (e.g. laundry alert) while other room lights operate normally.",
-            "data": {
-              "notification_light_enabled": "Enable Visual Notification Light",
-              "notification_trigger_entity": "Notification Trigger Entity (e.g. input_boolean.laundry_washer_pending)",
-              "notification_light_entity": "Target Notification Light (Individual Bulb)",
-              "notification_color": "Notification RGB Color",
-              "notification_brightness_pct": "Notification Brightness %",
-              "notification_presence_gated": "Presence-Gated (Only illuminate when room is occupied)",
-              "notification_suppression_entities": "Sleep / Quiet Suppression Entities"
-            },
-            "data_description": {
-              "notification_light_enabled": "When enabled, the selected light bulb will display the visual alert color when the trigger is active.",
-              "notification_trigger_entity": "Entity that triggers the visual notification when ON or ACTIVE.",
-              "notification_light_entity": "Specific light fixture or bulb (e.g. overhead pendant) to claim out of the room group.",
-              "notification_color": "RGB color to display for the visual notification.",
-              "notification_brightness_pct": "Brightness percentage for the visual notification.",
-              "notification_presence_gated": "When enabled, the notification bulb turns on only when room presence is detected, and turns off when vacant.",
-              "notification_suppression_entities": "Entities that suppress the notification when active (e.g. input_boolean.sleeping_in_living_room or input_select.home_state)."
-            }
-          }
-        },
+        "description": "Choose a category to configure."
+      },
+      "room_menu": {
+        "title": "Room Settings",
+        "description": "{room_summary}",
+        "menu_options": {
+          "room_opt_hardware": "⚙️ Hardware, Presence & Target Lux",
+          "room_opt_circadian": "☀️ Circadian Rhythm",
+          "room_opt_late_night": "🌙 Late Night Mode",
+          "room_opt_media": "📺 Media Player Dimming",
+          "room_opt_bypasses": "🛑 Overrides, Bypasses & Sensor Safeguards",
+          "room_opt_notification": "🔔 Visual Notification Light"
+        }
+      },
+      "room_opt_hardware": {
+        "title": "Hardware, Presence & Target Lux",
+        "description": "Update the room's friendly name, lights, sensors, and occupancy/lux targets.",
         "data": {
-          "light_entity": "Light Entity to Control",
+          "room_name": "Room Display Name",
+          "light_entity": "Primary Light or Light Group",
           "presence_entity": "Presence / Motion Sensors",
           "lux_sensor": "Ambient Illuminance Sensor (Lux)",
           "target_lux": "Target Ambient Lux (Seed)",
-          "default_lux_ratio": "Default Lux Ratio (Seed Lux/1% brightness)",
-          "presence_timeout_min": "Vacancy Timeout (Minutes)",
-          "timeout_scale_entities": "Timeout Scaling Entities (e.g. Guest Mode)",
-          "timeout_scale_factor": "Vacancy Timeout Multiplier (When Scaling Active)",
-          "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)",
-          "manual_override_entity": "Manual Override Indicator (Existing Helper - Optional)",
-          "create_override_switch": "Create Dedicated Native Manual Override Switch",
-          "bypass_freeze_entities": "Freeze Bypasses (Hold current state)",
-          "create_freeze_switch": "Create Dedicated Native Freeze Switch",
-          "bypass_off_entities": "Force-Off Bypasses (e.g. Away Mode)",
-          "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
-          "ignore_max_brightness_override": "Ignore Max Brightness Override (turning on to 100% won't lock)",
+          "presence_timeout_min": "Vacancy Timeout (Minutes)"
+        },
+        "data_description": {
+          "room_name": "Friendly display name used in the UI and device title (existing entity IDs are preserved).",
+          "light_entity": "Main overhead light or light group controlled automatically by this room.",
+          "presence_entity": "Room is considered occupied if ANY selected sensor is active.",
+          "lux_sensor": "Illuminance sensor (lx) used to measure ambient light.",
+          "target_lux": "Baseline target illuminance while occupied.",
+          "presence_timeout_min": "Minutes of vacancy before lights turn off automatically."
+        },
+        "sections": {
+          "auxiliary_tuning": {
+            "name": "🔧 Auxiliary Lights, Task Floor & Tuning",
+            "description": "Optional secondary lamps, guest timeout scaling, task floor, and initial lux yield.",
+            "data": {
+              "secondary_lights": "Secondary / Auxiliary Lights (Lamps)",
+              "suppress_main_when_secondary_on": "Turn Off Primary Light When a Secondary Light is ON",
+              "timeout_scale_entities": "Vacancy Timeout Multiplier Entities (Optional)",
+              "timeout_scale_factor": "Vacancy Timeout Multiplier (When Active)",
+              "min_occupied_pct": "Minimum Occupied Brightness % (Task Floor)",
+              "default_lux_ratio": "Initial Lux-per-1% Estimate (Before Calibration)"
+            },
+            "data_description": {
+              "secondary_lights": "Optional lamps swept off on vacancy and excluded from main bulb yield learning.",
+              "suppress_main_when_secondary_on": "Automatically turns off the main overhead light whenever a secondary lamp is turned on.",
+              "timeout_scale_entities": "Optional entities (e.g. Guest Mode) that multiply Vacancy Timeout when active.",
+              "timeout_scale_factor": "Multiplier applied when any scaling entity is active (e.g. 3.0x).",
+              "min_occupied_pct": "Minimum brightness floor while occupied (0 allows full daylight shutoff).",
+              "default_lux_ratio": "Fallback lux per 1% brightness before room curve calibration completes."
+            }
+          }
+        }
+      },
+      "room_opt_circadian": {
+        "title": "Circadian Rhythm",
+        "description": "Configure sun-elevation-based color temperature shifting.",
+        "data": {
           "circadian_enabled": "Enable Sun-Based Circadian Rhythm",
-          "min_color_temp": "Warmest Temp (Kelvin)",
-          "max_color_temp": "Coolest Temp (Kelvin)",
-          "media_entities": "Media Player Entities",
-          "media_learn_prefs": "Enable Media Preference Learning",
-          "media_seed_pct": "Media Brightness % (Seed)",
+          "min_color_temp": "Warmest Color Temp (Night / Sunrise / Sunset)",
+          "max_color_temp": "Coolest Color Temp (Solar Noon)"
+        },
+        "data_description": {
+          "circadian_enabled": "Shifts color temperature smoothly throughout the day based on sun elevation.",
+          "min_color_temp": "Warmest Kelvin target used at night and twilight.",
+          "max_color_temp": "Coolest Kelvin target used at solar noon."
+        }
+      },
+      "room_opt_late_night": {
+        "title": "Late Night Mode — Step 1: Mode & Brightness",
+        "description": "Enable Late Night Mode and choose how it triggers. Next, you will only see the fields required for your chosen trigger mode.",
+        "data": {
           "late_night_enabled": "Enable Late Night Mode",
-          "late_night_learn_prefs": "Enable Late Night Preference Learning",
           "late_night_pct": "Late Night Brightness % (Seed)",
-          "late_night_condition_type": "Late Night Trigger Mode",
-          "late_night_entity": "Late Night Active Helper Entity / Group",
-          "late_night_start_time": "Late Night Start Time (Fixed)",
-          "late_night_start_entity": "Late Night Start Entity (input_datetime)",
-          "late_night_stop_time": "Late Night Stop Time (Fixed)",
-          "late_night_stop_entity": "Late Night Stop Entity (input_datetime)",
-          "power_grid_entity": "Power Grid Status Entity"
+          "late_night_learn_prefs": "Learn Manual Brightness Adjustments",
+          "late_night_condition_type": "Late Night Trigger Mode"
+        },
+        "data_description": {
+          "late_night_enabled": "When disabled, Late Night Mode never activates.",
+          "late_night_pct": "Target brightness during Late Night when occupied.",
+          "late_night_learn_prefs": "When enabled, manual brightness changes during Late Night are averaged into your preset. Disable to keep brightness fixed.",
+          "late_night_condition_type": "Fixed Clock Schedule uses daily times; Dynamic Time Helpers reads input_datetime entities; Entity / Home State watches a switch, sensor, group, or input_select."
+        }
+      },
+      "room_opt_late_night_details": {
+        "title": "Late Night Mode — Step 2: {mode_label}",
+        "description": "Configure the trigger settings for **{mode_label}**.",
+        "data": {
+          "late_night_start_time": "Late Night Start Time",
+          "late_night_stop_time": "Late Night Stop Time",
+          "late_night_start_entity": "Start Time Helper (input_datetime)",
+          "late_night_stop_entity": "Stop Time Helper (input_datetime)",
+          "late_night_entity": "Trigger Entity / Group / Home State",
+          "late_night_entity_states": "Active Trigger States (Optional, comma-separated)"
+        },
+        "data_description": {
+          "late_night_start_time": "Daily clock time when Late Night starts (supports overnight schedules like 22:00 to 06:00).",
+          "late_night_stop_time": "Daily clock time when Late Night stops.",
+          "late_night_start_entity": "input_datetime helper defining when Late Night starts.",
+          "late_night_stop_entity": "input_datetime helper defining when Late Night stops.",
+          "late_night_entity": "Entity or group whose state activates Late Night (e.g. input_boolean.bedtime, binary_sensor, schedule, or input_select.home_state).",
+          "late_night_entity_states": "Leave blank to match default active states (on, true, home, active, sleep, bedtime, pre-sleep), or enter comma-separated states."
+        }
+      },
+      "room_opt_media": {
+        "title": "Media Player Dimming",
+        "description": "Dim room lights automatically whenever selected media players are playing or paused.",
+        "data": {
+          "media_entities": "Media Player Entities",
+          "media_seed_pct": "Media Brightness % (Seed)",
+          "media_respect_ambient_lux": "Respect Natural Daylight (Keep / Turn Off in Daylight)",
+          "media_learn_prefs": "Learn Manual Media Adjustments"
+        },
+        "data_description": {
+          "media_entities": "Leave empty to disable media dimming for this room.",
+          "media_seed_pct": "Target brightness while media is active (0% turns lights off).",
+          "media_respect_ambient_lux": "Keep lights off during media playback if natural daylight already meets your room's Target Lux.",
+          "media_learn_prefs": "Remember manual brightness adjustments made during media playback."
+        }
+      },
+      "room_opt_bypasses": {
+        "title": "Overrides, Bypasses & Sensor Safeguards",
+        "description": "Manual wall-switch or app changes are **always detected automatically**—optional switches and helpers below let you inspect or control overrides and freezes from dashboards or automations.",
+        "sections": {
+          "override_behavior": {
+            "name": "🔒 Manual Override Behavior",
+            "description": "Control lockout timing and optional dashboard override switches.",
+            "data": {
+              "override_timeout_min": "Manual Override Lockout Timeout (Minutes)",
+              "ignore_max_brightness_override": "Treat Turning On to 100% from Off as Normal On",
+              "create_override_switch": "Create Built-In Override Switch Entity",
+              "manual_override_entity": "External Override Helper (Optional)"
+            },
+            "data_description": {
+              "override_timeout_min": "Minutes to keep manual override active before resuming adaptive control.",
+              "ignore_max_brightness_override": "When enabled, turning a light on from off to 100% lets adaptive lighting run instead of locking override.",
+              "create_override_switch": "Creates switch.<room>_manual_override to monitor or clear override from dashboards.",
+              "manual_override_entity": "Optional existing input_boolean or switch synced two-way with override state."
+            }
+          },
+          "bypass_entities": {
+            "name": "🛑 Freeze & Force-Off Bypasses",
+            "description": "Configure entities that hold lights as-is or force lights off.",
+            "data": {
+              "create_freeze_switch": "Create Built-In Freeze Bypass Switch Entity",
+              "bypass_freeze_entities": "Freeze Bypass Entities (Hold Current State)",
+              "bypass_off_entities": "Force-Off Bypass Entities (e.g. Away Mode)"
+            },
+            "data_description": {
+              "create_freeze_switch": "Creates switch.<room>_freeze_bypass to pause automation and hold current brightness.",
+              "bypass_freeze_entities": "Entities that pause automation and keep lights at their current state when ON/active.",
+              "bypass_off_entities": "Entities that pause automation and force all room lights OFF when ON/active."
+            }
+          },
+          "hardware_safeguards": {
+            "name": "⚡ Sensor Cooldown & Power Outage Guard",
+            "description": "Configure slow lux sensor settling and power grid outage protection.",
+            "data": {
+              "settling_cooldown_sec": "Lux Sensor Settling Cooldown (Seconds)",
+              "power_grid_entity": "Power Grid Status Entity (Optional)"
+            },
+            "data_description": {
+              "settling_cooldown_sec": "Wait time between closed-loop trims for slow Zigbee/Matter illuminance sensors.",
+              "power_grid_entity": "Optional sensor/binary_sensor that halts automation while grid power is offline."
+            }
+          }
+        }
+      },
+      "room_opt_notification": {
+        "title": "Visual Notification Light — Step 1",
+        "description": "Claim an individual bulb to display visual color alerts while other room lights operate normally.\n\n{notif_summary}",
+        "data": {
+          "notification_light_enabled": "Enable Visual Notification Light"
+        },
+        "data_description": {
+          "notification_light_enabled": "Enable to configure the alert trigger, target bulb, color, and suppression rules."
+        }
+      },
+      "room_opt_notification_details": {
+        "title": "Visual Notification Light — Step 2: Alert Details",
+        "description": "Select the trigger entity, target bulb, alert color, and quiet-hours suppression.",
+        "data": {
+          "notification_trigger_entity": "Notification Trigger Entity",
+          "notification_light_entity": "Target Notification Bulb",
+          "notification_color": "Alert RGB Color",
+          "notification_brightness_pct": "Alert Brightness %",
+          "notification_presence_gated": "Presence-Gated (Show Only When Room Is Occupied)",
+          "notification_suppression_entities": "Sleep / Quiet Suppression Entities"
+        },
+        "data_description": {
+          "notification_trigger_entity": "Entity that triggers the visual alert when ON or active.",
+          "notification_light_entity": "Individual light fixture or bulb claimed for notifications.",
+          "notification_color": "RGB color displayed while the alert is active.",
+          "notification_brightness_pct": "Brightness percentage for the alert bulb.",
+          "notification_presence_gated": "Only illuminate the alert bulb while the room is occupied.",
+          "notification_suppression_entities": "Entities that suppress the alert when active (e.g. sleep mode or home_state)."
         }
       },
       "system_menu": {
@@ -351,16 +444,33 @@
         }
       },
       "presence_simulation_options": {
-        "title": "Configure Presence Simulation",
-        "description": "Configure house-wide presence simulation behavior, timers, and active targets.\n\n{lights_summary}",
+        "title": "Presence Simulation — Step 1: Target & Strategy",
+        "description": "Configure house-wide presence simulation enablement, target label, and strategy.\n\n{lights_summary}",
         "data": {
           "simulation_enabled": "Enable Presence Simulation",
           "simulation_label": "Target Light Label",
-          "simulation_mode": "Simulation Strategy",
-          "simulation_lookback_days": "History Lookback Days",
+          "simulation_mode": "Simulation Strategy"
+        },
+        "data_description": {
+          "simulation_enabled": "Disable to turn off away-mode presence simulation completely.",
+          "simulation_label": "Light entities carrying this Home Assistant label are automatically included.",
+          "simulation_mode": "Hybrid replays real history and falls back to synthetic evening routines when history is missing."
+        }
+      },
+      "presence_simulation_options_tuning": {
+        "title": "Presence Simulation — Step 2: Timing & Brightness",
+        "description": "Adjust timing and brightness for the selected simulation strategy.\n\n{lights_summary}",
+        "data": {
+          "simulation_lookback_days": "History Lookback Window (Days)",
           "simulation_jitter_min": "Time Jitter Window (Minutes +/-)",
-          "simulation_arrival_grace_min": "Night Arrival Grace Period (Minutes)",
+          "simulation_arrival_grace_min": "Night Arrival Handover Grace Period (Minutes)",
           "simulation_max_brightness_pct": "Max Simulated Brightness %"
+        },
+        "data_description": {
+          "simulation_lookback_days": "Past days searched in Home Assistant Recorder for occupied lighting history.",
+          "simulation_jitter_min": "Randomized +/- minute offset applied to scheduled light transitions.",
+          "simulation_arrival_grace_min": "Vacancy countdown applied to simulated lights when arriving home after dark.",
+          "simulation_max_brightness_pct": "Maximum brightness percentage allowed during simulation."
         }
       },
       "holiday_menu": {
@@ -374,47 +484,91 @@
         }
       },
       "holiday_exterior_settings": {
-        "title": "Exterior Dusk-to-Dawn Lighting Settings",
-        "description": "Configure year-round dusk-to-dawn exterior lighting, baseline warm white, triggers, and late-night holiday behavior.",
+        "title": "Exterior Dusk-to-Dawn — Step 1: Lights & Triggers",
+        "description": "Configure year-round exterior lighting and choose how it turns on/off. Next, you will only see timing fields for the triggers you chose.",
         "data": {
           "exterior_dusk_to_dawn_enabled": "Enable Year-Round Dusk-to-Dawn Lighting",
           "exterior_lights": "Participating Exterior Lights (e.g. Front Porch)",
-          "exterior_on_trigger": "Evening Turn-On Trigger",
-          "exterior_sunset_offset_min": "Sunset Offset in Minutes (e.g. -30 for 30m before sunset)",
-          "exterior_on_time": "Turn-On Time (if fixed time)",
-          "exterior_off_trigger": "Morning Turn-Off Trigger",
-          "exterior_sunrise_offset_min": "Sunrise Offset in Minutes (e.g. +30 for 30m after sunrise)",
-          "exterior_off_time": "Turn-Off Time (if fixed time)",
           "exterior_baseline_kelvin": "Baseline Warm White Color Temp (Kelvin)",
           "exterior_baseline_brightness_pct": "Baseline Brightness %",
+          "exterior_on_trigger": "Evening Turn-On Trigger",
+          "exterior_off_trigger": "Morning Turn-Off Trigger",
           "holiday_late_night_behavior": "Late-Night Holiday Transition"
+        },
+        "data_description": {
+          "exterior_dusk_to_dawn_enabled": "Automatically runs exterior baseline warm white (or active holiday effects) overnight.",
+          "exterior_lights": "Exterior lights controlled nightly from dusk to dawn.",
+          "exterior_baseline_kelvin": "Warm white Kelvin used on non-holiday nights (and after sleep if Revert is chosen).",
+          "exterior_baseline_brightness_pct": "Brightness percentage for non-holiday baseline nights.",
+          "exterior_on_trigger": "Choose sunset with offset or a fixed clock time.",
+          "exterior_off_trigger": "Choose sunrise with offset or a fixed clock time.",
+          "holiday_late_night_behavior": "Choose whether holiday colors run all night or revert to warm white when Home State enters Sleep."
+        }
+      },
+      "holiday_exterior_schedule": {
+        "title": "Exterior Dusk-to-Dawn — Step 2: Schedule Details",
+        "description": "Set the exact offsets, fixed times, or Home State entity for your selected triggers.",
+        "data": {
+          "exterior_sunset_offset_min": "Sunset Offset (Minutes, e.g. -30 for 30m before sunset)",
+          "exterior_on_time": "Evening Turn-On Time",
+          "exterior_sunrise_offset_min": "Sunrise Offset (Minutes, e.g. +30 for 30m after sunrise)",
+          "exterior_off_time": "Morning Turn-Off Time",
+          "holiday_home_state_entity": "Home State Entity (Watches for 'Sleep')"
+        },
+        "data_description": {
+          "exterior_sunset_offset_min": "Negative values turn lights on before sunset; positive values turn them on after sunset.",
+          "exterior_on_time": "Fixed daily clock time to turn exterior lights on.",
+          "exterior_sunrise_offset_min": "Positive values keep lights on past sunrise; negative values turn them off early.",
+          "exterior_off_time": "Fixed daily clock time to turn exterior lights off.",
+          "holiday_home_state_entity": "Entity whose state enters 'sleep' at bedtime so holiday lights revert to baseline warm white."
         }
       },
       "holiday_decoration_settings": {
-        "title": "Outdoor Holiday Decorations Settings",
-        "description": "Configure automatic schedules and smart plugs for outdoor holiday decorations.",
+        "title": "Outdoor Holiday Decorations — Step 1: Plugs & Triggers",
+        "description": "Configure outdoor holiday smart plugs and choose their on/off triggers.",
         "data": {
           "holiday_decorations_enabled": "Enable Holiday Decoration Plugs Automation",
           "holiday_global_decorations": "Participating Smart Plugs",
           "holiday_global_label": "Target Decoration Plug Label",
-          "decorations_on_trigger": "Turn-On Trigger",
-          "decorations_sunset_offset_min": "Sunset Offset in Minutes",
-          "decorations_off_trigger": "Evening Turn-Off Trigger",
-          "decorations_off_time": "Turn-Off Cutoff Time (if fixed time)",
-          "holiday_home_state_entity": "Home State Entity (input_select)",
+          "decorations_on_trigger": "Evening Turn-On Trigger",
+          "decorations_off_trigger": "Turn-Off Trigger",
           "holiday_respect_presence_simulation": "Respect Presence Simulation (Don't override away mode)"
+        },
+        "data_description": {
+          "holiday_decorations_enabled": "Automatically switches holiday smart plugs during active holiday date ranges.",
+          "holiday_global_decorations": "Smart plugs/switches controlled during active holidays.",
+          "holiday_global_label": "Any switch entity carrying this Home Assistant label is also included automatically.",
+          "decorations_on_trigger": "Choose sunset with offset or a fixed clock time.",
+          "decorations_off_trigger": "Choose Sleep state, Sunrise, or a fixed cutoff time.",
+          "holiday_respect_presence_simulation": "Avoids overriding lights currently managed by Away Mode presence simulation."
+        }
+      },
+      "holiday_decoration_schedule": {
+        "title": "Outdoor Holiday Decorations — Step 2: Schedule Details",
+        "description": "Set the exact offsets, fixed times, or Home State entity for your decoration plugs.",
+        "data": {
+          "decorations_sunset_offset_min": "Sunset Offset (Minutes)",
+          "decorations_on_time": "Decoration Turn-On Time",
+          "decorations_off_time": "Decoration Turn-Off Time",
+          "holiday_home_state_entity": "Home State Entity (Watches for 'Sleep')"
+        },
+        "data_description": {
+          "decorations_sunset_offset_min": "Negative values turn plugs on before sunset; positive values after sunset.",
+          "decorations_on_time": "Fixed daily clock time to turn decoration plugs on.",
+          "decorations_off_time": "Fixed daily cutoff time to turn decoration plugs off.",
+          "holiday_home_state_entity": "Entity whose state becomes 'sleep' at bedtime to shut off outdoor decorations."
         }
       },
       "holiday_select": {
         "title": "Select Holiday to Edit",
-        "description": "Choose an existing holiday to edit its schedule, effects, and lights, or select 'Add New Holiday'.",
+        "description": "Choose an existing holiday to edit its schedule, mode, and lights, or select 'Add New Holiday'.",
         "data": {
           "selected_holiday": "Holiday Selection"
         }
       },
       "holiday_edit": {
-        "title": "Edit Holiday Settings",
-        "description": "Configure dates, theme color, Hue scene, dynamic effects, and participating fixtures for this holiday.",
+        "title": "Edit Holiday — Step 1: Dates, Targets & Mode",
+        "description": "Configure dates, display metadata, participating fixtures, and lighting mode. Next, you will only see fields for the lighting mode you choose.",
         "data": {
           "name": "Holiday Name",
           "enabled": "Holiday Enabled",
@@ -424,17 +578,32 @@
           "phrase": "Greeting Phrase",
           "theme_color": "Hex Theme Color (e.g. #9c4600)",
           "light_mode": "Lighting Mode",
+          "decorations_on": "Turn On Outdoor Decorations",
+          "participating_lights": "Custom Participating Lights (Leave empty for global default)",
+          "participating_decorations": "Custom Decoration Plugs (Leave empty for global default)",
+          "delete_holiday": "Delete This Holiday"
+        }
+      },
+      "holiday_edit_mode": {
+        "title": "Edit Holiday — Step 2: {holiday_name} ({mode_name})",
+        "description": "Configure the lighting settings for **{mode_name}**.",
+        "data": {
           "hue_scene": "Philips Hue Scene",
           "dynamic_scene": "Enable Dynamic Hue Scene Animation",
-          "effect": "Bulb Firmware Effect (e.g. fire, candle, prism)",
-          "fallback_effect": "Fallback Bulb Effect (if primary effect unavailable)",
-          "rgb_color": "RGB Color Palette",
+          "effect": "Bulb Firmware Effect",
+          "fallback_effect": "Fallback Bulb Effect (Optional, if primary unavailable)",
+          "rgb_color": "RGB Color (or Fallback for Non-Effect/Non-Hue Bulbs)",
           "color_temp_kelvin": "Color Temperature (Kelvin)",
-          "brightness_pct": "Brightness %",
-          "decorations_on": "Turn On Outdoor Decorations",
-          "participating_lights": "Custom Participating Lights (Leave empty to use global default)",
-          "participating_decorations": "Custom Decoration Plugs (Leave empty to use global default)",
-          "delete_holiday": "Delete This Holiday"
+          "brightness_pct": "Brightness %"
+        },
+        "data_description": {
+          "hue_scene": "Select the Home Assistant scene entity for this holiday.",
+          "dynamic_scene": "Enables dynamic animation when activating Philips Hue scenes.",
+          "effect": "Firmware effect sent to supporting lights (e.g. fire, candle, prism).",
+          "fallback_effect": "Used if a fixture cannot activate the primary Hue scene or effect.",
+          "rgb_color": "Color applied directly in RGB mode, or as a fallback if a bulb lacks scenes/effects.",
+          "color_temp_kelvin": "Color temperature applied in Kelvin mode.",
+          "brightness_pct": "Target brightness percentage for the holiday."
         }
       },
       "holiday_reset": {
@@ -446,7 +615,14 @@
       }
     },
     "error": {
-      "invalid_date": "Invalid date format. Please use MM-DD (e.g., 10-01)."
+      "invalid_date": "Invalid date format. Please use MM-DD (e.g., 10-01).",
+      "missing_late_night_entity": "Please select a Trigger Entity / Group for Entity State mode.",
+      "missing_datetime_helper": "Please select both Start and Stop input_datetime helpers.",
+      "missing_schedule_time": "Please provide both Start and Stop clock times.",
+      "missing_notification_trigger": "Please select a Notification Trigger Entity.",
+      "missing_notification_light": "Please select a Target Notification Bulb.",
+      "missing_hue_scene": "Please select a Philips Hue Scene entity.",
+      "missing_bulb_effect": "Please select or enter a Bulb Firmware Effect."
     }
   },
   "entity": {

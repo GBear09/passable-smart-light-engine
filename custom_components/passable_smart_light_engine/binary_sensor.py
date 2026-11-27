@@ -12,7 +12,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import CONF_PRESENCE_ENTITIES, CONF_ROOM_ID, DOMAIN
+from .const import CONF_PRESENCE_ENTITIES, CONF_ROOM_ID, CONF_ROOM_NAME, DOMAIN
 from .engine import PassableLightingEngine, RoomController
 
 
@@ -44,7 +44,10 @@ class PassableLightingBaseBinarySensor(BinarySensorEntity):
         self._controller = controller
         self._engine = engine
         self._room_id = entry.data[CONF_ROOM_ID]
-        self._room_title = self._room_id.replace("_", " ").title()
+        self._room_title = (
+            str(entry.data.get(CONF_ROOM_NAME) or "").strip()
+            or self._room_id.replace("_", " ").title()
+        )
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to room controller state updates."""

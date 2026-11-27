@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.10.3";
+const CARD_VERSION = "2.11.0";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -164,6 +164,12 @@ class PassableLightingCard extends LitElement {
       _statsHiddenRooms: { state: true },
       _statsUsageSort: { state: true },
       _statsHoverIdx: { state: true },
+      _editingRoomId: { state: true },
+      _editingRoomDraft: { state: true },
+      _editingEntitySearch: { state: true },
+      _openEntityPickerKey: { state: true },
+      _savingRoomConfig: { state: true },
+      _roomConfigError: { state: true },
     };
   }
 
@@ -202,6 +208,12 @@ class PassableLightingCard extends LitElement {
     this._statsUsageSort = "lit";
     this._statsHoverIdx = {};
     this._statsCache = {};
+    this._editingRoomId = null;
+    this._editingRoomDraft = null;
+    this._editingEntitySearch = {};
+    this._openEntityPickerKey = null;
+    this._savingRoomConfig = false;
+    this._roomConfigError = null;
     this._returnModalTab = null;
     this._countdownInterval = null;
     this._closeModalTimer = null;
@@ -1303,6 +1315,11 @@ class PassableLightingCard extends LitElement {
       this._showModalDimmer = false;
       this._expandedScenesEntity = null;
       this._confirmResetRoom = null;
+      this._editingRoomId = null;
+      this._editingRoomDraft = null;
+      this._openEntityPickerKey = null;
+      this._savingRoomConfig = false;
+      this._roomConfigError = null;
       this._detachOverlayScrollGuard();
       this._unlockBackgroundScroll();
       this._syncCountdownTimer();
@@ -1505,8 +1522,8 @@ class PassableLightingCard extends LitElement {
     const path = typeof ev.composedPath === "function" ? ev.composedPath() : [];
     return path.some((el) => {
       if (!el || el.nodeType !== 1) return false;
-      if (el.tagName === "HA-SLIDER" || el.tagName === "SELECT") return true;
-      if (el.tagName === "INPUT" && el.type === "range") return true;
+      if (el.tagName === "HA-SLIDER" || el.tagName === "SELECT" || el.tagName === "TEXTAREA") return true;
+      if (el.tagName === "INPUT") return true;
       return false;
     });
   }
@@ -3166,6 +3183,10 @@ class PassableLightingCard extends LitElement {
       `;
     }
 
+    if (this._editingRoomId && this._editingRoomDraft) {
+      return this._renderRoomConfigView();
+    }
+
     return html`
       <div class="modal-scroll-area thin-scroll">
         <div class="light-kpi-grid">
@@ -3248,6 +3269,15 @@ class PassableLightingCard extends LitElement {
                     >
                       Circ
                     </button>
+                    <button
+                      type="button"
+                      class="room-gear-btn"
+                      title="Configure Room Settings"
+                      aria-label="Configure Room Settings"
+                      @click=${(ev) => this._openRoomConfigEditor(r, ev)}
+                    >
+                      <ha-icon icon="mdi:cog-outline" style="--mdc-icon-size:15px;"></ha-icon>
+                    </button>
                   </div>
                 </div>
 
@@ -3300,6 +3330,14 @@ class PassableLightingCard extends LitElement {
                           >
                             ${isCalibrating ? "Calibrating..." : "Calibrate Curve"}
                           </button>
+                          <button
+                            type="button"
+                            class="secondary-action-btn"
+                            @click=${(ev) => this._openRoomConfigEditor(r, ev)}
+                          >
+                            <ha-icon icon="mdi:cog-outline" style="--mdc-icon-size:14px;"></ha-icon>
+                            <span>Configure Settings</span>
+                          </button>
 
                           <div class="reset-controls-group">
                             <select
@@ -3331,6 +3369,869 @@ class PassableLightingCard extends LitElement {
               </div>
             `;
           })}
+        </div>
+      </div>
+    `;
+  }
+
+  _openRoomConfigEditor(room, ev = null) {
+    if (ev) ev.stopPropagation();
+    this._fireHaptic("light");
+    const cfg = room?.config || {};
+    const draft = {
+      room_name: cfg.room_name || room.name || room.room_id,
+      light_entity: cfg.light_entity || room.light_entity || "",
+      secondary_lights: Array.isArray(cfg.secondary_lights) ? [...cfg.secondary_lights] : [],
+      suppress_main_when_secondary_on: Boolean(cfg.suppress_main_when_secondary_on),
+      presence_entity: Array.isArray(cfg.presence_entity) ? [...cfg.presence_entity] : [],
+      lux_sensor: cfg.lux_sensor || room.lux_sensor || "",
+      target_lux: cfg.target_lux ?? room.seed_target_lux ?? 40,
+      default_lux_ratio: cfg.default_lux_ratio ?? 0.2,
+      presence_timeout_min: cfg.presence_timeout_min ?? room.base_presence_timeout_min ?? 5,
+      timeout_scale_entities: Array.isArray(cfg.timeout_scale_entities) ? [...cfg.timeout_scale_entities] : [],
+      timeout_scale_factor: cfg.timeout_scale_factor ?? 3.0,
+      min_occupied_pct: cfg.min_occupied_pct ?? 0,
+      circadian_enabled: cfg.circadian_enabled ?? room.circadian_enabled ?? true,
+      min_color_temp: cfg.min_color_temp ?? room.min_color_temp ?? 2700,
+      max_color_temp: cfg.max_color_temp ?? room.max_color_temp ?? 5500,
+      late_night_enabled: Boolean(cfg.late_night_enabled),
+      late_night_pct: cfg.late_night_pct ?? 20,
+      late_night_learn_prefs: cfg.late_night_learn_prefs ?? true,
+      late_night_condition_type: cfg.late_night_condition_type || "fixed_time",
+      late_night_start_time: String(cfg.late_night_start_time || "22:00:00").slice(0, 5),
+      late_night_stop_time: String(cfg.late_night_stop_time || "06:00:00").slice(0, 5),
+      late_night_start_entity: cfg.late_night_start_entity || "",
+      late_night_stop_entity: cfg.late_night_stop_entity || "",
+      late_night_entity: cfg.late_night_entity || "",
+      late_night_entity_states: cfg.late_night_entity_states || "",
+      media_entities: Array.isArray(cfg.media_entities) ? [...cfg.media_entities] : [],
+      media_seed_pct: cfg.media_seed_pct ?? 20,
+      media_respect_ambient_lux: cfg.media_respect_ambient_lux ?? true,
+      media_learn_prefs: cfg.media_learn_prefs ?? true,
+      override_timeout_min: cfg.override_timeout_min ?? room.override_timeout_min ?? 60,
+      ignore_max_brightness_override: cfg.ignore_max_brightness_override ?? true,
+      create_override_switch: Boolean(cfg.create_override_switch),
+      manual_override_entity: cfg.manual_override_entity || "",
+      create_freeze_switch: Boolean(cfg.create_freeze_switch),
+      bypass_freeze_entities: Array.isArray(cfg.bypass_freeze_entities) ? [...cfg.bypass_freeze_entities] : [],
+      bypass_off_entities: Array.isArray(cfg.bypass_off_entities) ? [...cfg.bypass_off_entities] : [],
+      settling_cooldown_sec: cfg.settling_cooldown_sec ?? 45,
+      power_grid_entity: cfg.power_grid_entity || "",
+      notification_light_enabled: Boolean(cfg.notification_light_enabled),
+      notification_trigger_entity: cfg.notification_trigger_entity || "",
+      notification_light_entity: cfg.notification_light_entity || "",
+      notification_color: Array.isArray(cfg.notification_color) ? [...cfg.notification_color] : [0, 0, 255],
+      notification_brightness_pct: cfg.notification_brightness_pct ?? 100,
+      notification_presence_gated: cfg.notification_presence_gated ?? true,
+      notification_suppression_entities: Array.isArray(cfg.notification_suppression_entities)
+        ? [...cfg.notification_suppression_entities]
+        : [],
+    };
+    this._editingRoomId = room.room_id;
+    this._editingRoomDraft = draft;
+    this._editingEntitySearch = {};
+    this._openEntityPickerKey = null;
+    this._roomConfigError = null;
+    this._savingRoomConfig = false;
+  }
+
+  _closeRoomConfigEditor() {
+    this._fireHaptic("light");
+    this._editingRoomId = null;
+    this._editingRoomDraft = null;
+    this._openEntityPickerKey = null;
+    this._roomConfigError = null;
+    this._savingRoomConfig = false;
+  }
+
+  _setRoomDraftField(key, value) {
+    if (!this._editingRoomDraft) return;
+    this._roomConfigError = null;
+    this._editingRoomDraft = {
+      ...this._editingRoomDraft,
+      [key]: value,
+    };
+  }
+
+  _rgbToHex(rgb) {
+    if (!Array.isArray(rgb) || rgb.length < 3) return "#0000ff";
+    const toHex = (n) => Math.max(0, Math.min(255, Number(n) || 0)).toString(16).padStart(2, "0");
+    return `#${toHex(rgb[0])}${toHex(rgb[1])}${toHex(rgb[2])}`;
+  }
+
+  _hexToRgb(hex) {
+    const clean = String(hex || "").replace("#", "");
+    if (clean.length !== 6) return [0, 0, 255];
+    return [
+      parseInt(clean.slice(0, 2), 16) || 0,
+      parseInt(clean.slice(2, 4), 16) || 0,
+      parseInt(clean.slice(4, 6), 16) || 0,
+    ];
+  }
+
+  _getPickerCandidates(domains = [], deviceClass = null) {
+    const states = this.hass?.states || {};
+    const domainSet = Array.isArray(domains) && domains.length > 0 ? new Set(domains) : null;
+    const list = [];
+    for (const [eid, st] of Object.entries(states)) {
+      const dom = eid.split(".")[0];
+      if (domainSet && !domainSet.has(dom)) continue;
+      if (deviceClass && st?.attributes?.device_class !== deviceClass) continue;
+      const friendly = st?.attributes?.friendly_name || eid;
+      list.push({
+        entity_id: eid,
+        name: friendly,
+        state: st?.state ?? "unknown",
+      });
+    }
+    list.sort((a, b) => a.name.localeCompare(b.name));
+    return list;
+  }
+
+  _renderConfigEntityPicker(fieldKey, label, helpText, opts = {}) {
+    const d = this._editingRoomDraft || {};
+    const multiple = Boolean(opts.multiple);
+    const domains = opts.domains || [];
+    const deviceClass = opts.deviceClass || null;
+    const isOpen = this._openEntityPickerKey === fieldKey;
+    const searchVal = (this._editingEntitySearch[fieldKey] || "").toLowerCase();
+    const rawVal = d[fieldKey];
+    const selectedList = multiple
+      ? (Array.isArray(rawVal) ? rawVal : [])
+      : (rawVal ? [rawVal] : []);
+
+    const candidates = isOpen
+      ? this._getPickerCandidates(domains, deviceClass).filter((item) => {
+          if (multiple && selectedList.includes(item.entity_id)) return false;
+          if (!searchVal) return true;
+          return (
+            item.name.toLowerCase().includes(searchVal) ||
+            item.entity_id.toLowerCase().includes(searchVal)
+          );
+        })
+      : [];
+
+    return html`
+      <div class="room-cfg-field">
+        <div class="room-cfg-label-row">
+          <span class="room-cfg-label">${label}</span>
+          ${opts.required ? html`<span class="room-cfg-req">Required</span>` : ""}
+        </div>
+
+        <div class="entity-picker-box">
+          ${selectedList.length > 0
+            ? html`
+                <div class="entity-chip-wrap">
+                  ${selectedList.map((eid) => {
+                    const st = this.hass?.states?.[eid];
+                    const name = st?.attributes?.friendly_name || eid;
+                    const stateStr = st?.state ?? "unavailable";
+                    return html`
+                      <span class="entity-chip" title="${eid}">
+                        <span class="entity-chip-name">${name}</span>
+                        <span class="entity-chip-state">${stateStr}</span>
+                        ${(!opts.required || multiple)
+                          ? html`
+                              <button
+                                type="button"
+                                class="entity-chip-remove"
+                                @click=${() => {
+                                  if (multiple) {
+                                    this._setRoomDraftField(
+                                      fieldKey,
+                                      selectedList.filter((id) => id !== eid)
+                                    );
+                                  } else {
+                                    this._setRoomDraftField(fieldKey, "");
+                                  }
+                                }}
+                                aria-label="Remove"
+                              >
+                                ✕
+                              </button>
+                            `
+                          : ""}
+                      </span>
+                    `;
+                  })}
+                </div>
+              `
+            : ""}
+
+          <button
+            type="button"
+            class="entity-picker-trigger"
+            @click=${() => {
+              this._openEntityPickerKey = isOpen ? null : fieldKey;
+            }}
+          >
+            <span>
+              ${multiple
+                ? "+ Add Entity..."
+                : selectedList.length > 0
+                  ? "Change Entity..."
+                  : "Select Entity..."}
+            </span>
+            <ha-icon
+              icon="${isOpen ? "mdi:chevron-up" : "mdi:chevron-down"}"
+              style="--mdc-icon-size:16px;"
+            ></ha-icon>
+          </button>
+
+          ${isOpen
+            ? html`
+                <div class="entity-picker-dropdown">
+                  <input
+                    type="text"
+                    class="entity-picker-search"
+                    placeholder="Search entities by name or ID..."
+                    .value=${this._editingEntitySearch[fieldKey] || ""}
+                    @input=${(ev) => {
+                      this._editingEntitySearch = {
+                        ...this._editingEntitySearch,
+                        [fieldKey]: ev.target.value,
+                      };
+                    }}
+                  />
+                  <div class="entity-picker-list thin-scroll">
+                    ${candidates.length === 0
+                      ? html`<div class="entity-picker-empty">No matching entities found</div>`
+                      : candidates.slice(0, 60).map(
+                          (item) => html`
+                            <button
+                              type="button"
+                              class="entity-picker-option ${!multiple && rawVal === item.entity_id ? "selected" : ""}"
+                              @click=${() => {
+                                if (multiple) {
+                                  this._setRoomDraftField(fieldKey, [...selectedList, item.entity_id]);
+                                } else {
+                                  this._setRoomDraftField(fieldKey, item.entity_id);
+                                  this._openEntityPickerKey = null;
+                                }
+                              }}
+                            >
+                              <div class="entity-opt-main">
+                                <span class="entity-opt-name">${item.name}</span>
+                                <span class="entity-opt-id">${item.entity_id}</span>
+                              </div>
+                              <span class="entity-opt-state">${item.state}</span>
+                            </button>
+                          `
+                        )}
+                  </div>
+                </div>
+              `
+            : ""}
+        </div>
+
+        ${helpText ? html`<div class="room-cfg-help">${helpText}</div>` : ""}
+      </div>
+    `;
+  }
+
+  _renderConfigToggle(fieldKey, label, helpText) {
+    const d = this._editingRoomDraft || {};
+    const checked = Boolean(d[fieldKey]);
+    return html`
+      <div class="room-cfg-toggle-row">
+        <div class="room-cfg-toggle-text">
+          <span class="room-cfg-label">${label}</span>
+          ${helpText ? html`<span class="room-cfg-help">${helpText}</span>` : ""}
+        </div>
+        <button
+          type="button"
+          class="cfg-switch-pill ${checked ? "on" : ""}"
+          role="switch"
+          aria-checked="${checked}"
+          @click=${() => {
+            this._fireHaptic("light");
+            this._setRoomDraftField(fieldKey, !checked);
+          }}
+        >
+          <span class="cfg-switch-knob"></span>
+        </button>
+      </div>
+    `;
+  }
+
+  async _saveRoomConfig() {
+    if (!this.hass || !this._editingRoomId || !this._editingRoomDraft || this._savingRoomConfig) return;
+    const d = this._editingRoomDraft;
+
+    if (!d.light_entity) {
+      this._roomConfigError = "Primary Light is required.";
+      return;
+    }
+    if (!Array.isArray(d.presence_entity) || d.presence_entity.length === 0) {
+      this._roomConfigError = "Select at least one Presence / Motion sensor.";
+      return;
+    }
+    if (!d.lux_sensor) {
+      this._roomConfigError = "Ambient Illuminance Sensor is required.";
+      return;
+    }
+    if (d.late_night_enabled) {
+      const m = d.late_night_condition_type || "fixed_time";
+      if (m === "entity_state" && !d.late_night_entity) {
+        this._roomConfigError = "Late Night Mode (Entity State) requires a Trigger Entity.";
+        return;
+      }
+      if (m === "datetime_helper" && (!d.late_night_start_entity || !d.late_night_stop_entity)) {
+        this._roomConfigError = "Late Night Mode (Time Helpers) requires both Start and Stop input_datetime helpers.";
+        return;
+      }
+      if (m === "fixed_time" && (!d.late_night_start_time || !d.late_night_stop_time)) {
+        this._roomConfigError = "Late Night Mode (Fixed Schedule) requires both Start and Stop times.";
+        return;
+      }
+    }
+    if (d.notification_light_enabled && (!d.notification_trigger_entity || !d.notification_light_entity)) {
+      this._roomConfigError = "Visual Notification Light requires both a Trigger Entity and a Target Bulb.";
+      return;
+    }
+
+    const normTime = (t) => {
+      const s = String(t || "").trim();
+      if (!s) return "";
+      return s.split(":").length === 2 ? `${s}:00` : s;
+    };
+
+    const payloadConfig = {
+      ...d,
+      late_night_start_time: normTime(d.late_night_start_time || "22:00"),
+      late_night_stop_time: normTime(d.late_night_stop_time || "06:00"),
+    };
+
+    this._savingRoomConfig = true;
+    this._roomConfigError = null;
+    try {
+      await this.hass.callWS({
+        type: `${ENGINE_DOMAIN}/update_room_config`,
+        room_id: this._editingRoomId,
+        config: payloadConfig,
+      });
+      this._fireHaptic("success");
+      this._showToast("Room settings saved");
+      this._editingRoomId = null;
+      this._editingRoomDraft = null;
+      this._openEntityPickerKey = null;
+      if (!this._wsUnsub) {
+        await this._fetchFallbackData();
+      }
+    } catch (err) {
+      this._roomConfigError = err?.message || "Failed to save room settings.";
+    } finally {
+      this._savingRoomConfig = false;
+    }
+  }
+
+  _renderRoomConfigView() {
+    const d = this._editingRoomDraft || {};
+    const lnMode = d.late_night_condition_type || "fixed_time";
+    const hasSecondary = Array.isArray(d.secondary_lights) && d.secondary_lights.length > 0;
+    const hasTimeoutScale = Array.isArray(d.timeout_scale_entities) && d.timeout_scale_entities.length > 0;
+    const hasMedia = Array.isArray(d.media_entities) && d.media_entities.length > 0;
+
+    return html`
+      <div class="room-config-topbar">
+        <button type="button" class="secondary-action-btn" @click=${() => this._closeRoomConfigEditor()}>
+          <ha-icon icon="mdi:arrow-left" style="--mdc-icon-size:15px;"></ha-icon>
+          <span>Back</span>
+        </button>
+        <div class="room-config-title-wrap">
+          <span class="room-config-title">${d.room_name || this._editingRoomId}</span>
+          <span class="room-config-sub">${this._editingRoomId}</span>
+        </div>
+        <button
+          type="button"
+          class="primary-action-btn"
+          ?disabled=${this._savingRoomConfig}
+          @click=${() => this._saveRoomConfig()}
+        >
+          ${this._savingRoomConfig ? "Saving..." : "Save Changes"}
+        </button>
+      </div>
+
+      ${this._roomConfigError
+        ? html`<div class="room-cfg-error">${this._roomConfigError}</div>`
+        : ""}
+
+      <div class="modal-scroll-area thin-scroll room-cfg-scroll">
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">⚙️ Hardware, Presence &amp; Target Lux</div>
+          <div class="room-cfg-field">
+            <span class="room-cfg-label">Room Display Name</span>
+            <input
+              type="text"
+              class="room-cfg-input"
+              .value=${d.room_name || ""}
+              @input=${(ev) => this._setRoomDraftField("room_name", ev.target.value)}
+            />
+          </div>
+
+          ${this._renderConfigEntityPicker(
+            "light_entity",
+            "Primary Light or Group",
+            "Main fixture or group controlled automatically when occupied.",
+            { domains: ["light"], required: true }
+          )}
+          ${this._renderConfigEntityPicker(
+            "presence_entity",
+            "Presence / Motion Sensors",
+            "Room stays occupied while any selected sensor is active.",
+            { domains: ["binary_sensor", "input_boolean"], multiple: true, required: true }
+          )}
+          ${this._renderConfigEntityPicker(
+            "lux_sensor",
+            "Ambient Illuminance Sensor (Lux)",
+            "Used to harvest daylight and calibrate room brightness yield.",
+            { domains: ["sensor"], deviceClass: "illuminance", required: true }
+          )}
+
+          <div class="room-cfg-two-col">
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Target Ambient Lux (lx)</span>
+              <input
+                type="number"
+                class="room-cfg-input"
+                min="0"
+                max="1000"
+                step="5"
+                .value=${String(d.target_lux ?? 40)}
+                @input=${(ev) => this._setRoomDraftField("target_lux", Number(ev.target.value))}
+              />
+            </div>
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Vacancy Timeout (min)</span>
+              <input
+                type="number"
+                class="room-cfg-input"
+                min="1"
+                max="120"
+                step="1"
+                .value=${String(d.presence_timeout_min ?? 5)}
+                @input=${(ev) => this._setRoomDraftField("presence_timeout_min", Number(ev.target.value))}
+              />
+            </div>
+          </div>
+
+          ${this._renderConfigEntityPicker(
+            "secondary_lights",
+            "Secondary / Task Lamps (Optional)",
+            "Swept off on vacancy and excluded from overhead curve learning.",
+            { domains: ["light"], multiple: true }
+          )}
+
+          ${hasSecondary
+            ? this._renderConfigToggle(
+                "suppress_main_when_secondary_on",
+                "Turn Off Primary Light When Secondary Lamp is ON",
+                "Automatically shuts off overhead ceiling lights when a table/floor lamp is switched on."
+              )
+            : ""}
+
+          ${this._renderConfigEntityPicker(
+            "timeout_scale_entities",
+            "Vacancy Timeout Multiplier Entities (Optional)",
+            "Entities (e.g. Guest Mode) that extend the vacancy timer when active.",
+            { multiple: true }
+          )}
+
+          ${hasTimeoutScale
+            ? html`
+                <div class="room-cfg-field">
+                  <span class="room-cfg-label">Vacancy Timeout Multiplier (x)</span>
+                  <input
+                    type="number"
+                    class="room-cfg-input"
+                    min="1"
+                    max="10"
+                    step="0.5"
+                    .value=${String(d.timeout_scale_factor ?? 3.0)}
+                    @input=${(ev) => this._setRoomDraftField("timeout_scale_factor", Number(ev.target.value))}
+                  />
+                  <div class="room-cfg-help">
+                    Effective timeout becomes ${Math.round((d.presence_timeout_min || 5) * (d.timeout_scale_factor || 1))}m while active.
+                  </div>
+                </div>
+              `
+            : ""}
+
+          <div class="room-cfg-two-col">
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Min Occupied Floor (%)</span>
+              <input
+                type="number"
+                class="room-cfg-input"
+                min="0"
+                max="100"
+                step="5"
+                .value=${String(d.min_occupied_pct ?? 0)}
+                @input=${(ev) => this._setRoomDraftField("min_occupied_pct", Number(ev.target.value))}
+              />
+              <div class="room-cfg-help">0% allows full daylight shutoff.</div>
+            </div>
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Initial Lux Ratio (lx/%)</span>
+              <input
+                type="number"
+                class="room-cfg-input"
+                min="0.01"
+                max="20"
+                step="0.05"
+                .value=${String(d.default_lux_ratio ?? 0.2)}
+                @input=${(ev) => this._setRoomDraftField("default_lux_ratio", Number(ev.target.value))}
+              />
+              <div class="room-cfg-help">Fallback before calibration completes.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">☀️ Circadian Rhythm</div>
+          ${this._renderConfigToggle(
+            "circadian_enabled",
+            "Enable Sun-Based Circadian Rhythm",
+            "Shifts Kelvin color temperature smoothly from sunrise to sunset."
+          )}
+          ${d.circadian_enabled
+            ? html`
+                <div class="room-cfg-two-col">
+                  <div class="room-cfg-field">
+                    <span class="room-cfg-label">Warmest Temp (K)</span>
+                    <input
+                      type="number"
+                      class="room-cfg-input"
+                      min="2000"
+                      max="4000"
+                      step="100"
+                      .value=${String(d.min_color_temp ?? 2700)}
+                      @input=${(ev) => this._setRoomDraftField("min_color_temp", Number(ev.target.value))}
+                    />
+                  </div>
+                  <div class="room-cfg-field">
+                    <span class="room-cfg-label">Coolest Temp (K)</span>
+                    <input
+                      type="number"
+                      class="room-cfg-input"
+                      min="4000"
+                      max="6500"
+                      step="100"
+                      .value=${String(d.max_color_temp ?? 5500)}
+                      @input=${(ev) => this._setRoomDraftField("max_color_temp", Number(ev.target.value))}
+                    />
+                  </div>
+                </div>
+              `
+            : ""}
+        </div>
+
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">🌙 Late Night Mode</div>
+          ${this._renderConfigToggle(
+            "late_night_enabled",
+            "Enable Late Night Mode",
+            "Overrides daytime lux targeting with a dim nighttime preset when occupied."
+          )}
+
+          ${d.late_night_enabled
+            ? html`
+                <div class="room-cfg-field">
+                  <div class="room-cfg-label-row">
+                    <span class="room-cfg-label">Late Night Brightness % (Seed)</span>
+                    <span class="room-cfg-val-badge">${d.late_night_pct ?? 20}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    class="room-cfg-range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    .value=${String(d.late_night_pct ?? 20)}
+                    @input=${(ev) => this._setRoomDraftField("late_night_pct", Number(ev.target.value))}
+                  />
+                </div>
+
+                ${this._renderConfigToggle(
+                  "late_night_learn_prefs",
+                  "Learn Manual Brightness Adjustments",
+                  "When disabled, brightness remains fixed to the seed % above."
+                )}
+
+                <div class="room-cfg-field">
+                  <span class="room-cfg-label">Trigger Mode</span>
+                  <div class="segmented-mode-row">
+                    <button
+                      type="button"
+                      class="segmented-mode-btn ${lnMode === "fixed_time" ? "active" : ""}"
+                      @click=${() => this._setRoomDraftField("late_night_condition_type", "fixed_time")}
+                    >
+                      🕒 Fixed Schedule
+                    </button>
+                    <button
+                      type="button"
+                      class="segmented-mode-btn ${lnMode === "datetime_helper" ? "active" : ""}"
+                      @click=${() => this._setRoomDraftField("late_night_condition_type", "datetime_helper")}
+                    >
+                      📅 Time Helpers
+                    </button>
+                    <button
+                      type="button"
+                      class="segmented-mode-btn ${lnMode === "entity_state" ? "active" : ""}"
+                      @click=${() => this._setRoomDraftField("late_night_condition_type", "entity_state")}
+                    >
+                      🔌 Entity / State
+                    </button>
+                  </div>
+                </div>
+
+                ${lnMode === "fixed_time"
+                  ? html`
+                      <div class="room-cfg-two-col">
+                        <div class="room-cfg-field">
+                          <span class="room-cfg-label">Start Time</span>
+                          <input
+                            type="time"
+                            class="room-cfg-input"
+                            .value=${String(d.late_night_start_time || "22:00").slice(0, 5)}
+                            @input=${(ev) => this._setRoomDraftField("late_night_start_time", ev.target.value)}
+                          />
+                        </div>
+                        <div class="room-cfg-field">
+                          <span class="room-cfg-label">Stop Time</span>
+                          <input
+                            type="time"
+                            class="room-cfg-input"
+                            .value=${String(d.late_night_stop_time || "06:00").slice(0, 5)}
+                            @input=${(ev) => this._setRoomDraftField("late_night_stop_time", ev.target.value)}
+                          />
+                        </div>
+                      </div>
+                      <div class="room-cfg-help">
+                        Supports overnight schedules automatically (e.g. 22:00 until 06:00).
+                      </div>
+                    `
+                  : lnMode === "datetime_helper"
+                    ? html`
+                        ${this._renderConfigEntityPicker(
+                          "late_night_start_entity",
+                          "Start Time Helper (input_datetime)",
+                          "Reads your Home Assistant input_datetime helper dynamically and re-arms automatically when changed.",
+                          { domains: ["input_datetime"], required: true }
+                        )}
+                        ${this._renderConfigEntityPicker(
+                          "late_night_stop_entity",
+                          "Stop Time Helper (input_datetime)",
+                          "Defines when Late Night ends and normal daytime lux targeting resumes.",
+                          { domains: ["input_datetime"], required: true }
+                        )}
+                      `
+                    : html`
+                        ${this._renderConfigEntityPicker(
+                          "late_night_entity",
+                          "Trigger Entity / Group / Home State",
+                          "Activates Late Night whenever this helper, group, schedule, or input_select is in an active bedtime state.",
+                          {
+                            domains: [
+                              "input_boolean",
+                              "binary_sensor",
+                              "switch",
+                              "group",
+                              "schedule",
+                              "input_select",
+                              "sensor",
+                            ],
+                            required: true,
+                          }
+                        )}
+                        <div class="room-cfg-field">
+                          <span class="room-cfg-label">Active Trigger States (Optional)</span>
+                          <input
+                            type="text"
+                            class="room-cfg-input"
+                            placeholder="on, sleep, bedtime, pre-sleep"
+                            .value=${d.late_night_entity_states || ""}
+                            @input=${(ev) => this._setRoomDraftField("late_night_entity_states", ev.target.value)}
+                          />
+                          <div class="room-cfg-help">
+                            Leave blank to match default active states (on, true, home, active, sleep, bedtime, pre-sleep).
+                          </div>
+                        </div>
+                      `}
+              `
+            : ""}
+        </div>
+
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">📺 Media Player Dimming</div>
+          ${this._renderConfigEntityPicker(
+            "media_entities",
+            "Media Player Entities",
+            "Dim lights automatically whenever any selected media player is playing or paused.",
+            { domains: ["media_player"], multiple: true }
+          )}
+          ${hasMedia
+            ? html`
+                <div class="room-cfg-field">
+                  <div class="room-cfg-label-row">
+                    <span class="room-cfg-label">Media Brightness % (Seed)</span>
+                    <span class="room-cfg-val-badge">${d.media_seed_pct ?? 20}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    class="room-cfg-range"
+                    min="0"
+                    max="100"
+                    step="5"
+                    .value=${String(d.media_seed_pct ?? 20)}
+                    @input=${(ev) => this._setRoomDraftField("media_seed_pct", Number(ev.target.value))}
+                  />
+                </div>
+                ${this._renderConfigToggle(
+                  "media_respect_ambient_lux",
+                  "Respect Natural Daylight",
+                  "Keep lights off during playback if natural daylight already meets Target Lux."
+                )}
+                ${this._renderConfigToggle(
+                  "media_learn_prefs",
+                  "Learn Manual Media Adjustments",
+                  "Average manual brightness tweaks during playback into the preset."
+                )}
+              `
+            : ""}
+        </div>
+
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">🛑 Overrides, Bypasses &amp; Sensor Safeguards</div>
+          <div class="room-cfg-info-banner">
+            Manual wall-switch and app changes are always detected automatically. Optional switches and helpers below let you view or trigger locks from dashboards and automations.
+          </div>
+
+          <div class="room-cfg-two-col">
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Override Timeout (min)</span>
+              <input
+                type="number"
+                class="room-cfg-input"
+                min="5"
+                max="240"
+                step="5"
+                .value=${String(d.override_timeout_min ?? 60)}
+                @input=${(ev) => this._setRoomDraftField("override_timeout_min", Number(ev.target.value))}
+              />
+            </div>
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Lux Sensor Cooldown (s)</span>
+              <input
+                type="number"
+                class="room-cfg-input"
+                min="5"
+                max="180"
+                step="5"
+                .value=${String(d.settling_cooldown_sec ?? 45)}
+                @input=${(ev) => this._setRoomDraftField("settling_cooldown_sec", Number(ev.target.value))}
+              />
+            </div>
+          </div>
+
+          ${this._renderConfigToggle(
+            "ignore_max_brightness_override",
+            "Treat 100% Turn-On from Off as Normal On",
+            "Prevents standard wall-switch turn-ons from locking manual override."
+          )}
+          ${this._renderConfigToggle(
+            "create_override_switch",
+            "Create Built-In Override Switch Entity",
+            "Creates switch.<room>_manual_override to view or clear override locks."
+          )}
+          ${this._renderConfigEntityPicker(
+            "manual_override_entity",
+            "External Override Helper (Optional)",
+            "Existing input_boolean or switch synced two-way with manual override.",
+            { domains: ["input_boolean", "switch"] }
+          )}
+          ${this._renderConfigToggle(
+            "create_freeze_switch",
+            "Create Built-In Freeze Bypass Switch Entity",
+            "Creates switch.<room>_freeze_bypass to pause dimming and hold current state."
+          )}
+          ${this._renderConfigEntityPicker(
+            "bypass_freeze_entities",
+            "Freeze Bypass Entities (Optional)",
+            "Hold lights at their current state while active (e.g. sleeping in room).",
+            { multiple: true }
+          )}
+          ${this._renderConfigEntityPicker(
+            "bypass_off_entities",
+            "Force-Off Bypass Entities (Optional)",
+            "Pause automation and turn all room lights OFF while active (e.g. Away Mode).",
+            { multiple: true }
+          )}
+          ${this._renderConfigEntityPicker(
+            "power_grid_entity",
+            "Power Grid Status Entity (Optional)",
+            "Halts evaluation while offline so power-restoration spikes don't lock overrides.",
+            { domains: ["binary_sensor", "sensor"] }
+          )}
+        </div>
+
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">🔔 Visual Notification Light</div>
+          ${this._renderConfigToggle(
+            "notification_light_enabled",
+            "Enable Visual Notification Light",
+            "Claims one bulb to show a color alert while other room lights work normally."
+          )}
+          ${d.notification_light_enabled
+            ? html`
+                ${this._renderConfigEntityPicker(
+                  "notification_trigger_entity",
+                  "Notification Trigger Entity",
+                  "Entity that triggers the alert when ON or active.",
+                  { domains: ["input_boolean", "binary_sensor", "switch", "sensor"], required: true }
+                )}
+                ${this._renderConfigEntityPicker(
+                  "notification_light_entity",
+                  "Target Notification Bulb",
+                  "Individual fixture or bulb claimed for visual alerts.",
+                  { domains: ["light"], required: true }
+                )}
+                <div class="room-cfg-two-col">
+                  <div class="room-cfg-field">
+                    <span class="room-cfg-label">Alert Color</span>
+                    <input
+                      type="color"
+                      class="room-cfg-color"
+                      .value=${this._rgbToHex(d.notification_color)}
+                      @input=${(ev) => this._setRoomDraftField("notification_color", this._hexToRgb(ev.target.value))}
+                    />
+                  </div>
+                  <div class="room-cfg-field">
+                    <span class="room-cfg-label">Alert Brightness %</span>
+                    <input
+                      type="number"
+                      class="room-cfg-input"
+                      min="1"
+                      max="100"
+                      step="5"
+                      .value=${String(d.notification_brightness_pct ?? 100)}
+                      @input=${(ev) => this._setRoomDraftField("notification_brightness_pct", Number(ev.target.value))}
+                    />
+                  </div>
+                </div>
+                ${this._renderConfigToggle(
+                  "notification_presence_gated",
+                  "Presence-Gated (Show Only When Occupied)",
+                  "Turns the alert bulb off when the room becomes vacant."
+                )}
+                ${this._renderConfigEntityPicker(
+                  "notification_suppression_entities",
+                  "Sleep / Quiet Suppression Entities",
+                  "Suppresses the visual alert while active (e.g. sleep mode).",
+                  { multiple: true }
+                )}
+              `
+            : ""}
         </div>
       </div>
     `;
@@ -8218,6 +9119,360 @@ class PassableLightingCard extends LitElement {
       .stats-stacked-seg {
         height: 100%;
         display: block;
+      }
+
+      /* Room Configuration Editor */
+      .room-gear-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.22));
+        background: var(--secondary-background-color, rgba(128, 128, 128, 0.1));
+        color: var(--secondary-text-color);
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .room-gear-btn:hover {
+        color: var(--primary-color, #3b82f6);
+        border-color: var(--primary-color, #3b82f6);
+      }
+      .secondary-action-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 7px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.25));
+        background: var(--secondary-background-color, rgba(128, 128, 128, 0.12));
+        color: var(--primary-text-color);
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .secondary-action-btn:hover {
+        border-color: var(--primary-color, #3b82f6);
+      }
+      .room-config-topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--divider-color, rgba(128, 128, 128, 0.18));
+        flex-shrink: 0;
+      }
+      .room-config-title-wrap {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        min-width: 0;
+      }
+      .room-config-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--primary-text-color);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .room-config-sub {
+        font-size: 11px;
+        color: var(--secondary-text-color);
+      }
+      .room-cfg-error {
+        padding: 8px 12px;
+        border-radius: 10px;
+        background: rgba(239, 68, 68, 0.14);
+        border: 1px solid rgba(239, 68, 68, 0.4);
+        color: #ef4444;
+        font-size: 12px;
+        font-weight: 600;
+        flex-shrink: 0;
+      }
+      .room-cfg-scroll {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        padding-top: 4px;
+      }
+      .room-cfg-card {
+        display: flex;
+        flex-direction: column;
+        gap: 11px;
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.18));
+        background: var(--secondary-background-color, rgba(128, 128, 128, 0.06));
+      }
+      .room-cfg-card-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: var(--primary-text-color);
+      }
+      .room-cfg-field {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .room-cfg-label-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .room-cfg-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--primary-text-color);
+      }
+      .room-cfg-req {
+        font-size: 10px;
+        font-weight: 700;
+        color: #f59e0b;
+        text-transform: uppercase;
+      }
+      .room-cfg-val-badge {
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--primary-color, #3b82f6);
+        font-variant-numeric: tabular-nums;
+      }
+      .room-cfg-help {
+        font-size: 11px;
+        line-height: 1.35;
+        color: var(--secondary-text-color);
+      }
+      .room-cfg-two-col {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .room-cfg-input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px 10px;
+        border-radius: 9px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.28));
+        background: var(--card-background-color, #1c1c1e);
+        color: var(--primary-text-color);
+        font-family: inherit;
+        font-size: 12.5px;
+      }
+      .room-cfg-color {
+        width: 100%;
+        height: 36px;
+        padding: 2px;
+        border-radius: 9px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.28));
+        background: var(--card-background-color, #1c1c1e);
+        cursor: pointer;
+      }
+      .room-cfg-range {
+        width: 100%;
+        accent-color: var(--primary-color, #3b82f6);
+      }
+      .room-cfg-toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .room-cfg-toggle-text {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .cfg-switch-pill {
+        position: relative;
+        width: 42px;
+        height: 24px;
+        border-radius: 999px;
+        border: none;
+        background: rgba(148, 163, 184, 0.35);
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: background 0.18s ease;
+      }
+      .cfg-switch-pill.on {
+        background: var(--primary-color, #3b82f6);
+      }
+      .cfg-switch-knob {
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #ffffff;
+        transition: transform 0.18s ease;
+      }
+      .cfg-switch-pill.on .cfg-switch-knob {
+        transform: translateX(18px);
+      }
+      .segmented-mode-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .segmented-mode-btn {
+        padding: 7px 6px;
+        border-radius: 9px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.25));
+        background: var(--card-background-color, rgba(128, 128, 128, 0.08));
+        color: var(--secondary-text-color);
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: center;
+      }
+      .segmented-mode-btn.active {
+        border-color: var(--primary-color, #3b82f6);
+        background: rgba(var(--rgb-primary-color, 59, 130, 246), 0.16);
+        color: var(--primary-text-color);
+      }
+      .room-cfg-info-banner {
+        padding: 8px 10px;
+        border-radius: 9px;
+        background: rgba(56, 189, 248, 0.1);
+        border: 1px solid rgba(56, 189, 248, 0.25);
+        color: var(--secondary-text-color);
+        font-size: 11.5px;
+        line-height: 1.35;
+      }
+      .entity-picker-box {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .entity-chip-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .entity-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(var(--rgb-primary-color, 59, 130, 246), 0.14);
+        border: 1px solid rgba(var(--rgb-primary-color, 59, 130, 246), 0.3);
+        font-size: 11.5px;
+        color: var(--primary-text-color);
+        max-width: 100%;
+      }
+      .entity-chip-name {
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .entity-chip-state {
+        font-size: 10.5px;
+        color: var(--secondary-text-color);
+        font-variant-numeric: tabular-nums;
+      }
+      .entity-chip-remove {
+        border: none;
+        background: transparent;
+        color: var(--secondary-text-color);
+        cursor: pointer;
+        padding: 0 2px;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .entity-picker-trigger {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 7px 10px;
+        border-radius: 9px;
+        border: 1px dashed var(--divider-color, rgba(128, 128, 128, 0.35));
+        background: var(--card-background-color, rgba(128, 128, 128, 0.05));
+        color: var(--secondary-text-color);
+        font-family: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .entity-picker-dropdown {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 8px;
+        border-radius: 10px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.28));
+        background: var(--card-background-color, #1c1c1e);
+      }
+      .entity-picker-search {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 9px;
+        border-radius: 7px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.25));
+        background: var(--secondary-background-color, rgba(128, 128, 128, 0.08));
+        color: var(--primary-text-color);
+        font-family: inherit;
+        font-size: 12px;
+      }
+      .entity-picker-list {
+        max-height: 170px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      .entity-picker-option {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 7px;
+        border: none;
+        background: transparent;
+        color: var(--primary-text-color);
+        font-family: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .entity-picker-option:hover,
+      .entity-picker-option.selected {
+        background: rgba(var(--rgb-primary-color, 59, 130, 246), 0.14);
+      }
+      .entity-opt-main {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .entity-opt-name {
+        font-size: 12px;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .entity-opt-id {
+        font-size: 10.5px;
+        color: var(--secondary-text-color);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .entity-opt-state {
+        font-size: 11px;
+        color: var(--secondary-text-color);
+        flex-shrink: 0;
+      }
+      .entity-picker-empty {
+        padding: 10px;
+        text-align: center;
+        font-size: 11.5px;
+        color: var(--secondary-text-color);
       }
 
       @media (max-width: 768px) {

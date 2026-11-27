@@ -20,6 +20,7 @@ LEGACY_DATA_PATHS = [
 
 # Configuration keys
 CONF_ROOM_ID = "room_id"
+CONF_ROOM_NAME = "room_name"
 CONF_LIGHT_ENTITY = "light_entity"
 CONF_SECONDARY_LIGHTS = "secondary_lights"
 CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON = "suppress_main_when_secondary_on"
@@ -53,11 +54,21 @@ CONF_LATE_NIGHT_ENABLED = "late_night_enabled"
 CONF_LATE_NIGHT_PCT = "late_night_pct"
 CONF_LATE_NIGHT_CONDITION_TYPE = "late_night_condition_type"
 CONF_LATE_NIGHT_ENTITY = "late_night_entity"
+CONF_LATE_NIGHT_ENTITY_STATES = "late_night_entity_states"
 CONF_LATE_NIGHT_LEARN_PREFS = "late_night_learn_prefs"
 CONF_LATE_NIGHT_START_TIME = "late_night_start_time"
 CONF_LATE_NIGHT_START_ENTITY = "late_night_start_entity"
 CONF_LATE_NIGHT_STOP_TIME = "late_night_stop_time"
 CONF_LATE_NIGHT_STOP_ENTITY = "late_night_stop_entity"
+
+LATE_NIGHT_MODE_FIXED_TIME = "fixed_time"
+LATE_NIGHT_MODE_DATETIME_HELPER = "datetime_helper"
+LATE_NIGHT_MODE_ENTITY_STATE = "entity_state"
+LATE_NIGHT_MODES = [
+    LATE_NIGHT_MODE_FIXED_TIME,
+    LATE_NIGHT_MODE_DATETIME_HELPER,
+    LATE_NIGHT_MODE_ENTITY_STATE,
+]
 
 CONF_NOTIFICATION_LIGHT_ENABLED = "notification_light_enabled"
 CONF_NOTIFICATION_TRIGGER_ENTITY = "notification_trigger_entity"
@@ -72,10 +83,14 @@ CONF_SETTLING_COOLDOWN_SEC = "settling_cooldown_sec"
 
 # UI Section Identifiers
 SECTION_HARDWARE = "hardware_presence"
+SECTION_AUXILIARY_TUNING = "auxiliary_tuning"
 SECTION_CIRCADIAN = "circadian"
 SECTION_LATE_NIGHT = "late_night"
 SECTION_MEDIA = "media"
 SECTION_BYPASSES = "bypasses"
+SECTION_OVERRIDE_BEHAVIOR = "override_behavior"
+SECTION_BYPASS_ENTITIES = "bypass_entities"
+SECTION_HARDWARE_SAFEGUARDS = "hardware_safeguards"
 SECTION_NOTIFICATION_LIGHT = "notification_light"
 
 # Default values
@@ -90,7 +105,7 @@ MODE_NOTIFICATION = "notification"
 DEFAULT_TARGET_LUX = 40
 DEFAULT_LUX_RATIO = 0.20
 DEFAULT_PRESENCE_TIMEOUT_MIN = 5
-DEFAULT_TIMEOUT_SCALE_ENTITIES = ["input_boolean.guest_mode"]
+DEFAULT_TIMEOUT_SCALE_ENTITIES: List[str] = []
 DEFAULT_TIMEOUT_SCALE_FACTOR = 3.0
 DEFAULT_MIN_OCCUPIED_PCT = 0
 DEFAULT_SETTLING_COOLDOWN_SEC = 45.0
@@ -115,7 +130,18 @@ DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE = True
 
 DEFAULT_LATE_NIGHT_ENABLED = False
 DEFAULT_LATE_NIGHT_PCT = 20
-DEFAULT_LATE_NIGHT_CONDITION_TYPE = "time"
+DEFAULT_LATE_NIGHT_CONDITION_TYPE = LATE_NIGHT_MODE_FIXED_TIME
+DEFAULT_LATE_NIGHT_ENTITY_STATES = ""
+DEFAULT_LATE_NIGHT_ACTIVE_STATES = [
+    "on",
+    "true",
+    "home",
+    "active",
+    "sleep",
+    "bedtime",
+    "pre-sleep",
+    "presleep",
+]
 DEFAULT_LATE_NIGHT_LEARN_PREFS = True
 DEFAULT_LATE_NIGHT_START_TIME = "22:00:00"
 DEFAULT_LATE_NIGHT_STOP_TIME = "06:00:00"
@@ -230,6 +256,7 @@ CONF_HOLIDAY_LATE_NIGHT_BEHAVIOR = "holiday_late_night_behavior"
 # Decoration Plugs configuration keys
 CONF_DECORATIONS_ON_TRIGGER = "decorations_on_trigger"
 CONF_DECORATIONS_SUNSET_OFFSET_MIN = "decorations_sunset_offset_min"
+CONF_DECORATIONS_ON_TIME = "decorations_on_time"
 CONF_DECORATIONS_OFF_TRIGGER = "decorations_off_trigger"
 CONF_DECORATIONS_OFF_TIME = "decorations_off_time"
 
@@ -261,6 +288,7 @@ DEFAULT_HOLIDAY_LATE_NIGHT_BEHAVIOR = "all_night"
 
 DEFAULT_DECORATIONS_ON_TRIGGER = "sunset"
 DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN = 0
+DEFAULT_DECORATIONS_ON_TIME = "18:00:00"
 DEFAULT_DECORATIONS_OFF_TRIGGER = "sleep"
 DEFAULT_DECORATIONS_OFF_TIME = "23:00:00"
 

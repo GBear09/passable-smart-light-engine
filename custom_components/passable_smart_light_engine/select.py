@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ROOM_ID, DOMAIN
+from .const import CONF_ROOM_ID, CONF_ROOM_NAME, DOMAIN
 from .engine import RoomController
 
 RESET_OPTIONS = [
@@ -43,6 +43,10 @@ class PassableLightingResetDatasetSelect(SelectEntity):
         self._entry = entry
         self._controller = controller
         self._room_id = entry.data[CONF_ROOM_ID]
+        self._room_title = (
+            str(entry.data.get(CONF_ROOM_NAME) or "").strip()
+            or self._room_id.replace("_", " ").title()
+        )
         self._attr_unique_id = f"{self._room_id}_reset_dataset_target"
         self._attr_options = list(RESET_OPTIONS)
         self._attr_current_option = controller.selected_reset_target or "all"
@@ -62,10 +66,9 @@ class PassableLightingResetDatasetSelect(SelectEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Link select entity to the room device."""
-        room_title = self._room_id.replace("_", " ").title()
         return DeviceInfo(
             identifiers={(DOMAIN, self._room_id)},
-            name=f"Smart Lighting - {room_title}",
+            name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Adaptive Lighting Room Controller",
         )

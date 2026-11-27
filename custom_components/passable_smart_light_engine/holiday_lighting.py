@@ -22,6 +22,7 @@ from .const import (
     ACTIVE_HOLIDAY_SENSOR_ENTITY_ID,
     CONF_DECORATIONS_OFF_TIME,
     CONF_DECORATIONS_OFF_TRIGGER,
+    CONF_DECORATIONS_ON_TIME,
     CONF_DECORATIONS_ON_TRIGGER,
     CONF_DECORATIONS_SUNSET_OFFSET_MIN,
     CONF_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
@@ -48,6 +49,7 @@ from .const import (
     CONF_HOLIDAY_SUNSET_OFFSET_MIN,
     DEFAULT_DECORATIONS_OFF_TIME,
     DEFAULT_DECORATIONS_OFF_TRIGGER,
+    DEFAULT_DECORATIONS_ON_TIME,
     DEFAULT_DECORATIONS_ON_TRIGGER,
     DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN,
     DEFAULT_EXTERIOR_BASELINE_BRIGHTNESS_PCT,
@@ -149,6 +151,7 @@ class HolidayStore:
                 # Decoration Plugs Schedule
                 CONF_DECORATIONS_ON_TRIGGER: DEFAULT_DECORATIONS_ON_TRIGGER,
                 CONF_DECORATIONS_SUNSET_OFFSET_MIN: DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN,
+                CONF_DECORATIONS_ON_TIME: DEFAULT_DECORATIONS_ON_TIME,
                 CONF_DECORATIONS_OFF_TRIGGER: DEFAULT_DECORATIONS_OFF_TRIGGER,
                 CONF_DECORATIONS_OFF_TIME: DEFAULT_DECORATIONS_OFF_TIME,
             },
@@ -576,6 +579,93 @@ class HolidayLightingCoordinator:
 
         return False
 
+    def _parse_local_time(self, time_str: Any, fallback: dtime) -> dtime:
+        """Parse an HH:MM[:SS] string into a local time object."""
+        if not time_str or not isinstance(time_str, str):
+            return fallback
+        cleaned = time_str.strip().split()[-1]
+        if "T" in cleaned:
+            cleaned = cleaned.split("T")[-1]
+        try:
+            parts = [int(p) for p in cleaned.split(":")]
+            hr = parts[0] if len(parts) >= 1 else fallback.hour
+            mn = parts[1] if len(parts) >= 2 else fallback.minute
+            sc = parts[2] if len(parts) >= 3 else 0
+            return dtime(hr, mn, sc)
+        except Exception:
+            return fallback
+
+    def _is_schedule_window_active(
+        self,
+        now_dt: datetime,
+        on_trigger: str,
+        sunset_offset_min: int,
+        on_time_str: str,
+        off_trigger: str,
+        sunrise_offset_min: int,
+        off_time_str: str,
+        check_sleep: bool = False,
+    ) -> bool:
+        """Evaluate if now_dt falls within a schedule window across any solar/fixed-time/sleep combination."""
+        if check_sleep and off_trigger == "sleep":
+            home_state_entity = self.store.options.get(
+                CONF_HOLIDAY_HOME_STATE_ENTITY, DEFAULT_HOLIDAY_HOME_STATE_ENTITY
+            )
+            if home_state_entity:
+                st = self.hass.states.get(home_state_entity)
+                if st and str(st.state).strip().lower() == "sleep":
+                    return False
+
+        sun_state = self.hass.states.get("sun.sun")
+        next_setting_str = sun_state.attributes.get("next_setting") if sun_state else None
+        next_rising_str = sun_state.attributes.get("next_rising") if sun_state else None
+        next_setting = dt_util.parse_datetime(next_setting_str) if next_setting_str else None
+        next_rising = dt_util.parse_datetime(next_rising_str) if next_rising_str else None
+
+        candidate_starts: List[datetime] = []
+        if on_trigger == "sunset":
+            if not next_setting:
+                return bool(sun_state and sun_state.state == "below_horizon")
+            upcoming_sunset = next_setting + timedelta(minutes=sunset_offset_min)
+            recent_sunset = upcoming_sunset - timedelta(days=1)
+            candidate_starts = [recent_sunset, upcoming_sunset]
+        else:
+            t_on = self._parse_local_time(on_time_str, dtime(18, 0))
+            today_on = now_dt.replace(
+                hour=t_on.hour, minute=t_on.minute, second=t_on.second, microsecond=0
+            )
+            candidate_starts = [today_on - timedelta(days=1), today_on]
+
+        for start_dt in candidate_starts:
+            if start_dt > now_dt:
+                continue
+
+            if off_trigger in ("sunrise", "sleep"):
+                eff_sunrise_offset = sunrise_offset_min if off_trigger == "sunrise" else 0
+                if next_rising:
+                    upcoming_rise = next_rising + timedelta(minutes=eff_sunrise_offset)
+                    recent_rise = upcoming_rise - timedelta(days=1)
+                    if recent_rise > start_dt:
+                        end_dt = recent_rise
+                    elif upcoming_rise > start_dt:
+                        end_dt = upcoming_rise
+                    else:
+                        end_dt = upcoming_rise + timedelta(days=1)
+                else:
+                    end_dt = start_dt + timedelta(hours=12)
+            else:
+                t_off = self._parse_local_time(off_time_str, dtime(6, 0))
+                end_dt = start_dt.replace(
+                    hour=t_off.hour, minute=t_off.minute, second=t_off.second, microsecond=0
+                )
+                if end_dt <= start_dt:
+                    end_dt += timedelta(days=1)
+
+            if start_dt <= now_dt < end_dt:
+                return True
+
+        return False
+
     def _is_exterior_window_active(self, now: Optional[datetime] = None) -> bool:
         """Determine if the exterior dusk-to-dawn lighting window is currently active."""
         if not self.exterior_enabled:
@@ -586,45 +676,19 @@ class HolidayLightingCoordinator:
         off_trigger = self.store.options.get(CONF_EXTERIOR_OFF_TRIGGER, DEFAULT_EXTERIOR_OFF_TRIGGER)
         sunset_offset = int(self.store.options.get(CONF_EXTERIOR_SUNSET_OFFSET_MIN, DEFAULT_EXTERIOR_SUNSET_OFFSET_MIN))
         sunrise_offset = int(self.store.options.get(CONF_EXTERIOR_SUNRISE_OFFSET_MIN, DEFAULT_EXTERIOR_SUNRISE_OFFSET_MIN))
+        on_time_str = str(self.store.options.get(CONF_EXTERIOR_ON_TIME, DEFAULT_EXTERIOR_ON_TIME))
+        off_time_str = str(self.store.options.get(CONF_EXTERIOR_OFF_TIME, DEFAULT_EXTERIOR_OFF_TIME))
 
-        if on_trigger == "fixed_time" and off_trigger == "fixed_time":
-            on_time_str = self.store.options.get(CONF_EXTERIOR_ON_TIME, DEFAULT_EXTERIOR_ON_TIME)
-            off_time_str = self.store.options.get(CONF_EXTERIOR_OFF_TIME, DEFAULT_EXTERIOR_OFF_TIME)
-            try:
-                on_p = on_time_str.split(":")
-                off_p = off_time_str.split(":")
-                t_on = dtime(int(on_p[0]), int(on_p[1]))
-                t_off = dtime(int(off_p[0]), int(off_p[1]))
-                curr_t = now_dt.time()
-                if t_on <= t_off:
-                    return t_on <= curr_t < t_off
-                else:
-                    return curr_t >= t_on or curr_t < t_off
-            except Exception as err:
-                _LOGGER.error("PassableSmartLighting: Error parsing exterior fixed times: %s", err)
-                return False
-
-        # Check fixed cutoff time if configured
-        if off_trigger == "fixed_time":
-            off_time_str = self.store.options.get(CONF_EXTERIOR_OFF_TIME, DEFAULT_EXTERIOR_OFF_TIME)
-            try:
-                parts = off_time_str.split(":")
-                t_off = dtime(int(parts[0]), int(parts[1]))
-                curr_t = now_dt.time()
-                if t_off >= dtime(12, 0):
-                    if curr_t >= t_off or curr_t < dtime(12, 0):
-                        return False
-                else:
-                    if curr_t >= t_off and now_dt.hour < 12:
-                        return False
-            except Exception:
-                pass
-
-        if on_trigger == "sunset":
-            effective_sunrise_offset = sunrise_offset if off_trigger == "sunrise" else 0
-            return self._is_solar_interval_active(now_dt, sunset_offset, effective_sunrise_offset)
-
-        return True
+        return self._is_schedule_window_active(
+            now_dt,
+            on_trigger,
+            sunset_offset,
+            on_time_str,
+            off_trigger,
+            sunrise_offset,
+            off_time_str,
+            check_sleep=False,
+        )
 
     def _is_decorations_window_active(self, now: Optional[datetime] = None) -> bool:
         """Determine if the holiday outdoor decorations window is currently active."""
@@ -639,37 +703,19 @@ class HolidayLightingCoordinator:
         on_trigger = self.store.options.get(CONF_DECORATIONS_ON_TRIGGER, DEFAULT_DECORATIONS_ON_TRIGGER)
         off_trigger = self.store.options.get(CONF_DECORATIONS_OFF_TRIGGER, DEFAULT_DECORATIONS_OFF_TRIGGER)
         sunset_offset = int(self.store.options.get(CONF_DECORATIONS_SUNSET_OFFSET_MIN, DEFAULT_DECORATIONS_SUNSET_OFFSET_MIN))
+        on_time_str = str(self.store.options.get(CONF_DECORATIONS_ON_TIME, DEFAULT_DECORATIONS_ON_TIME))
+        off_time_str = str(self.store.options.get(CONF_DECORATIONS_OFF_TIME, DEFAULT_DECORATIONS_OFF_TIME))
 
-        # Check Bedtime / Sleep condition
-        if off_trigger == "sleep":
-            home_state_entity = self.store.options.get(CONF_HOLIDAY_HOME_STATE_ENTITY, DEFAULT_HOLIDAY_HOME_STATE_ENTITY)
-            if home_state_entity:
-                st = self.hass.states.get(home_state_entity)
-                if st and str(st.state).lower() == "sleep":
-                    return False
-
-        # Check Fixed Cutoff Time condition
-        if off_trigger == "fixed_time":
-            off_time_str = self.store.options.get(CONF_DECORATIONS_OFF_TIME, DEFAULT_DECORATIONS_OFF_TIME)
-            try:
-                parts = off_time_str.split(":")
-                t_off = dtime(int(parts[0]), int(parts[1]))
-                curr_t = now_dt.time()
-                if t_off >= dtime(12, 0):
-                    if curr_t >= t_off or curr_t < dtime(12, 0):
-                        return False
-                else:
-                    if curr_t >= t_off and now_dt.hour < 12:
-                        return False
-            except Exception:
-                pass
-
-        # Check On condition
-        if on_trigger == "sunset":
-            sunrise_offset = 0
-            return self._is_solar_interval_active(now_dt, sunset_offset, sunrise_offset)
-
-        return True
+        return self._is_schedule_window_active(
+            now_dt,
+            on_trigger,
+            sunset_offset,
+            on_time_str,
+            off_trigger,
+            0,
+            off_time_str,
+            check_sleep=True,
+        )
 
     def _schedule_next_solar_events(self) -> None:
         """Schedule timer for next upcoming solar or fixed-time transition point."""
@@ -687,6 +733,7 @@ class HolidayLightingCoordinator:
         for time_key, default_t in (
             (CONF_EXTERIOR_ON_TIME, DEFAULT_EXTERIOR_ON_TIME),
             (CONF_EXTERIOR_OFF_TIME, DEFAULT_EXTERIOR_OFF_TIME),
+            (CONF_DECORATIONS_ON_TIME, DEFAULT_DECORATIONS_ON_TIME),
             (CONF_DECORATIONS_OFF_TIME, DEFAULT_DECORATIONS_OFF_TIME),
             (CONF_HOLIDAY_OFF_TIME, DEFAULT_HOLIDAY_OFF_TIME),
         ):

@@ -22,36 +22,82 @@ import homeassistant.util.dt as dt_util
 import voluptuous as vol
 
 from .const import (
+    CONF_BYPASS_FREEZE_ENTITIES,
+    CONF_BYPASS_OFF_ENTITIES,
     CONF_CIRCADIAN_ENABLED,
+    CONF_CREATE_FREEZE_SWITCH,
+    CONF_CREATE_OVERRIDE_SWITCH,
     CONF_DEFAULT_LUX_RATIO,
+    CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
+    CONF_LATE_NIGHT_CONDITION_TYPE,
+    CONF_LATE_NIGHT_ENABLED,
+    CONF_LATE_NIGHT_ENTITY,
+    CONF_LATE_NIGHT_ENTITY_STATES,
     CONF_LATE_NIGHT_LEARN_PREFS,
+    CONF_LATE_NIGHT_PCT,
+    CONF_LATE_NIGHT_START_ENTITY,
+    CONF_LATE_NIGHT_START_TIME,
+    CONF_LATE_NIGHT_STOP_ENTITY,
+    CONF_LATE_NIGHT_STOP_TIME,
     CONF_LIGHT_ENTITY,
     CONF_LUX_SENSOR,
+    CONF_MANUAL_OVERRIDE_ENTITY,
     CONF_MAX_COLOR_TEMP,
+    CONF_MEDIA_ENTITIES,
     CONF_MEDIA_LEARN_PREFS,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
+    CONF_MEDIA_SEED_PCT,
     CONF_MIN_COLOR_TEMP,
+    CONF_MIN_OCCUPIED_PCT,
+    CONF_NOTIFICATION_BRIGHTNESS_PCT,
+    CONF_NOTIFICATION_COLOR,
+    CONF_NOTIFICATION_LIGHT_ENABLED,
+    CONF_NOTIFICATION_LIGHT_ENTITY,
+    CONF_NOTIFICATION_PRESENCE_GATED,
+    CONF_NOTIFICATION_SUPPRESSION_ENTITIES,
+    CONF_NOTIFICATION_TRIGGER_ENTITY,
     CONF_OVERRIDE_TIMEOUT_MIN,
+    CONF_POWER_GRID_ENTITY,
     CONF_PRESENCE_ENTITIES,
     CONF_PRESENCE_TIMEOUT_MIN,
+    CONF_ROOM_NAME,
     CONF_SECONDARY_LIGHTS,
+    CONF_SETTLING_COOLDOWN_SEC,
+    CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     CONF_TARGET_LUX,
     CONF_TIMEOUT_SCALE_ENTITIES,
+    CONF_TIMEOUT_SCALE_FACTOR,
     DEFAULT_CIRCADIAN_ENABLED,
+    DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
+    DEFAULT_LATE_NIGHT_ENABLED,
+    DEFAULT_LATE_NIGHT_ENTITY_STATES,
     DEFAULT_LATE_NIGHT_LEARN_PREFS,
     DEFAULT_LATE_NIGHT_PCT,
+    DEFAULT_LATE_NIGHT_START_TIME,
+    DEFAULT_LATE_NIGHT_STOP_TIME,
     DEFAULT_LUX_RATIO,
     DEFAULT_MAX_COLOR_TEMP,
     DEFAULT_MEDIA_LEARN_PREFS,
     DEFAULT_MEDIA_RESPECT_AMBIENT_LUX,
     DEFAULT_MEDIA_SEED_PCT,
     DEFAULT_MIN_COLOR_TEMP,
+    DEFAULT_MIN_OCCUPIED_PCT,
+    DEFAULT_NOTIFICATION_BRIGHTNESS_PCT,
+    DEFAULT_NOTIFICATION_COLOR,
+    DEFAULT_NOTIFICATION_LIGHT_ENABLED,
+    DEFAULT_NOTIFICATION_PRESENCE_GATED,
     DEFAULT_OVERRIDE_TIMEOUT_MIN,
     DEFAULT_PRESENCE_TIMEOUT_MIN,
     DEFAULT_SECONDARY_LIGHTS,
+    DEFAULT_SETTLING_COOLDOWN_SEC,
+    DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
     DEFAULT_TARGET_LUX,
     DEFAULT_TIMEOUT_SCALE_ENTITIES,
+    DEFAULT_TIMEOUT_SCALE_FACTOR,
     DOMAIN,
+    LATE_NIGHT_MODE_DATETIME_HELPER,
+    LATE_NIGHT_MODE_ENTITY_STATE,
+    LATE_NIGHT_MODE_FIXED_TIME,
     RESET_TYPES,
 )
 from .engine import (
@@ -63,6 +109,7 @@ from .engine import (
     compute_room_effective_brightness_pct,
     get_expected_lux,
     get_light_members,
+    normalize_late_night_mode,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -202,7 +249,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
     engine: Optional[PassableLightingEngine] = data.get("engine")
     if not engine:
         return {
-            "version": data.get("version") or "2.10.3",
+            "version": data.get("version") or "2.11.0",
             "summary": {},
             "rooms": [],
             "holiday_exterior": {},
@@ -319,10 +366,33 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
             elif scale_entities is None:
                 scale_entities = []
 
+            def _as_list(val: Any) -> List[str]:
+                if isinstance(val, str):
+                    return [val] if val.strip() else []
+                if isinstance(val, (list, tuple)):
+                    return [str(v) for v in val if v]
+                return []
+
+            room_name = (
+                str(entry_data.get(CONF_ROOM_NAME) or "").strip()
+                or room_id.replace("_", " ").title()
+            )
+            media_entities = _as_list(entry_data.get(CONF_MEDIA_ENTITIES, []))
+            freeze_entities = _as_list(entry_data.get(CONF_BYPASS_FREEZE_ENTITIES, []))
+            off_entities = _as_list(entry_data.get(CONF_BYPASS_OFF_ENTITIES, []))
+            notif_suppressions = _as_list(
+                entry_data.get(CONF_NOTIFICATION_SUPPRESSION_ENTITIES, [])
+            )
+            raw_notif_color = entry_data.get(CONF_NOTIFICATION_COLOR, DEFAULT_NOTIFICATION_COLOR)
+            if isinstance(raw_notif_color, (list, tuple)) and len(raw_notif_color) >= 3:
+                notif_color = [int(raw_notif_color[0]), int(raw_notif_color[1]), int(raw_notif_color[2])]
+            else:
+                notif_color = list(DEFAULT_NOTIFICATION_COLOR)
+
             rooms_payload.append(
                 {
                     "room_id": room_id,
-                    "name": room_id.replace("_", " ").title(),
+                    "name": room_name,
                     "entry_id": entry_id_by_room.get(room_id),
                     "light_entity": light_entity,
                     "secondary_lights": sec_lights,
@@ -370,6 +440,120 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
                         scale_entities
                     ),
                     "available_datasets": room_datasets.get(room_id, []),
+                    "config": {
+                        CONF_ROOM_NAME: room_name,
+                        CONF_LIGHT_ENTITY: light_entity,
+                        CONF_SECONDARY_LIGHTS: sec_lights,
+                        CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON: bool(
+                            entry_data.get(
+                                CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
+                                DEFAULT_SUPPRESS_MAIN_WHEN_SECONDARY_ON,
+                            )
+                        ),
+                        CONF_PRESENCE_ENTITIES: presence,
+                        CONF_LUX_SENSOR: lux_sensor,
+                        CONF_TARGET_LUX: int(round(seed_lux)),
+                        CONF_DEFAULT_LUX_RATIO: float(default_ratio),
+                        CONF_PRESENCE_TIMEOUT_MIN: int(
+                            entry_data.get(CONF_PRESENCE_TIMEOUT_MIN, DEFAULT_PRESENCE_TIMEOUT_MIN)
+                        ),
+                        CONF_TIMEOUT_SCALE_ENTITIES: scale_entities,
+                        CONF_TIMEOUT_SCALE_FACTOR: float(
+                            entry_data.get(CONF_TIMEOUT_SCALE_FACTOR, DEFAULT_TIMEOUT_SCALE_FACTOR)
+                        ),
+                        CONF_MIN_OCCUPIED_PCT: int(
+                            entry_data.get(CONF_MIN_OCCUPIED_PCT, DEFAULT_MIN_OCCUPIED_PCT)
+                        ),
+                        CONF_CIRCADIAN_ENABLED: bool(
+                            entry_data.get(CONF_CIRCADIAN_ENABLED, DEFAULT_CIRCADIAN_ENABLED)
+                        ),
+                        CONF_MIN_COLOR_TEMP: int(
+                            entry_data.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP)
+                        ),
+                        CONF_MAX_COLOR_TEMP: int(
+                            entry_data.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP)
+                        ),
+                        CONF_LATE_NIGHT_ENABLED: bool(
+                            entry_data.get(CONF_LATE_NIGHT_ENABLED, DEFAULT_LATE_NIGHT_ENABLED)
+                        ),
+                        CONF_LATE_NIGHT_PCT: late_night_seed,
+                        CONF_LATE_NIGHT_LEARN_PREFS: late_night_learn,
+                        CONF_LATE_NIGHT_CONDITION_TYPE: normalize_late_night_mode(entry_data),
+                        CONF_LATE_NIGHT_START_TIME: str(
+                            entry_data.get(CONF_LATE_NIGHT_START_TIME, DEFAULT_LATE_NIGHT_START_TIME)
+                            or DEFAULT_LATE_NIGHT_START_TIME
+                        ),
+                        CONF_LATE_NIGHT_STOP_TIME: str(
+                            entry_data.get(CONF_LATE_NIGHT_STOP_TIME, DEFAULT_LATE_NIGHT_STOP_TIME)
+                            or DEFAULT_LATE_NIGHT_STOP_TIME
+                        ),
+                        CONF_LATE_NIGHT_START_ENTITY: entry_data.get(CONF_LATE_NIGHT_START_ENTITY) or "",
+                        CONF_LATE_NIGHT_STOP_ENTITY: entry_data.get(CONF_LATE_NIGHT_STOP_ENTITY) or "",
+                        CONF_LATE_NIGHT_ENTITY: entry_data.get(CONF_LATE_NIGHT_ENTITY) or "",
+                        CONF_LATE_NIGHT_ENTITY_STATES: str(
+                            entry_data.get(
+                                CONF_LATE_NIGHT_ENTITY_STATES, DEFAULT_LATE_NIGHT_ENTITY_STATES
+                            )
+                            or ""
+                        ),
+                        CONF_MEDIA_ENTITIES: media_entities,
+                        CONF_MEDIA_SEED_PCT: media_seed,
+                        CONF_MEDIA_RESPECT_AMBIENT_LUX: bool(
+                            entry_data.get(
+                                CONF_MEDIA_RESPECT_AMBIENT_LUX, DEFAULT_MEDIA_RESPECT_AMBIENT_LUX
+                            )
+                        ),
+                        CONF_MEDIA_LEARN_PREFS: media_learn,
+                        CONF_OVERRIDE_TIMEOUT_MIN: int(
+                            entry_data.get(CONF_OVERRIDE_TIMEOUT_MIN, DEFAULT_OVERRIDE_TIMEOUT_MIN)
+                        ),
+                        CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE: bool(
+                            entry_data.get(
+                                CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
+                                DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
+                            )
+                        ),
+                        CONF_CREATE_OVERRIDE_SWITCH: bool(
+                            entry_data.get(CONF_CREATE_OVERRIDE_SWITCH, False)
+                        ),
+                        CONF_MANUAL_OVERRIDE_ENTITY: entry_data.get(CONF_MANUAL_OVERRIDE_ENTITY) or "",
+                        CONF_CREATE_FREEZE_SWITCH: bool(
+                            entry_data.get(CONF_CREATE_FREEZE_SWITCH, False)
+                        ),
+                        CONF_BYPASS_FREEZE_ENTITIES: freeze_entities,
+                        CONF_BYPASS_OFF_ENTITIES: off_entities,
+                        CONF_SETTLING_COOLDOWN_SEC: float(
+                            entry_data.get(CONF_SETTLING_COOLDOWN_SEC, DEFAULT_SETTLING_COOLDOWN_SEC)
+                        ),
+                        CONF_POWER_GRID_ENTITY: entry_data.get(CONF_POWER_GRID_ENTITY) or "",
+                        CONF_NOTIFICATION_LIGHT_ENABLED: bool(
+                            entry_data.get(
+                                CONF_NOTIFICATION_LIGHT_ENABLED, DEFAULT_NOTIFICATION_LIGHT_ENABLED
+                            )
+                        ),
+                        CONF_NOTIFICATION_TRIGGER_ENTITY: entry_data.get(
+                            CONF_NOTIFICATION_TRIGGER_ENTITY
+                        )
+                        or "",
+                        CONF_NOTIFICATION_LIGHT_ENTITY: entry_data.get(
+                            CONF_NOTIFICATION_LIGHT_ENTITY
+                        )
+                        or "",
+                        CONF_NOTIFICATION_COLOR: notif_color,
+                        CONF_NOTIFICATION_BRIGHTNESS_PCT: int(
+                            entry_data.get(
+                                CONF_NOTIFICATION_BRIGHTNESS_PCT,
+                                DEFAULT_NOTIFICATION_BRIGHTNESS_PCT,
+                            )
+                        ),
+                        CONF_NOTIFICATION_PRESENCE_GATED: bool(
+                            entry_data.get(
+                                CONF_NOTIFICATION_PRESENCE_GATED,
+                                DEFAULT_NOTIFICATION_PRESENCE_GATED,
+                            )
+                        ),
+                        CONF_NOTIFICATION_SUPPRESSION_ENTITIES: notif_suppressions,
+                    },
                     "entities": {
                         "auto_switch": _resolve_entity_id(
                             ent_reg, "switch", f"{DOMAIN}_{room_id}_automation_switch"
@@ -480,7 +664,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
         summary_payload = {}
 
     return {
-        "version": data.get("version") or "2.10.3",
+        "version": data.get("version") or "2.11.0",
         "summary": summary_payload,
         "rooms": rooms_payload,
         "holiday_exterior": holiday_payload,
@@ -504,6 +688,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_set_room_auto)
     websocket_api.async_register_command(hass, ws_set_room_circadian)
     websocket_api.async_register_command(hass, ws_set_target_lux)
+    websocket_api.async_register_command(hass, ws_update_room_config)
     websocket_api.async_register_command(hass, ws_calibrate_room)
     websocket_api.async_register_command(hass, ws_reset_learning_data)
     websocket_api.async_register_command(hass, ws_preview_holiday)
@@ -785,6 +970,268 @@ async def ws_set_target_lux(
     connection.send_result(
         msg["id"], {"success": True, "room_id": room_id, "target_lux": target_lux}
     )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/update_room_config",
+        vol.Required("room_id"): str,
+        vol.Required("config"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_update_room_config(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    """Validate, persist, and hot-apply updated room settings from the card editor."""
+    data = hass.data.get(DOMAIN, {})
+    engine: Optional[PassableLightingEngine] = data.get("engine")
+    if not engine:
+        connection.send_error(
+            msg["id"], "not_found", "Passable Smart Light Engine is not loaded."
+        )
+        return
+
+    room_id = msg["room_id"]
+    entry_id, ctrl = _find_controller_and_entry(hass, room_id)
+    if not ctrl:
+        connection.send_error(
+            msg["id"], "not_found", f"Room '{room_id}' was not found."
+        )
+        return
+
+    raw_cfg = msg.get("config") or {}
+    old_data = dict(ctrl.entry_data)
+    updates: Dict[str, Any] = {}
+
+    def _opt_entity(val: Any) -> Optional[str]:
+        if val is None:
+            return None
+        s = str(val).strip()
+        return s if s else None
+
+    def _opt_list(val: Any) -> List[str]:
+        if isinstance(val, str):
+            return [val.strip()] if val.strip() else []
+        if isinstance(val, (list, tuple)):
+            return [str(v).strip() for v in val if v and str(v).strip()]
+        return []
+
+    if CONF_ROOM_NAME in raw_cfg:
+        rn = str(raw_cfg[CONF_ROOM_NAME] or "").strip()
+        if rn:
+            updates[CONF_ROOM_NAME] = rn
+    if CONF_LIGHT_ENTITY in raw_cfg and raw_cfg[CONF_LIGHT_ENTITY]:
+        updates[CONF_LIGHT_ENTITY] = str(raw_cfg[CONF_LIGHT_ENTITY]).strip()
+    if CONF_SECONDARY_LIGHTS in raw_cfg:
+        updates[CONF_SECONDARY_LIGHTS] = _opt_list(raw_cfg[CONF_SECONDARY_LIGHTS])
+    if CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON in raw_cfg:
+        updates[CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON] = bool(
+            raw_cfg[CONF_SUPPRESS_MAIN_WHEN_SECONDARY_ON]
+        )
+    if CONF_PRESENCE_ENTITIES in raw_cfg:
+        pres = _opt_list(raw_cfg[CONF_PRESENCE_ENTITIES])
+        if not pres:
+            connection.send_error(
+                msg["id"], "invalid_config", "Select at least one presence/motion sensor."
+            )
+            return
+        updates[CONF_PRESENCE_ENTITIES] = pres
+    if CONF_LUX_SENSOR in raw_cfg and raw_cfg[CONF_LUX_SENSOR]:
+        updates[CONF_LUX_SENSOR] = str(raw_cfg[CONF_LUX_SENSOR]).strip()
+    if CONF_TARGET_LUX in raw_cfg:
+        updates[CONF_TARGET_LUX] = max(0, min(1000, int(round(float(raw_cfg[CONF_TARGET_LUX])))))
+    if CONF_DEFAULT_LUX_RATIO in raw_cfg:
+        updates[CONF_DEFAULT_LUX_RATIO] = max(
+            0.01, min(20.0, float(raw_cfg[CONF_DEFAULT_LUX_RATIO]))
+        )
+    if CONF_PRESENCE_TIMEOUT_MIN in raw_cfg:
+        updates[CONF_PRESENCE_TIMEOUT_MIN] = max(
+            1, min(120, int(round(float(raw_cfg[CONF_PRESENCE_TIMEOUT_MIN]))))
+        )
+    if CONF_TIMEOUT_SCALE_ENTITIES in raw_cfg:
+        updates[CONF_TIMEOUT_SCALE_ENTITIES] = _opt_list(raw_cfg[CONF_TIMEOUT_SCALE_ENTITIES])
+    if CONF_TIMEOUT_SCALE_FACTOR in raw_cfg:
+        updates[CONF_TIMEOUT_SCALE_FACTOR] = max(
+            1.0, min(10.0, float(raw_cfg[CONF_TIMEOUT_SCALE_FACTOR]))
+        )
+    if CONF_MIN_OCCUPIED_PCT in raw_cfg:
+        updates[CONF_MIN_OCCUPIED_PCT] = max(
+            0, min(100, int(round(float(raw_cfg[CONF_MIN_OCCUPIED_PCT]))))
+        )
+
+    if CONF_CIRCADIAN_ENABLED in raw_cfg:
+        updates[CONF_CIRCADIAN_ENABLED] = bool(raw_cfg[CONF_CIRCADIAN_ENABLED])
+    if CONF_MIN_COLOR_TEMP in raw_cfg:
+        updates[CONF_MIN_COLOR_TEMP] = max(1500, min(6500, int(round(float(raw_cfg[CONF_MIN_COLOR_TEMP])))))
+    if CONF_MAX_COLOR_TEMP in raw_cfg:
+        updates[CONF_MAX_COLOR_TEMP] = max(1500, min(6500, int(round(float(raw_cfg[CONF_MAX_COLOR_TEMP])))))
+
+    min_ct = updates.get(CONF_MIN_COLOR_TEMP, old_data.get(CONF_MIN_COLOR_TEMP, DEFAULT_MIN_COLOR_TEMP))
+    max_ct = updates.get(CONF_MAX_COLOR_TEMP, old_data.get(CONF_MAX_COLOR_TEMP, DEFAULT_MAX_COLOR_TEMP))
+    if int(min_ct) > int(max_ct):
+        updates[CONF_MIN_COLOR_TEMP] = int(max_ct)
+        updates[CONF_MAX_COLOR_TEMP] = int(min_ct)
+
+    if CONF_LATE_NIGHT_ENABLED in raw_cfg:
+        updates[CONF_LATE_NIGHT_ENABLED] = bool(raw_cfg[CONF_LATE_NIGHT_ENABLED])
+    if CONF_LATE_NIGHT_PCT in raw_cfg:
+        updates[CONF_LATE_NIGHT_PCT] = max(0, min(100, int(round(float(raw_cfg[CONF_LATE_NIGHT_PCT])))))
+    if CONF_LATE_NIGHT_LEARN_PREFS in raw_cfg:
+        updates[CONF_LATE_NIGHT_LEARN_PREFS] = bool(raw_cfg[CONF_LATE_NIGHT_LEARN_PREFS])
+    if CONF_LATE_NIGHT_CONDITION_TYPE in raw_cfg:
+        updates[CONF_LATE_NIGHT_CONDITION_TYPE] = normalize_late_night_mode(
+            {CONF_LATE_NIGHT_CONDITION_TYPE: raw_cfg[CONF_LATE_NIGHT_CONDITION_TYPE]}
+        )
+    if CONF_LATE_NIGHT_START_TIME in raw_cfg:
+        updates[CONF_LATE_NIGHT_START_TIME] = str(raw_cfg[CONF_LATE_NIGHT_START_TIME] or "").strip()
+    if CONF_LATE_NIGHT_STOP_TIME in raw_cfg:
+        updates[CONF_LATE_NIGHT_STOP_TIME] = str(raw_cfg[CONF_LATE_NIGHT_STOP_TIME] or "").strip()
+    if CONF_LATE_NIGHT_START_ENTITY in raw_cfg:
+        updates[CONF_LATE_NIGHT_START_ENTITY] = _opt_entity(raw_cfg[CONF_LATE_NIGHT_START_ENTITY])
+    if CONF_LATE_NIGHT_STOP_ENTITY in raw_cfg:
+        updates[CONF_LATE_NIGHT_STOP_ENTITY] = _opt_entity(raw_cfg[CONF_LATE_NIGHT_STOP_ENTITY])
+    if CONF_LATE_NIGHT_ENTITY in raw_cfg:
+        updates[CONF_LATE_NIGHT_ENTITY] = _opt_entity(raw_cfg[CONF_LATE_NIGHT_ENTITY])
+    if CONF_LATE_NIGHT_ENTITY_STATES in raw_cfg:
+        updates[CONF_LATE_NIGHT_ENTITY_STATES] = str(
+            raw_cfg[CONF_LATE_NIGHT_ENTITY_STATES] or ""
+        ).strip()
+
+    if CONF_MEDIA_ENTITIES in raw_cfg:
+        updates[CONF_MEDIA_ENTITIES] = _opt_list(raw_cfg[CONF_MEDIA_ENTITIES])
+    if CONF_MEDIA_SEED_PCT in raw_cfg:
+        updates[CONF_MEDIA_SEED_PCT] = max(0, min(100, int(round(float(raw_cfg[CONF_MEDIA_SEED_PCT])))))
+    if CONF_MEDIA_RESPECT_AMBIENT_LUX in raw_cfg:
+        updates[CONF_MEDIA_RESPECT_AMBIENT_LUX] = bool(raw_cfg[CONF_MEDIA_RESPECT_AMBIENT_LUX])
+    if CONF_MEDIA_LEARN_PREFS in raw_cfg:
+        updates[CONF_MEDIA_LEARN_PREFS] = bool(raw_cfg[CONF_MEDIA_LEARN_PREFS])
+
+    if CONF_OVERRIDE_TIMEOUT_MIN in raw_cfg:
+        updates[CONF_OVERRIDE_TIMEOUT_MIN] = max(
+            5, min(240, int(round(float(raw_cfg[CONF_OVERRIDE_TIMEOUT_MIN]))))
+        )
+    if CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE in raw_cfg:
+        updates[CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE] = bool(
+            raw_cfg[CONF_IGNORE_MAX_BRIGHTNESS_OVERRIDE]
+        )
+    if CONF_CREATE_OVERRIDE_SWITCH in raw_cfg:
+        updates[CONF_CREATE_OVERRIDE_SWITCH] = bool(raw_cfg[CONF_CREATE_OVERRIDE_SWITCH])
+    if CONF_MANUAL_OVERRIDE_ENTITY in raw_cfg:
+        updates[CONF_MANUAL_OVERRIDE_ENTITY] = _opt_entity(raw_cfg[CONF_MANUAL_OVERRIDE_ENTITY])
+    if CONF_CREATE_FREEZE_SWITCH in raw_cfg:
+        updates[CONF_CREATE_FREEZE_SWITCH] = bool(raw_cfg[CONF_CREATE_FREEZE_SWITCH])
+    if CONF_BYPASS_FREEZE_ENTITIES in raw_cfg:
+        updates[CONF_BYPASS_FREEZE_ENTITIES] = _opt_list(raw_cfg[CONF_BYPASS_FREEZE_ENTITIES])
+    if CONF_BYPASS_OFF_ENTITIES in raw_cfg:
+        updates[CONF_BYPASS_OFF_ENTITIES] = _opt_list(raw_cfg[CONF_BYPASS_OFF_ENTITIES])
+    if CONF_SETTLING_COOLDOWN_SEC in raw_cfg:
+        updates[CONF_SETTLING_COOLDOWN_SEC] = max(
+            5.0, min(180.0, float(raw_cfg[CONF_SETTLING_COOLDOWN_SEC]))
+        )
+    if CONF_POWER_GRID_ENTITY in raw_cfg:
+        updates[CONF_POWER_GRID_ENTITY] = _opt_entity(raw_cfg[CONF_POWER_GRID_ENTITY])
+
+    if CONF_NOTIFICATION_LIGHT_ENABLED in raw_cfg:
+        updates[CONF_NOTIFICATION_LIGHT_ENABLED] = bool(raw_cfg[CONF_NOTIFICATION_LIGHT_ENABLED])
+    if CONF_NOTIFICATION_TRIGGER_ENTITY in raw_cfg:
+        updates[CONF_NOTIFICATION_TRIGGER_ENTITY] = _opt_entity(
+            raw_cfg[CONF_NOTIFICATION_TRIGGER_ENTITY]
+        )
+    if CONF_NOTIFICATION_LIGHT_ENTITY in raw_cfg:
+        updates[CONF_NOTIFICATION_LIGHT_ENTITY] = _opt_entity(
+            raw_cfg[CONF_NOTIFICATION_LIGHT_ENTITY]
+        )
+    if CONF_NOTIFICATION_COLOR in raw_cfg:
+        col = raw_cfg[CONF_NOTIFICATION_COLOR]
+        if isinstance(col, (list, tuple)) and len(col) >= 3:
+            updates[CONF_NOTIFICATION_COLOR] = [
+                max(0, min(255, int(col[0]))),
+                max(0, min(255, int(col[1]))),
+                max(0, min(255, int(col[2]))),
+            ]
+    if CONF_NOTIFICATION_BRIGHTNESS_PCT in raw_cfg:
+        updates[CONF_NOTIFICATION_BRIGHTNESS_PCT] = max(
+            1, min(100, int(round(float(raw_cfg[CONF_NOTIFICATION_BRIGHTNESS_PCT]))))
+        )
+    if CONF_NOTIFICATION_PRESENCE_GATED in raw_cfg:
+        updates[CONF_NOTIFICATION_PRESENCE_GATED] = bool(raw_cfg[CONF_NOTIFICATION_PRESENCE_GATED])
+    if CONF_NOTIFICATION_SUPPRESSION_ENTITIES in raw_cfg:
+        updates[CONF_NOTIFICATION_SUPPRESSION_ENTITIES] = _opt_list(
+            raw_cfg[CONF_NOTIFICATION_SUPPRESSION_ENTITIES]
+        )
+
+    new_data = {**old_data, **updates}
+
+    # Conditional validation matching ConfigFlow / OptionsFlow rules
+    if bool(new_data.get(CONF_LATE_NIGHT_ENABLED, False)):
+        ln_mode = normalize_late_night_mode(new_data)
+        new_data[CONF_LATE_NIGHT_CONDITION_TYPE] = ln_mode
+        if ln_mode == LATE_NIGHT_MODE_ENTITY_STATE and not new_data.get(CONF_LATE_NIGHT_ENTITY):
+            connection.send_error(
+                msg["id"],
+                "invalid_config",
+                "Late Night Mode (Entity State) requires a Trigger Entity / Group.",
+            )
+            return
+        if ln_mode == LATE_NIGHT_MODE_DATETIME_HELPER and (
+            not new_data.get(CONF_LATE_NIGHT_START_ENTITY)
+            or not new_data.get(CONF_LATE_NIGHT_STOP_ENTITY)
+        ):
+            connection.send_error(
+                msg["id"],
+                "invalid_config",
+                "Late Night Mode (Time Helpers) requires both Start and Stop input_datetime entities.",
+            )
+            return
+        if ln_mode == LATE_NIGHT_MODE_FIXED_TIME and (
+            not new_data.get(CONF_LATE_NIGHT_START_TIME)
+            or not new_data.get(CONF_LATE_NIGHT_STOP_TIME)
+        ):
+            connection.send_error(
+                msg["id"],
+                "invalid_config",
+                "Late Night Mode (Fixed Schedule) requires both Start and Stop times.",
+            )
+            return
+
+    if bool(new_data.get(CONF_NOTIFICATION_LIGHT_ENABLED, False)):
+        if not new_data.get(CONF_NOTIFICATION_TRIGGER_ENTITY) or not new_data.get(
+            CONF_NOTIFICATION_LIGHT_ENTITY
+        ):
+            connection.send_error(
+                msg["id"],
+                "invalid_config",
+                "Visual Notification Light requires both a Trigger Entity and a Target Notification Bulb.",
+            )
+            return
+
+    switch_flags_changed = (
+        bool(new_data.get(CONF_CREATE_OVERRIDE_SWITCH))
+        != bool(old_data.get(CONF_CREATE_OVERRIDE_SWITCH))
+        or bool(new_data.get(CONF_CREATE_FREEZE_SWITCH))
+        != bool(old_data.get(CONF_CREATE_FREEZE_SWITCH))
+    )
+
+    room_name = (
+        str(new_data.get(CONF_ROOM_NAME) or "").strip()
+        or room_id.replace("_", " ").title()
+    )
+    new_title = f"Smart Lighting - {room_name}"
+
+    if entry_id:
+        entry = hass.config_entries.async_get_entry(entry_id)
+        if entry:
+            if not switch_flags_changed:
+                data.setdefault("skip_reload_entries", set()).add(entry.entry_id)
+            hass.config_entries.async_update_entry(entry, title=new_title, data=new_data)
+
+    if not switch_flags_changed or not entry_id:
+        await ctrl.async_update_config(new_data)
+
+    connection.send_result(msg["id"], {"success": True, "room_id": room_id})
 
 
 @websocket_api.websocket_command(
@@ -2152,10 +2599,14 @@ async def ws_get_stats(
             )
         total_pref_samples += len(samples)
 
+        room_name = (
+            str(entry_data.get(CONF_ROOM_NAME) or "").strip()
+            or room_id.replace("_", " ").title()
+        )
         rooms_stats.append(
             {
                 "room_id": room_id,
-                "name": room_id.replace("_", " ").title(),
+                "name": room_name,
                 "floor_id": floor_id,
                 "floor_name": floor_name,
                 "light_entity": light_entity,

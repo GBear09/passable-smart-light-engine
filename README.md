@@ -19,7 +19,7 @@ Configure rooms seamlessly using the **Native UI Config Flow** (with zero automa
 - **🛡️ Trajectory-Bounded Echo Guard:** Intelligent detection to prevent delayed hardware status updates or multi-bulb group state updates from causing false manual override triggers (with a 30s grace window and 8% quantization tolerance).
 - **☀️ Sun-Based Circadian Rhythm:** Dynamically shifts color temperature between configured warm and cool Kelvin values based on sun elevation throughout the day.
 - **📺 Media Player Integration:** Automatically applies learned or seeded TV/media lighting presets when media players are active, with per-mode preference learning toggles to lock baseline brightness.
-- **🌙 Late Night Mode:** Overrides sun-based targeting during night hours with configurable start/stop times or helper entity triggers, with per-mode preference learning toggles to lock fixed nighttime presets.
+- **🌙 Late Night Mode:** Overrides sun-based targeting during night hours using 3 explicit trigger modes—**Fixed Clock Schedule**, **Dynamic `input_datetime` Time Helpers**, or **Entity / Home State** (supporting switches, groups, schedules, or `input_select` states like `sleep`)—with per-mode preference learning toggles to lock fixed nighttime presets.
 - **🛑 Flexible Bypasses & Overrides:** Support for Freeze Bypasses (stay as-is), Force-Off Bypasses (e.g., Away mode), and customizable manual override timeouts.
 - **💡 Task Floor (`min_occupied_pct`):** Prevents lights from dropping below a minimum brightness in task-oriented rooms (kitchens, offices) regardless of ambient lux readings.
 - **⚡ Power Grid Outage Protection:** Absorbs light turn-on spikes when power is restored to prevent accidental manual override locks.
@@ -160,23 +160,18 @@ flowchart TD
 
 1. Go to **Settings → Devices & Services → Add Integration**.
 2. Search for **Passable Smart Light Engine**.
-3. **Step 1: Core Room Setup**
-   * **Room ID:** Unique room identifier with no spaces (e.g. `living_room`).
+3. **Step 1: Hardware & Presence**
+   * **Room Display Name:** Friendly room name (auto-generates a clean internal `room_id`, or customize it in the collapsed tuning section).
    * **Light Entity:** The main light or light group to control.
-   * **Presence Sensors:** One or more binary sensors (PIR, mmWave).
+   * **Presence Sensors:** One or more binary sensors (PIR, mmWave) or booleans.
    * **Illuminance Sensor:** Ambient lux sensor.
    * **Target Lux (Seed):** Baseline lux to maintain (Default: `40`).
-   * **Default Lux Ratio:** Initial lux per 1% brightness estimate (Default: `1.0`).
    * **Vacancy Timeout:** Minutes to wait after room becomes empty before turning lights off (Default: `5`).
-   * **Minimum Occupied Brightness:** Floor brightness for task rooms (Default: `0%`).
-4. **Step 2: Behaviors, Bypasses & Helpers**
-   * **Manual Override Tracking:** Select an existing `input_boolean` helper, OR check *Create Dedicated Native Manual Override Switch* to let the integration manage one automatically.
-   * **Freeze Bypasses:** Select existing helpers (e.g. `input_boolean.sleeping_in_living_room`, bedtime booleans) and/or check *Create Dedicated Native Freeze Switch*.
-   * **Force-Off Bypasses:** Select existing helpers (e.g. `input_boolean.away_mode_all_lights_bypass`).
-   * **Circadian Rhythm:** Enable Kelvin shifting and define warm/cool ranges.
-   * **Late Night Mode:** Configure fixed times or entity triggers with seed brightness.
-   * **Media Players:** Select TVs/media players for automatic dimming.
-5. Click **Submit**. A dedicated Home Assistant Device is created for the room!
+   * **Auxiliary & Tuning (Collapsed):** Secondary lamps, guest timeout scaling, task brightness floor (`min_occupied_pct`), and initial lux-per-1% ratio.
+4. **Step 2: Optional Features (Dynamic Sub-Steps)**
+   * Enable **Circadian Rhythm**, **Late Night Mode** (choosing Fixed Clock Schedule, Dynamic Time Helpers, or Entity / Home State), **Media Players**, **Overrides & Bypasses**, or **Visual Notification Light**.
+   * Follow-up configuration steps appear **only** for the features and trigger modes you enabled.
+5. Click **Submit**. A dedicated Home Assistant Device is created for the room! You can also edit any room's full configuration live-reactively right inside the **Engine** tab of `custom:passable-lighting-card` (via the gear button).
 
 ---
 
@@ -227,7 +222,7 @@ When configured via the Native UI, the integration provisions a room Device with
 - **3 Selectable Floor Layouts:** Choose `tiles` (default compact 2-column HVAC-matched tiles), `rings` (5-across progress rings), or `rows` (full-width stacked rows) via the visual card editor or YAML.
 - **Built-In 4-Tab Command Center Modal:**
   - **Lights:** Filter by `Active` or floor, toggle room `Auto` / `Circadian`, clear active overrides and visual notifications, and control individual lamps.
-  - **Engine:** Adjust room Target Lux steppers, inspect learned Lux Yield Curves (`lx/%`), trigger curve calibration, clear active overrides or notifications, and reset learning datasets.
+  - **Engine:** Adjust room Target Lux steppers, toggle room `Auto` / `Circ`, inspect learned Lux Yield Curves (`lx/%`), trigger curve calibration, clear active overrides or notifications, reset learning datasets, and open the live-reactive **Configure Room Settings** editor (`mdi:cog-outline`) where Late Night, Media, Bypass, and Notification fields show/hide dynamically as you toggle them.
   - **Holiday & Ext:** Toggle Dusk-to-Dawn, Holiday Lighting, and Decor Plugs, and preview or apply holidays from your catalog.
   - **Away Sim:** Start/stop presence simulation and inspect active simulated fixtures.
 - **Built-In Light Stats Analytics Popup (`mdi:chart-line`):**

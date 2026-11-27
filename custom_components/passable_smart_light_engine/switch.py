@@ -14,6 +14,7 @@ from .const import (
     CONF_CREATE_FREEZE_SWITCH,
     CONF_CREATE_OVERRIDE_SWITCH,
     CONF_ROOM_ID,
+    CONF_ROOM_NAME,
     CONF_SIMULATION_ENABLED,
     DOMAIN,
     EXTERIOR_LIGHTING_SWITCH_ENTITY_ID,
@@ -107,7 +108,10 @@ class PassableLightingBaseEntity:
         self._entry = entry
         self._controller = controller
         self._room_id = entry.data[CONF_ROOM_ID]
-        self._room_title = self._room_id.replace("_", " ").title()
+        self._room_title = (
+            str(entry.data.get(CONF_ROOM_NAME) or "").strip()
+            or self._room_id.replace("_", " ").title()
+        )
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to room controller state updates."""

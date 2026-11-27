@@ -1,6 +1,7 @@
 """Core algorithmic lighting engine for Passable Smart Light Engine."""
 
 import asyncio
+from collections.abc import Mapping
 from datetime import datetime, time as dtime, timedelta
 import logging
 import math
@@ -31,7 +32,12 @@ from .const import (
     CONF_MEDIA_ENTITIES,
     CONF_MEDIA_LEARN_PREFS,
     CONF_MEDIA_RESPECT_AMBIENT_LUX,
+    CONF_LATE_NIGHT_CONDITION_TYPE,
     CONF_LATE_NIGHT_LEARN_PREFS,
+    CONF_LATE_NIGHT_ENABLED,
+    CONF_LATE_NIGHT_ENTITY_STATES,
+    CONF_LATE_NIGHT_START_ENTITY,
+    CONF_LATE_NIGHT_STOP_ENTITY,
     CONF_MIN_COLOR_TEMP,
     CONF_NOTIFICATION_BRIGHTNESS_PCT,
     CONF_NOTIFICATION_COLOR,
@@ -54,6 +60,7 @@ from .const import (
     DEFAULT_CIRCADIAN_TRANSITION_SEC,
     DEFAULT_CIRCADIAN_UPDATE_INTERVAL_SEC,
     DEFAULT_IGNORE_MAX_BRIGHTNESS_OVERRIDE,
+    DEFAULT_LATE_NIGHT_ACTIVE_STATES,
     DEFAULT_LATE_NIGHT_CONDITION_TYPE,
     DEFAULT_LATE_NIGHT_ENABLED,
     DEFAULT_LATE_NIGHT_LEARN_PREFS,
@@ -87,6 +94,9 @@ from .const import (
     ECHO_CONVERGENCE_SETTLE_SEC,
     ECHO_GUARD_TOLERANCE_PCT,
     ECHO_GUARD_WINDOW_SEC,
+    LATE_NIGHT_MODE_DATETIME_HELPER,
+    LATE_NIGHT_MODE_ENTITY_STATE,
+    LATE_NIGHT_MODE_FIXED_TIME,
     LUX_ADJUST_RATE_LIMIT_SEC,
     LUX_DEADBAND_PCT,
     MAX_CLOSED_LOOP_TRIM_PCT,
@@ -118,6 +128,39 @@ def safe_get_state(hass: HomeAssistant, entity_id: Optional[str], default: Any =
         return default
     except Exception:
         return default
+
+
+def normalize_late_night_mode(data: Mapping[str, Any]) -> str:
+    """Normalize legacy or explicit late-night trigger mode into one of the 3 explicit modes."""
+    raw = str(data.get(CONF_LATE_NIGHT_CONDITION_TYPE, DEFAULT_LATE_NIGHT_CONDITION_TYPE) or "").strip().lower()
+    if raw in (LATE_NIGHT_MODE_FIXED_TIME, LATE_NIGHT_MODE_DATETIME_HELPER, LATE_NIGHT_MODE_ENTITY_STATE):
+        return raw
+    if raw == "time":
+        if data.get("late_night_start_entity") or data.get("late_night_stop_entity"):
+            return LATE_NIGHT_MODE_DATETIME_HELPER
+        return LATE_NIGHT_MODE_FIXED_TIME
+    return LATE_NIGHT_MODE_FIXED_TIME
+
+
+def parse_time_string(t_str: Any, default_val: dtime) -> dtime:
+    """Parse HH:MM[:SS] or 'YYYY-MM-DD HH:MM[:SS]' into a time object."""
+    if not t_str or not isinstance(t_str, str):
+        return default_val
+    cleaned = t_str.strip()
+    if not cleaned:
+        return default_val
+    time_token = cleaned.split()[-1]
+    if "T" in time_token:
+        time_token = time_token.split("T")[-1]
+    try:
+        parts = [int(p) for p in time_token.split(":")]
+        if len(parts) == 2:
+            return dtime(parts[0], parts[1])
+        if len(parts) >= 3:
+            return dtime(parts[0], parts[1], parts[2])
+    except Exception:
+        pass
+    return default_val
 
 
 def get_light_members(hass: HomeAssistant, light_entity: str) -> List[str]:
@@ -426,6 +469,7 @@ def compute_room_active_mode(
         str(controller.entry_data.get("late_night_stop_time", DEFAULT_LATE_NIGHT_STOP_TIME)),
         controller.entry_data.get("late_night_start_entity"),
         controller.entry_data.get("late_night_stop_entity"),
+        entity_states=controller.entry_data.get(CONF_LATE_NIGHT_ENTITY_STATES),
     )
     if is_night:
         return "late_night"
@@ -1340,42 +1384,61 @@ class PassableLightingEngine:
         self,
         enabled: bool,
         cond_type: str,
-        entity_id: Optional[str],
+        entity_id: Optional[Union[str, List[str]]],
         start_time_str: str,
         stop_time_str: str,
         start_entity: Optional[str] = None,
         stop_entity: Optional[str] = None,
+        entity_states: Optional[Union[str, List[str]]] = None,
     ) -> bool:
         """Determine if late night mode is currently active."""
         if not enabled:
             return False
 
-        if cond_type == "entity_state" and entity_id:
-            val = str(safe_get_state(self.hass, entity_id, "off")).lower()
-            return val in ("on", "true", "home", "active")
+        raw_type = str(cond_type or "").strip().lower()
+        if raw_type == "time":
+            norm_type = LATE_NIGHT_MODE_DATETIME_HELPER if (start_entity or stop_entity) else LATE_NIGHT_MODE_FIXED_TIME
+        elif raw_type in (LATE_NIGHT_MODE_FIXED_TIME, LATE_NIGHT_MODE_DATETIME_HELPER, LATE_NIGHT_MODE_ENTITY_STATE):
+            norm_type = raw_type
+        else:
+            norm_type = LATE_NIGHT_MODE_FIXED_TIME
 
-        # Time evaluation
+        if norm_type == LATE_NIGHT_MODE_ENTITY_STATE:
+            if isinstance(entity_id, str):
+                entities = [entity_id.strip()] if entity_id.strip() else []
+            elif isinstance(entity_id, list):
+                entities = [str(e).strip() for e in entity_id if e and str(e).strip()]
+            else:
+                entities = []
+
+            if not entities:
+                return False
+
+            if isinstance(entity_states, str) and entity_states.strip():
+                active_set = {s.strip().lower() for s in entity_states.split(",") if s.strip()}
+            elif isinstance(entity_states, list) and entity_states:
+                active_set = {str(s).strip().lower() for s in entity_states if str(s).strip()}
+            else:
+                active_set = set(DEFAULT_LATE_NIGHT_ACTIVE_STATES)
+
+            for eid in entities:
+                val = str(safe_get_state(self.hass, eid, "off")).strip().lower()
+                if val in active_set:
+                    return True
+            return False
+
+        # Time evaluation (fixed_time or datetime_helper)
         now_dt = dt_util.now()
         now_t = now_dt.time()
 
-        s_time_str = safe_get_state(self.hass, start_entity, start_time_str) if start_entity else start_time_str
-        e_time_str = safe_get_state(self.hass, stop_entity, stop_time_str) if stop_entity else stop_time_str
-
-        def _parse_time(t_str: Any, default_val: dtime) -> dtime:
-            if not t_str or not isinstance(t_str, str):
-                return default_val
-            try:
-                parts = [int(p) for p in t_str.strip().split(":")]
-                if len(parts) == 2:
-                    return dtime(parts[0], parts[1])
-                if len(parts) >= 3:
-                    return dtime(parts[0], parts[1], parts[2])
-            except Exception:
-                pass
-            return default_val
-
-        start_t = _parse_time(s_time_str, dtime(22, 0))
-        stop_t = _parse_time(e_time_str, dtime(6, 0))
+        if norm_type == LATE_NIGHT_MODE_DATETIME_HELPER:
+            s_raw = safe_get_state(self.hass, start_entity, None) if start_entity else None
+            e_raw = safe_get_state(self.hass, stop_entity, None) if stop_entity else None
+            start_t = parse_time_string(s_raw if s_raw is not None else start_time_str, dtime(22, 0))
+            stop_t = parse_time_string(e_raw if e_raw is not None else stop_time_str, dtime(6, 0))
+        else:
+            start_t = parse_time_string(start_time_str, dtime(22, 0))
+            stop_t = parse_time_string(stop_time_str, dtime(6, 0))
 
         if start_t <= stop_t:
             return start_t <= now_t <= stop_t
@@ -1523,6 +1586,7 @@ class PassableLightingEngine:
         late_night_start_entity = p.get("late_night_start_entity")
         late_night_stop_time = str(p.get("late_night_stop_time", DEFAULT_LATE_NIGHT_STOP_TIME))
         late_night_stop_entity = p.get("late_night_stop_entity")
+        late_night_entity_states = p.get(CONF_LATE_NIGHT_ENTITY_STATES)
 
         # Notification Light State & Group Disaggregation
         ctrl = self._controllers.get(room_id)
@@ -2110,6 +2174,7 @@ class PassableLightingEngine:
             late_night_stop_time,
             late_night_start_entity,
             late_night_stop_entity,
+            entity_states=late_night_entity_states,
         ):
             self._last_active_mode[room_id] = "late_night"
             target_pct = (
@@ -2986,6 +3051,7 @@ class RoomController:
         self.entry_data = entry_data
         self.room_id = entry_data[CONF_ROOM_ID]
         self._unsub_listeners: List[CALLBACK_TYPE] = []
+        self._late_night_time_unsubs: List[CALLBACK_TYPE] = []
         self._entity_listeners: List[Callable[[], None]] = []
         self._is_enabled = True
         self._freeze_bypass_active = False
@@ -3507,48 +3573,45 @@ class RoomController:
             )
 
         # Track late night mode entities and scheduled times
-        late_night_enabled = bool(self.entry_data.get("late_night_enabled", DEFAULT_LATE_NIGHT_ENABLED))
+        late_night_enabled = bool(self.entry_data.get(CONF_LATE_NIGHT_ENABLED, DEFAULT_LATE_NIGHT_ENABLED))
         if late_night_enabled:
-            ln_entities = [
-                e
-                for e in (
-                    self.entry_data.get("late_night_entity"),
-                    self.entry_data.get("late_night_start_entity"),
-                    self.entry_data.get("late_night_stop_entity"),
-                )
-                if e and isinstance(e, str)
-            ]
-            if ln_entities:
-                @callback
-                def _on_late_night_entity_change(_evt: Event) -> None:
-                    self.schedule_evaluation("late_night_change", delay_sec=0.1)
+            ln_mode = normalize_late_night_mode(self.entry_data)
+            if ln_mode == LATE_NIGHT_MODE_ENTITY_STATE:
+                raw_ln_ent = self.entry_data.get("late_night_entity")
+                if isinstance(raw_ln_ent, str):
+                    ln_entities = [raw_ln_ent.strip()] if raw_ln_ent.strip() else []
+                elif isinstance(raw_ln_ent, list):
+                    ln_entities = [str(e).strip() for e in raw_ln_ent if e and str(e).strip()]
+                else:
+                    ln_entities = []
+                if ln_entities:
+                    @callback
+                    def _on_late_night_entity_change(_evt: Event) -> None:
+                        self.schedule_evaluation("late_night_change", delay_sec=0.1)
 
-                self._unsub_listeners.append(
-                    async_track_state_change_event(self.hass, ln_entities, _on_late_night_entity_change)
-                )
+                    self._unsub_listeners.append(
+                        async_track_state_change_event(self.hass, ln_entities, _on_late_night_entity_change)
+                    )
+            elif ln_mode == LATE_NIGHT_MODE_DATETIME_HELPER:
+                helper_entities = [
+                    str(e).strip()
+                    for e in (
+                        self.entry_data.get(CONF_LATE_NIGHT_START_ENTITY),
+                        self.entry_data.get(CONF_LATE_NIGHT_STOP_ENTITY),
+                    )
+                    if e and isinstance(e, str) and e.strip()
+                ]
+                if helper_entities:
+                    @callback
+                    def _on_late_night_helper_change(_evt: Event) -> None:
+                        self._refresh_late_night_time_listeners()
+                        self.schedule_evaluation("late_night_change", delay_sec=0.1)
 
-            ln_cond_type = str(self.entry_data.get("late_night_condition_type", DEFAULT_LATE_NIGHT_CONDITION_TYPE))
-            if ln_cond_type == "time":
-                for t_key, t_def in (
-                    ("late_night_start_time", DEFAULT_LATE_NIGHT_START_TIME),
-                    ("late_night_stop_time", DEFAULT_LATE_NIGHT_STOP_TIME),
-                ):
-                    t_str = str(self.entry_data.get(t_key, t_def))
-                    try:
-                        parts = [int(x) for x in t_str.strip().split(":")]
-                        hr = parts[0] if len(parts) >= 1 else 0
-                        mn = parts[1] if len(parts) >= 2 else 0
-                        sc = parts[2] if len(parts) >= 3 else 0
+                    self._unsub_listeners.append(
+                        async_track_state_change_event(self.hass, helper_entities, _on_late_night_helper_change)
+                    )
 
-                        @callback
-                        def _on_late_night_time(_now: Any) -> None:
-                            self.schedule_evaluation("late_night_change", delay_sec=0.1)
-
-                        self._unsub_listeners.append(
-                            async_track_time_change(self.hass, _on_late_night_time, hour=hr, minute=mn, second=sc)
-                        )
-                    except Exception:
-                        pass
+            self._refresh_late_night_time_listeners()
 
         # Track power grid entity restoration
         grid_ent = self.entry_data.get(CONF_POWER_GRID_ENTITY)
@@ -3627,9 +3690,73 @@ class RoomController:
         await self.engine.async_handle_engine_cycle(params)
         self.notify_entities()
 
+    def _clear_late_night_time_listeners(self) -> None:
+        """Unsubscribe active late-night clock triggers."""
+        for unsub in self._late_night_time_unsubs:
+            try:
+                unsub()
+            except Exception:
+                pass
+        self._late_night_time_unsubs.clear()
+
+    def _refresh_late_night_time_listeners(self) -> None:
+        """Schedule clock triggers for fixed-time or input_datetime-backed late night mode."""
+        self._clear_late_night_time_listeners()
+        if not bool(self.entry_data.get(CONF_LATE_NIGHT_ENABLED, DEFAULT_LATE_NIGHT_ENABLED)):
+            return
+
+        ln_mode = normalize_late_night_mode(self.entry_data)
+        target_times: List[dtime] = []
+
+        if ln_mode == LATE_NIGHT_MODE_FIXED_TIME:
+            target_times.append(
+                parse_time_string(
+                    self.entry_data.get("late_night_start_time", DEFAULT_LATE_NIGHT_START_TIME),
+                    dtime(22, 0),
+                )
+            )
+            target_times.append(
+                parse_time_string(
+                    self.entry_data.get("late_night_stop_time", DEFAULT_LATE_NIGHT_STOP_TIME),
+                    dtime(6, 0),
+                )
+            )
+        elif ln_mode == LATE_NIGHT_MODE_DATETIME_HELPER:
+            for ent_key, fallback_t in (
+                (CONF_LATE_NIGHT_START_ENTITY, dtime(22, 0)),
+                (CONF_LATE_NIGHT_STOP_ENTITY, dtime(6, 0)),
+            ):
+                ent_id = self.entry_data.get(ent_key)
+                raw_val = safe_get_state(self.hass, ent_id, None) if ent_id else None
+                target_times.append(parse_time_string(raw_val, fallback_t))
+
+        for target_t in target_times:
+            @callback
+            def _on_late_night_time(_now: Any) -> None:
+                self.schedule_evaluation("late_night_change", delay_sec=0.1)
+
+            self._late_night_time_unsubs.append(
+                async_track_time_change(
+                    self.hass,
+                    _on_late_night_time,
+                    hour=target_t.hour,
+                    minute=target_t.minute,
+                    second=target_t.second,
+                )
+            )
+
+    async def async_update_config(self, new_data: Dict[str, Any]) -> None:
+        """Hot-reload this room controller's configuration without recreating the config entry."""
+        self.stop()
+        self.entry_data = dict(new_data)
+        await self.async_start()
+        self.notify_entities()
+        self.engine.notify_summary_listeners()
+
     def stop(self) -> None:
         """Unsubscribe all active listeners and cancel pending timers."""
         self.cancel_vacancy_timer()
+        self._clear_late_night_time_listeners()
         self._pending_light_params = None
         for cancel_cb in list(self._debounce_cancels.values()):
             try:

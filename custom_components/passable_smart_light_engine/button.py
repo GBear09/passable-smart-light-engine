@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ROOM_ID, DOMAIN
+from .const import CONF_ROOM_ID, CONF_ROOM_NAME, DOMAIN
 from .engine import PassableLightingEngine, RoomController
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,14 +44,17 @@ class PassableLightingBaseButton(ButtonEntity):
         self._controller = controller
         self._engine = engine
         self._room_id = entry.data[CONF_ROOM_ID]
+        self._room_title = (
+            str(entry.data.get(CONF_ROOM_NAME) or "").strip()
+            or self._room_id.replace("_", " ").title()
+        )
 
     @property
     def device_info(self) -> DeviceInfo:
         """Link button to the room device."""
-        room_title = self._room_id.replace("_", " ").title()
         return DeviceInfo(
             identifiers={(DOMAIN, self._room_id)},
-            name=f"Smart Lighting - {room_title}",
+            name=f"Smart Lighting - {self._room_title}",
             manufacturer="Passable",
             model="Adaptive Lighting Room Controller",
         )
