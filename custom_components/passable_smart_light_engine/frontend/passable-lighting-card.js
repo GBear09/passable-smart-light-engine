@@ -4,7 +4,7 @@
  * https://github.com/GBear09/passable-smart-light-engine
  */
 
-const CARD_VERSION = "2.11.0";
+const CARD_VERSION = "2.12.0";
 const ENGINE_DOMAIN = "passable_smart_light_engine";
 
 const LitElement = Object.getPrototypeOf(
@@ -170,6 +170,13 @@ class PassableLightingCard extends LitElement {
       _openEntityPickerKey: { state: true },
       _savingRoomConfig: { state: true },
       _roomConfigError: { state: true },
+      _editingHolidayId: { state: true },
+      _editingHolidayDraft: { state: true },
+      _expandedHolidayLightOverride: { state: true },
+      _savingHoliday: { state: true },
+      _holidayConfigError: { state: true },
+      _confirmDeleteHoliday: { state: true },
+      _holidayPickerSearch: { state: true },
     };
   }
 
@@ -215,6 +222,13 @@ class PassableLightingCard extends LitElement {
     this._savingRoomConfig = false;
     this._roomConfigError = null;
     this._returnModalTab = null;
+    this._editingHolidayId = null;
+    this._editingHolidayDraft = null;
+    this._expandedHolidayLightOverride = null;
+    this._savingHoliday = false;
+    this._holidayConfigError = null;
+    this._confirmDeleteHoliday = false;
+    this._holidayPickerSearch = "";
     this._countdownInterval = null;
     this._closeModalTimer = null;
     this._toastTimer = null;
@@ -1320,6 +1334,13 @@ class PassableLightingCard extends LitElement {
       this._openEntityPickerKey = null;
       this._savingRoomConfig = false;
       this._roomConfigError = null;
+      this._editingHolidayId = null;
+      this._editingHolidayDraft = null;
+      this._expandedHolidayLightOverride = null;
+      this._savingHoliday = false;
+      this._holidayConfigError = null;
+      this._confirmDeleteHoliday = false;
+      this._holidayPickerSearch = "";
       this._detachOverlayScrollGuard();
       this._unlockBackgroundScroll();
       this._syncCountdownTimer();
@@ -4329,7 +4350,1049 @@ class PassableLightingCard extends LitElement {
     };
   }
 
+  _openHolidayEditor(holiday = null, ev = null) {
+    if (ev) ev.stopPropagation();
+    this._fireHaptic("light");
+    const isNew = !holiday;
+    const h = holiday || {};
+    const rawOverrides =
+      h.light_overrides && typeof h.light_overrides === "object" ? h.light_overrides : {};
+    const clonedOverrides = {};
+    Object.entries(rawOverrides).forEach(([lid, ov]) => {
+      if (lid && ov && typeof ov === "object") {
+        clonedOverrides[lid] = {
+          ...ov,
+          rgb_color: Array.isArray(ov.rgb_color) ? [...ov.rgb_color] : [255, 140, 0],
+        };
+      }
+    });
+    this._editingHolidayId = isNew ? "__new__" : h.id || h.name;
+    this._editingHolidayDraft = {
+      id: isNew ? "" : h.id || "",
+      name: h.name || "",
+      enabled: h.enabled !== undefined ? Boolean(h.enabled) : true,
+      start_date: h.start_date || "10-01",
+      end_date: h.end_date || "10-31",
+      icon: h.icon || "mdi:calendar-star",
+      phrase: h.phrase || "",
+      theme_color: h.theme_color || "#9c4600",
+      light_mode: h.light_mode || "rgb",
+      hue_scene: h.hue_scene || "",
+      dynamic_scene: h.dynamic_scene !== undefined ? Boolean(h.dynamic_scene) : true,
+      ha_scene: h.ha_scene || "",
+      wled_preset_entity: h.wled_preset_entity || "",
+      wled_preset: h.wled_preset || "",
+      wled_palette_entity: h.wled_palette_entity || "",
+      wled_palette: h.wled_palette || "",
+      effect: h.effect || "",
+      fallback_effect: h.fallback_effect || "",
+      rgb_color: Array.isArray(h.rgb_color) && h.rgb_color.length >= 3 ? [...h.rgb_color] : [255, 140, 0],
+      color_temp_kelvin: Number(h.color_temp_kelvin || 2200),
+      brightness_pct: Number(h.brightness_pct ?? 100),
+      decorations_on: h.decorations_on !== undefined ? Boolean(h.decorations_on) : true,
+      participating_lights: Array.isArray(h.participating_lights) ? [...h.participating_lights] : [],
+      participating_decorations: Array.isArray(h.participating_decorations)
+        ? [...h.participating_decorations]
+        : [],
+      light_overrides: clonedOverrides,
+    };
+    this._expandedHolidayLightOverride = null;
+    this._holidayConfigError = null;
+    this._confirmDeleteHoliday = false;
+    this._openEntityPickerKey = null;
+    this._holidayPickerSearch = "";
+  }
+
+  _closeHolidayEditor() {
+    this._editingHolidayId = null;
+    this._editingHolidayDraft = null;
+    this._expandedHolidayLightOverride = null;
+    this._holidayConfigError = null;
+    this._confirmDeleteHoliday = false;
+    this._openEntityPickerKey = null;
+    this._holidayPickerSearch = "";
+  }
+
+  _setHolidayDraftField(key, value) {
+    this._editingHolidayDraft = {
+      ...(this._editingHolidayDraft || {}),
+      [key]: value,
+    };
+  }
+
+  _setHolidayLightOverride(lightId, patchOrMode) {
+    const d = this._editingHolidayDraft || {};
+    const prevAll = d.light_overrides || {};
+    const nextAll = { ...prevAll };
+    if (patchOrMode === null || patchOrMode?.light_mode === "default") {
+      delete nextAll[lightId];
+    } else {
+      const wsHoliday = this._wsData?.holiday_exterior || {};
+      const caps = wsHoliday.light_capabilities?.[lightId] || {};
+      const prev = prevAll[lightId] || {};
+      const defaultPresetEnt =
+        prev.wled_preset_entity ||
+        caps.preset_select ||
+        caps.playlist_select ||
+        caps.scene_select ||
+        "";
+      const defaultPaletteEnt = prev.wled_palette_entity || caps.palette_select || "";
+      nextAll[lightId] = {
+        light_mode: prev.light_mode || d.light_mode || "rgb",
+        rgb_color: Array.isArray(prev.rgb_color)
+          ? [...prev.rgb_color]
+          : Array.isArray(d.rgb_color)
+          ? [...d.rgb_color]
+          : [255, 140, 0],
+        color_temp_kelvin: prev.color_temp_kelvin ?? d.color_temp_kelvin ?? 2200,
+        brightness_pct: prev.brightness_pct ?? d.brightness_pct ?? 100,
+        hue_scene: prev.hue_scene ?? "",
+        dynamic_scene: prev.dynamic_scene ?? true,
+        ha_scene: prev.ha_scene ?? "",
+        wled_preset_entity: defaultPresetEnt,
+        wled_preset: prev.wled_preset ?? "",
+        wled_palette_entity: defaultPaletteEnt,
+        wled_palette: prev.wled_palette ?? "",
+        effect: prev.effect ?? "",
+        fallback_effect: prev.fallback_effect ?? "",
+        ...(typeof patchOrMode === "string" ? { light_mode: patchOrMode } : patchOrMode),
+      };
+    }
+    this._editingHolidayDraft = {
+      ...d,
+      light_overrides: nextAll,
+    };
+  }
+
+  _getHolidayCandidateLights(draft, wsHoliday) {
+    const states = this.hass?.states || {};
+    const seed = [
+      ...(Array.isArray(draft?.participating_lights) ? draft.participating_lights : []),
+      ...(Array.isArray(wsHoliday?.default_lights) ? wsHoliday.default_lights : []),
+      ...Object.keys(draft?.light_overrides || {}),
+    ];
+    const expanded = [];
+    const seen = new Set();
+    const pushId = (eid) => {
+      if (!eid || seen.has(eid)) return;
+      seen.add(eid);
+      expanded.push(eid);
+    };
+    seed.forEach((eid) => {
+      const members = states[eid]?.attributes?.entity_id;
+      if (Array.isArray(members) && members.length > 0) {
+        members.forEach((m) => {
+          if (typeof m === "string" && m.startsWith("light.")) pushId(m);
+        });
+      }
+      pushId(eid);
+    });
+    return expanded;
+  }
+
+  _getHolidayLightCapabilities(lightId, wsHoliday) {
+    const capMap = wsHoliday?.light_capabilities || {};
+    const states = this.hass?.states || {};
+    if (lightId && capMap[lightId]) {
+      return capMap[lightId];
+    }
+    if (lightId) {
+      const st = states[lightId];
+      const rawEff = Array.isArray(st?.attributes?.effect_list) ? st.attributes.effect_list : [];
+      return {
+        effects: rawEff.filter((e) => e && !["none", "off"].includes(String(e).toLowerCase())),
+        presets: [],
+        palettes: [],
+        preset_select: null,
+        playlist_select: null,
+        scene_select: null,
+        palette_select: null,
+        speed_number: null,
+        intensity_number: null,
+      };
+    }
+    const effects = new Set();
+    const presets = new Set();
+    const palettes = new Set();
+    Object.values(capMap).forEach((c) => {
+      (c?.effects || []).forEach((x) => effects.add(x));
+      (c?.presets || []).forEach((x) => presets.add(x));
+      (c?.palettes || []).forEach((x) => palettes.add(x));
+    });
+    return {
+      effects: [...effects].sort((a, b) => a.localeCompare(b)),
+      presets: [...presets],
+      palettes: [...palettes],
+    };
+  }
+
+  _formatHolidayOverrideBadge(ov) {
+    if (!ov || !ov.light_mode || ov.light_mode === "default") return "Holiday Default";
+    const m = ov.light_mode;
+    const pct = ov.brightness_pct ?? 100;
+    if (m === "off") return "Keep OFF";
+    if (m === "hue_scene") {
+      const f = this.hass?.states?.[ov.hue_scene]?.attributes?.friendly_name || ov.hue_scene || "Hue Scene";
+      return `Hue: ${f}`;
+    }
+    if (m === "ha_scene") {
+      const f = this.hass?.states?.[ov.ha_scene]?.attributes?.friendly_name || ov.ha_scene || "Scene/Script";
+      return `Scene: ${f}`;
+    }
+    if (m === "wled_preset") return `WLED: ${ov.wled_preset || "Preset"}`;
+    if (m === "effect") return `Effect: ${ov.effect || "Custom"}`;
+    if (m === "color_temp") return `${ov.color_temp_kelvin || 2200}K (${pct}%)`;
+    const rgb = Array.isArray(ov.rgb_color) ? ov.rgb_color : [255, 140, 0];
+    return `RGB (${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+  }
+
+  _renderHolidayEntityPicker({
+    pickerKey,
+    label,
+    helpText = "",
+    value,
+    onChange,
+    domains = null,
+    multiple = false,
+    placeholder = "Add entity...",
+  }) {
+    const isOpen = this._openEntityPickerKey === pickerKey;
+    const states = this.hass?.states || {};
+    const selectedList = multiple
+      ? Array.isArray(value)
+        ? value.filter(Boolean)
+        : []
+      : value
+      ? [value]
+      : [];
+
+    const query = isOpen ? String(this._holidayPickerSearch || "").trim().toLowerCase() : "";
+    const allEntities = Object.values(states)
+      .filter((st) => {
+        if (!st?.entity_id) return false;
+        const dom = st.entity_id.split(".")[0];
+        if (domains && domains.length && !domains.includes(dom)) return false;
+        if (!query) return true;
+        const fname = String(st.attributes?.friendly_name || "").toLowerCase();
+        return st.entity_id.toLowerCase().includes(query) || fname.includes(query);
+      })
+      .sort((a, b) => {
+        const an = String(a.attributes?.friendly_name || a.entity_id).toLowerCase();
+        const bn = String(b.attributes?.friendly_name || b.entity_id).toLowerCase();
+        return an.localeCompare(bn);
+      });
+
+    return html`
+      <div class="room-cfg-field" @click=${(ev) => ev.stopPropagation()}>
+        <span class="room-cfg-label">${label}</span>
+        ${helpText ? html`<span class="room-cfg-help">${helpText}</span>` : ""}
+        <div class="entity-picker-box">
+          ${selectedList.length > 0
+            ? html`
+                <div class="entity-chip-wrap">
+                  ${selectedList.map((eid) => {
+                    const st = states[eid];
+                    const fname = st?.attributes?.friendly_name || eid;
+                    return html`
+                      <span class="entity-chip" title=${eid}>
+                        <span class="entity-chip-name">${fname}</span>
+                        <button
+                          type="button"
+                          class="entity-chip-remove"
+                          @click=${(ev) => {
+                            ev.stopPropagation();
+                            if (multiple) {
+                              onChange(selectedList.filter((x) => x !== eid));
+                            } else {
+                              onChange("");
+                            }
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    `;
+                  })}
+                </div>
+              `
+            : ""}
+
+          <button
+            type="button"
+            class="entity-picker-trigger"
+            @click=${(ev) => {
+              ev.stopPropagation();
+              this._holidayPickerSearch = "";
+              this._openEntityPickerKey = isOpen ? null : pickerKey;
+            }}
+          >
+            <span>${selectedList.length > 0 ? (multiple ? placeholder : "Change entity...") : placeholder}</span>
+            <ha-icon icon=${isOpen ? "mdi:chevron-up" : "mdi:chevron-down"} style="--mdc-icon-size:16px;"></ha-icon>
+          </button>
+
+          ${isOpen
+            ? html`
+                <div class="entity-picker-dropdown">
+                  <input
+                    type="text"
+                    class="entity-picker-search"
+                    placeholder="Search entities by name or ID..."
+                    .value=${this._holidayPickerSearch || ""}
+                    @input=${(ev) => {
+                      this._holidayPickerSearch = ev.target.value;
+                    }}
+                    @click=${(ev) => ev.stopPropagation()}
+                  />
+                  <div class="entity-picker-list thin-scroll">
+                    ${allEntities.length === 0
+                      ? html`<div class="entity-picker-empty">No matching entities found</div>`
+                      : allEntities.slice(0, 80).map((st) => {
+                          const isPicked = selectedList.includes(st.entity_id);
+                          return html`
+                            <button
+                              type="button"
+                              class="entity-picker-option ${isPicked ? "picked" : ""}"
+                              @click=${(ev) => {
+                                ev.stopPropagation();
+                                if (multiple) {
+                                  if (isPicked) {
+                                    onChange(selectedList.filter((x) => x !== st.entity_id));
+                                  } else {
+                                    onChange([...selectedList, st.entity_id]);
+                                  }
+                                } else {
+                                  onChange(st.entity_id);
+                                  this._openEntityPickerKey = null;
+                                  this._holidayPickerSearch = "";
+                                }
+                              }}
+                            >
+                              <span style="text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                                <strong>${st.attributes?.friendly_name || st.entity_id}</strong>
+                                <span style="opacity:0.65;font-size:10.5px;margin-left:5px;">${st.entity_id}</span>
+                              </span>
+                              <span style="font-size:10.5px;opacity:0.75;">${isPicked ? "✓" : st.state}</span>
+                            </button>
+                          `;
+                        })}
+                  </div>
+                </div>
+              `
+            : ""}
+        </div>
+      </div>
+    `;
+  }
+
+  _renderHolidayModeInputs(cfgObj, onFieldChange, targetLightId = null, scopeKey = "base", wsHoliday = {}) {
+    const isOverride = Boolean(targetLightId);
+    const mode = cfgObj.light_mode || (isOverride ? "default" : "rgb");
+    const caps = this._getHolidayLightCapabilities(targetLightId, wsHoliday);
+
+    const modeChoices = isOverride
+      ? [
+          { id: "default", label: "Holiday Default" },
+          { id: "rgb", label: "RGB Color" },
+          { id: "hue_scene", label: "Hue Scene" },
+          { id: "wled_preset", label: "WLED / Soffit" },
+          { id: "ha_scene", label: "HA / Tuya Scene" },
+          { id: "effect", label: "Firmware Effect" },
+          { id: "color_temp", label: "White (K)" },
+          { id: "off", label: "Keep OFF" },
+        ]
+      : [
+          { id: "rgb", label: "RGB Color" },
+          { id: "hue_scene", label: "Hue Scene" },
+          { id: "wled_preset", label: "WLED / Soffit" },
+          { id: "ha_scene", label: "HA / Tuya Scene" },
+          { id: "effect", label: "Firmware Effect" },
+          { id: "color_temp", label: "White (K)" },
+        ];
+
+    const presetSelectEntity =
+      cfgObj.wled_preset_entity ||
+      caps.preset_select ||
+      caps.playlist_select ||
+      caps.scene_select ||
+      "";
+    const dynamicPresets = Array.isArray(
+      presetSelectEntity && this.hass?.states?.[presetSelectEntity]?.attributes?.options
+    )
+      ? this.hass.states[presetSelectEntity].attributes.options
+      : caps.presets || [];
+
+    const paletteSelectEntity = cfgObj.wled_palette_entity || caps.palette_select || "";
+    const dynamicPalettes = Array.isArray(
+      paletteSelectEntity && this.hass?.states?.[paletteSelectEntity]?.attributes?.options
+    )
+      ? this.hass.states[paletteSelectEntity].attributes.options
+      : caps.palettes || [];
+
+    const effectsList = caps.effects || [];
+
+    return html`
+      <div class="holiday-mode-wrap">
+        <div class="holiday-mode-grid">
+          ${modeChoices.map(
+            (mc) => html`
+              <button
+                type="button"
+                class="segmented-mode-btn ${mode === mc.id ? "active" : ""}"
+                @click=${() => onFieldChange("light_mode", mc.id)}
+              >
+                ${mc.label}
+              </button>
+            `
+          )}
+        </div>
+
+        ${mode === "default"
+          ? html`
+              <div class="room-cfg-info-banner">
+                Inherits the holiday's default look above. Choose any other mode to customize this light independently.
+              </div>
+            `
+          : mode === "off"
+          ? html`
+              <div class="room-cfg-info-banner">
+                Explicitly keeps this light turned OFF when this holiday runs (for example, keeping security floods off during Halloween).
+              </div>
+            `
+          : html`
+              ${mode === "rgb"
+                ? html`
+                    <div class="room-cfg-two-col">
+                      <div class="room-cfg-field">
+                        <span class="room-cfg-label">Solid RGB Color</span>
+                        <input
+                          type="color"
+                          class="room-cfg-color"
+                          .value=${this._rgbToHex(cfgObj.rgb_color || [255, 140, 0])}
+                          @input=${(ev) => onFieldChange("rgb_color", this._hexToRgb(ev.target.value))}
+                        />
+                      </div>
+                      <div class="room-cfg-field">
+                        <span class="room-cfg-label">RGB Triplet</span>
+                        <span class="room-cfg-help" style="padding-top:8px;font-weight:600;">
+                          ${JSON.stringify(cfgObj.rgb_color || [255, 140, 0])}
+                        </span>
+                      </div>
+                    </div>
+                  `
+                : ""}
+
+              ${mode === "color_temp"
+                ? html`
+                    <div class="room-cfg-field">
+                      <div class="room-cfg-slider-head">
+                        <span class="room-cfg-label">Color Temperature (Kelvin)</span>
+                        <span class="room-cfg-val">${cfgObj.color_temp_kelvin || 2200}K</span>
+                      </div>
+                      <input
+                        type="range"
+                        class="room-cfg-range"
+                        min="1800"
+                        max="6500"
+                        step="100"
+                        .value=${String(cfgObj.color_temp_kelvin || 2200)}
+                        @input=${(ev) => onFieldChange("color_temp_kelvin", Number(ev.target.value))}
+                      />
+                      <span class="room-cfg-help">
+                        2200K warm amber glow to 6500K crisp daylight (automatically clamped to bulb limits; resets active WLED chase effects to Solid).
+                      </span>
+                    </div>
+                  `
+                : ""}
+
+              ${mode === "hue_scene"
+                ? html`
+                    ${this._renderHolidayEntityPicker({
+                      pickerKey: `hol_${scopeKey}_hue_scene`,
+                      label: "Philips Hue Scene Entity",
+                      helpText: "Activated dynamically via hue.activate_scene when available.",
+                      value: cfgObj.hue_scene || "",
+                      onChange: (val) => onFieldChange("hue_scene", val),
+                      domains: ["scene"],
+                      placeholder: "Select Hue scene...",
+                    })}
+                    <div class="room-cfg-toggle-row">
+                      <div class="room-cfg-toggle-text">
+                        <span class="room-cfg-label">Dynamic Palette Loop</span>
+                        <span class="room-cfg-help">Animate colors smoothly through the Hue scene palette.</span>
+                      </div>
+                      <button
+                        type="button"
+                        class="cfg-switch-pill ${cfgObj.dynamic_scene !== false ? "on" : ""}"
+                        @click=${() => onFieldChange("dynamic_scene", cfgObj.dynamic_scene === false)}
+                      >
+                        <span class="cfg-switch-knob"></span>
+                      </button>
+                    </div>
+                    <div class="room-cfg-field">
+                      <span class="room-cfg-label">Optional Fallback Bulb Effect (Non-Hue Lights)</span>
+                      <input
+                        type="text"
+                        class="room-cfg-input"
+                        placeholder="e.g. fire, candle"
+                        .value=${cfgObj.fallback_effect || ""}
+                        @input=${(ev) => onFieldChange("fallback_effect", ev.target.value)}
+                      />
+                    </div>
+                  `
+                : ""}
+
+              ${mode === "ha_scene"
+                ? html`
+                    <div class="room-cfg-info-banner">
+                      Ideal for Tuya / Smart Life Tap-to-Run scenes (e.g. Lumary 3 stock app mode) or any multi-device Home Assistant Scene / Script.
+                    </div>
+                    ${this._renderHolidayEntityPicker({
+                      pickerKey: `hol_${scopeKey}_ha_scene`,
+                      label: "Home Assistant Scene, Tuya Tap-to-Run, or Script",
+                      value: cfgObj.ha_scene || "",
+                      onChange: (val) => onFieldChange("ha_scene", val),
+                      domains: ["scene", "script"],
+                      placeholder: "Select scene.* or script.*...",
+                    })}
+                  `
+                : ""}
+
+              ${mode === "wled_preset"
+                ? html`
+                    <div class="room-cfg-info-banner">
+                      ${presetSelectEntity
+                        ? html`Detected preset controller <strong>${presetSelectEntity}</strong>.`
+                        : "Enter the exact WLED Preset or Playlist name from your Lumary / WLED controller."}
+                    </div>
+                    ${dynamicPresets.length > 0
+                      ? html`
+                          <div class="room-cfg-field">
+                            <span class="room-cfg-label">Discovered Presets / Playlists</span>
+                            <div class="holiday-chip-pick-row">
+                              ${dynamicPresets.slice(0, 20).map(
+                                (p) => html`
+                                  <button
+                                    type="button"
+                                    class="holiday-mini-chip ${cfgObj.wled_preset === p ? "active" : ""}"
+                                    @click=${() => onFieldChange("wled_preset", p)}
+                                  >
+                                    ${p}
+                                  </button>
+                                `
+                              )}
+                            </div>
+                          </div>
+                        `
+                      : ""}
+                    <div class="room-cfg-field">
+                      <span class="room-cfg-label">Preset / Playlist Name</span>
+                      <input
+                        type="text"
+                        class="room-cfg-input"
+                        placeholder="Exact preset name (e.g. Halloween Chase)"
+                        .value=${cfgObj.wled_preset || ""}
+                        @input=${(ev) => onFieldChange("wled_preset", ev.target.value)}
+                      />
+                    </div>
+                    ${this._renderHolidayEntityPicker({
+                      pickerKey: `hol_${scopeKey}_wled_preset_ent`,
+                      label: "WLED Preset Select Entity (Optional Override)",
+                      helpText: "Auto-discovered from sibling select entities if left blank.",
+                      value: cfgObj.wled_preset_entity || "",
+                      onChange: (val) => onFieldChange("wled_preset_entity", val),
+                      domains: ["select"],
+                      placeholder: presetSelectEntity || "Auto-detect from light...",
+                    })}
+                  `
+                : ""}
+
+              ${mode === "effect"
+                ? html`
+                    ${effectsList.length > 0
+                      ? html`
+                          <div class="room-cfg-field">
+                            <span class="room-cfg-label">Discovered Firmware Effects (${effectsList.length})</span>
+                            <div class="holiday-chip-pick-row">
+                              ${effectsList.slice(0, 24).map(
+                                (eff) => html`
+                                  <button
+                                    type="button"
+                                    class="holiday-mini-chip ${cfgObj.effect === eff ? "active" : ""}"
+                                    @click=${() => onFieldChange("effect", eff)}
+                                  >
+                                    ${eff}
+                                  </button>
+                                `
+                              )}
+                            </div>
+                          </div>
+                        `
+                      : ""}
+                    <div class="room-cfg-field">
+                      <span class="room-cfg-label">Effect Name</span>
+                      <input
+                        type="text"
+                        class="room-cfg-input"
+                        placeholder="e.g. fire, candle, Colorloop, Twinkle"
+                        .value=${cfgObj.effect || ""}
+                        @input=${(ev) => onFieldChange("effect", ev.target.value)}
+                      />
+                    </div>
+                    ${dynamicPalettes.length > 0 || cfgObj.wled_palette
+                      ? html`
+                          <div class="room-cfg-field">
+                            <span class="room-cfg-label">WLED Color Palette (Optional)</span>
+                            ${dynamicPalettes.length > 0
+                              ? html`
+                                  <div class="holiday-chip-pick-row">
+                                    ${dynamicPalettes.slice(0, 16).map(
+                                      (pal) => html`
+                                        <button
+                                          type="button"
+                                          class="holiday-mini-chip ${cfgObj.wled_palette === pal ? "active" : ""}"
+                                          @click=${() => onFieldChange("wled_palette", pal)}
+                                        >
+                                          ${pal}
+                                        </button>
+                                      `
+                                    )}
+                                  </div>
+                                `
+                              : ""}
+                            <input
+                              type="text"
+                              class="room-cfg-input"
+                              placeholder="Optional WLED palette name"
+                              .value=${cfgObj.wled_palette || ""}
+                              @input=${(ev) => onFieldChange("wled_palette", ev.target.value)}
+                            />
+                          </div>
+                        `
+                      : ""}
+                    ${caps.speed_number || caps.intensity_number
+                      ? html`
+                          <div class="room-cfg-two-col">
+                            ${caps.speed_number
+                              ? html`
+                                  <div class="room-cfg-field">
+                                    <div class="room-cfg-slider-head">
+                                      <span class="room-cfg-label">Effect Speed</span>
+                                      <span class="room-cfg-val">${cfgObj.effect_speed ?? "Default"}</span>
+                                    </div>
+                                    <input
+                                      type="range"
+                                      class="room-cfg-range"
+                                      min="0"
+                                      max="255"
+                                      step="5"
+                                      .value=${String(cfgObj.effect_speed ?? 128)}
+                                      @input=${(ev) => onFieldChange("effect_speed", Number(ev.target.value))}
+                                    />
+                                  </div>
+                                `
+                              : ""}
+                            ${caps.intensity_number
+                              ? html`
+                                  <div class="room-cfg-field">
+                                    <div class="room-cfg-slider-head">
+                                      <span class="room-cfg-label">Effect Intensity</span>
+                                      <span class="room-cfg-val">${cfgObj.effect_intensity ?? "Default"}</span>
+                                    </div>
+                                    <input
+                                      type="range"
+                                      class="room-cfg-range"
+                                      min="0"
+                                      max="255"
+                                      step="5"
+                                      .value=${String(cfgObj.effect_intensity ?? 128)}
+                                      @input=${(ev) => onFieldChange("effect_intensity", Number(ev.target.value))}
+                                    />
+                                  </div>
+                                `
+                              : ""}
+                          </div>
+                        `
+                      : ""}
+                  `
+                : ""}
+
+              <div class="room-cfg-field">
+                <div class="room-cfg-slider-head">
+                  <span class="room-cfg-label">Brightness (%)</span>
+                  <span class="room-cfg-val">${cfgObj.brightness_pct ?? 100}%</span>
+                </div>
+                <input
+                  type="range"
+                  class="room-cfg-range"
+                  min="1"
+                  max="100"
+                  step="1"
+                  .value=${String(cfgObj.brightness_pct ?? 100)}
+                  @input=${(ev) => onFieldChange("brightness_pct", Number(ev.target.value))}
+                />
+              </div>
+            `}
+      </div>
+    `;
+  }
+
+  async _saveHoliday(andPreview = false) {
+    if (!this.hass || !this._editingHolidayDraft || this._savingHoliday) return;
+    this._savingHoliday = true;
+    this._holidayConfigError = null;
+    try {
+      const res = await this.hass.callWS({
+        type: `${ENGINE_DOMAIN}/save_holiday`,
+        holiday: this._editingHolidayDraft,
+      });
+      if (andPreview && res?.holiday_id) {
+        await this.hass.callWS({
+          type: `${ENGINE_DOMAIN}/preview_holiday`,
+          holiday_id: res.holiday_id,
+          duration_sec: 60,
+        });
+      }
+      this._fireHaptic("success");
+      this._showToast(andPreview ? "Holiday saved & previewing (60s)" : "Holiday saved");
+      this._closeHolidayEditor();
+      if (!this._wsUnsub) {
+        await this._fetchFallbackData();
+      }
+    } catch (err) {
+      this._holidayConfigError = err?.message || "Failed to save holiday configuration.";
+    } finally {
+      this._savingHoliday = false;
+    }
+  }
+
+  async _deleteHoliday() {
+    if (!this.hass || !this._editingHolidayDraft?.id || this._savingHoliday) return;
+    if (!this._confirmDeleteHoliday) {
+      this._confirmDeleteHoliday = true;
+      return;
+    }
+    this._savingHoliday = true;
+    this._holidayConfigError = null;
+    try {
+      await this.hass.callWS({
+        type: `${ENGINE_DOMAIN}/delete_holiday`,
+        holiday_id: this._editingHolidayDraft.id,
+      });
+      this._fireHaptic("success");
+      this._showToast("Holiday deleted");
+      this._closeHolidayEditor();
+      if (!this._wsUnsub) {
+        await this._fetchFallbackData();
+      }
+    } catch (err) {
+      this._holidayConfigError = err?.message || "Failed to delete holiday.";
+    } finally {
+      this._savingHoliday = false;
+    }
+  }
+
+  _renderHolidayEditorView() {
+    const d = this._editingHolidayDraft || {};
+    const wsHoliday = this._wsData?.holiday_exterior || {};
+    const states = this.hass?.states || {};
+    const isNew = this._editingHolidayId === "__new__" || !d.id;
+    const candidateLights = this._getHolidayCandidateLights(d, wsHoliday);
+    const overrides = d.light_overrides || {};
+    const activeOverrideCount = Object.values(overrides).filter(
+      (ov) => ov && ov.light_mode && ov.light_mode !== "default"
+    ).length;
+
+    return html`
+      <div class="room-config-topbar">
+        <button type="button" class="secondary-action-btn" @click=${() => this._closeHolidayEditor()}>
+          <ha-icon icon="mdi:arrow-left" style="--mdc-icon-size:15px;"></ha-icon>
+          <span>Back</span>
+        </button>
+        <div class="room-config-title-wrap">
+          <span class="room-config-title">${isNew ? "New Holiday" : d.name || "Edit Holiday"}</span>
+          <span class="room-config-sub">${activeOverrideCount} per-light override(s)</span>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          ${!isNew
+            ? html`
+                <button
+                  type="button"
+                  class="holiday-delete-btn ${this._confirmDeleteHoliday ? "confirm" : ""}"
+                  ?disabled=${this._savingHoliday}
+                  @click=${() => this._deleteHoliday()}
+                >
+                  ${this._confirmDeleteHoliday ? "Confirm Delete" : "Delete"}
+                </button>
+              `
+            : ""}
+          <button
+            type="button"
+            class="secondary-action-btn"
+            ?disabled=${this._savingHoliday}
+            @click=${() => this._saveHoliday(true)}
+          >
+            Save &amp; Test 60s
+          </button>
+          <button
+            type="button"
+            class="primary-action-btn"
+            ?disabled=${this._savingHoliday}
+            @click=${() => this._saveHoliday(false)}
+          >
+            ${this._savingHoliday ? "Saving..." : "Save"}
+          </button>
+        </div>
+      </div>
+
+      ${this._holidayConfigError
+        ? html`<div class="room-cfg-error">${this._holidayConfigError}</div>`
+        : ""}
+
+      <div class="modal-scroll-area thin-scroll room-cfg-scroll">
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">📅 Schedule &amp; Holiday Identity</div>
+          <div class="room-cfg-two-col">
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Holiday Name</span>
+              <input
+                type="text"
+                class="room-cfg-input"
+                placeholder="e.g. Halloween"
+                .value=${d.name || ""}
+                @input=${(ev) => this._setHolidayDraftField("name", ev.target.value)}
+              />
+            </div>
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Card Badge / Phrase</span>
+              <input
+                type="text"
+                class="room-cfg-input"
+                placeholder="e.g. Spooky Glow"
+                .value=${d.phrase || ""}
+                @input=${(ev) => this._setHolidayDraftField("phrase", ev.target.value)}
+              />
+            </div>
+          </div>
+
+          <div class="room-cfg-two-col">
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">Start Date (MM-DD)</span>
+              <input
+                type="text"
+                class="room-cfg-input"
+                placeholder="10-01"
+                .value=${d.start_date || ""}
+                @input=${(ev) => this._setHolidayDraftField("start_date", ev.target.value)}
+              />
+            </div>
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">End Date (MM-DD)</span>
+              <input
+                type="text"
+                class="room-cfg-input"
+                placeholder="10-31"
+                .value=${d.end_date || ""}
+                @input=${(ev) => this._setHolidayDraftField("end_date", ev.target.value)}
+              />
+            </div>
+          </div>
+
+          <div class="room-cfg-two-col">
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">MDI Icon</span>
+              <input
+                type="text"
+                class="room-cfg-input"
+                .value=${d.icon || "mdi:calendar-star"}
+                @input=${(ev) => this._setHolidayDraftField("icon", ev.target.value)}
+              />
+            </div>
+            <div class="room-cfg-field">
+              <span class="room-cfg-label">UI Theme Accent Color</span>
+              <input
+                type="color"
+                class="room-cfg-color"
+                .value=${d.theme_color || "#9c4600"}
+                @input=${(ev) => this._setHolidayDraftField("theme_color", ev.target.value)}
+              />
+            </div>
+          </div>
+
+          <div class="room-cfg-toggle-row">
+            <div class="room-cfg-toggle-text">
+              <span class="room-cfg-label">Holiday Enabled</span>
+              <span class="room-cfg-help">Allow this holiday to run automatically on its scheduled dates.</span>
+            </div>
+            <button
+              type="button"
+              class="cfg-switch-pill ${d.enabled !== false ? "on" : ""}"
+              @click=${() => this._setHolidayDraftField("enabled", d.enabled === false)}
+            >
+              <span class="cfg-switch-knob"></span>
+            </button>
+          </div>
+
+          <div class="room-cfg-toggle-row">
+            <div class="room-cfg-toggle-text">
+              <span class="room-cfg-label">Turn On Holiday Decorations / Plugs</span>
+              <span class="room-cfg-help">Activate exterior decoration switches during Dusk-to-Dawn for this holiday.</span>
+            </div>
+            <button
+              type="button"
+              class="cfg-switch-pill ${d.decorations_on !== false ? "on" : ""}"
+              @click=${() => this._setHolidayDraftField("decorations_on", d.decorations_on === false)}
+            >
+              <span class="cfg-switch-knob"></span>
+            </button>
+          </div>
+        </div>
+
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">🎨 Holiday Default Look</div>
+          <span class="room-cfg-help">
+            Applied to all participating lights unless overridden for an individual fixture below.
+          </span>
+          ${this._renderHolidayModeInputs(
+            d,
+            (key, val) => this._setHolidayDraftField(key, val),
+            null,
+            "default",
+            wsHoliday
+          )}
+        </div>
+
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">💡 Participating Lights &amp; Smart Plugs</div>
+          ${this._renderHolidayEntityPicker({
+            pickerKey: "hol_participating_lights",
+            label: "Participating Holiday Lights",
+            helpText: "Optional override. Leave empty to use your default exterior/holiday lights.",
+            value: d.participating_lights || [],
+            onChange: (val) => this._setHolidayDraftField("participating_lights", val),
+            domains: ["light"],
+            multiple: true,
+            placeholder: "Use global default holiday lights (or pick specific lights)...",
+          })}
+          ${this._renderHolidayEntityPicker({
+            pickerKey: "hol_participating_decos",
+            label: "Participating Decoration Switches",
+            helpText: "Optional override. Leave empty to use your default exterior decoration switches.",
+            value: d.participating_decorations || [],
+            onChange: (val) => this._setHolidayDraftField("participating_decorations", val),
+            domains: ["switch", "input_boolean"],
+            multiple: true,
+            placeholder: "Use global default decoration switches...",
+          })}
+        </div>
+
+        <div class="room-cfg-card">
+          <div class="room-cfg-card-title">
+            ✨ Per-Light Customizations (${activeOverrideCount} Active)
+          </div>
+          <span class="room-cfg-help">
+            Give each fixture its own look—for example, Porch on a Hue Flame scene or orange, Side Sconce purple RGB, and Lumary 3 Soffit on a WLED preset or Tuya scene.
+          </span>
+
+          <div class="holiday-light-ov-list">
+            ${candidateLights.map((lid) => {
+              const st = states[lid];
+              const fname = st?.attributes?.friendly_name || lid;
+              const caps = this._getHolidayLightCapabilities(lid, wsHoliday);
+              const ov = overrides[lid] || { light_mode: "default" };
+              const hasOv = ov.light_mode && ov.light_mode !== "default";
+              const isExp = this._expandedHolidayLightOverride === lid;
+              const isWled = Boolean(caps.preset_select || caps.playlist_select || caps.palette_select);
+              const hasEff = Array.isArray(caps.effects) && caps.effects.length > 0;
+
+              return html`
+                <div class="holiday-light-ov-item ${hasOv ? "customized" : ""}">
+                  <div
+                    class="holiday-light-ov-head"
+                    @click=${() => {
+                      this._expandedHolidayLightOverride = isExp ? null : lid;
+                    }}
+                  >
+                    <div class="holiday-light-ov-info">
+                      <div class="holiday-light-ov-name">
+                        <span>${fname}</span>
+                        ${isWled
+                          ? html`<span class="holiday-cap-tag wled">WLED</span>`
+                          : hasEff
+                          ? html`<span class="holiday-cap-tag">FX</span>`
+                          : ""}
+                      </div>
+                      <div class="holiday-light-ov-id">${lid}</div>
+                    </div>
+                    <div class="holiday-light-ov-right">
+                      <span class="holiday-ov-pill ${hasOv ? "active" : ""}">
+                        ${this._formatHolidayOverrideBadge(ov)}
+                      </span>
+                      <ha-icon
+                        icon=${isExp ? "mdi:chevron-up" : "mdi:chevron-down"}
+                        style="--mdc-icon-size:17px;opacity:0.75;"
+                      ></ha-icon>
+                    </div>
+                  </div>
+
+                  ${isExp
+                    ? html`
+                        <div class="holiday-light-ov-body">
+                          ${hasOv
+                            ? html`
+                                <div style="display:flex;justify-content:flex-end;">
+                                  <button
+                                    type="button"
+                                    class="holiday-reset-ov-btn"
+                                    @click=${() => this._setHolidayLightOverride(lid, null)}
+                                  >
+                                    Reset to Holiday Default
+                                  </button>
+                                </div>
+                              `
+                            : ""}
+                          ${this._renderHolidayModeInputs(
+                            ov,
+                            (key, val) =>
+                              this._setHolidayLightOverride(
+                                lid,
+                                key === "light_mode" && val === "default" ? null : { [key]: val }
+                              ),
+                            lid,
+                            `ov_${lid}`,
+                            wsHoliday
+                          )}
+                        </div>
+                      `
+                    : ""}
+                </div>
+              `;
+            })}
+          </div>
+
+          ${this._renderHolidayEntityPicker({
+            pickerKey: "hol_add_custom_light_ov",
+            label: "+ Add / Jump to Any Light Entity",
+            helpText: "Pick any other light (e.g. a newly added Lumary soffit controller) to customize it for this holiday.",
+            value: "",
+            onChange: (lid) => {
+              if (!lid) return;
+              if (!overrides[lid]) {
+                this._setHolidayLightOverride(lid, d.light_mode || "rgb");
+              }
+              this._expandedHolidayLightOverride = lid;
+            },
+            domains: ["light"],
+            placeholder: "Choose a light to customize...",
+          })}
+        </div>
+      </div>
+    `;
+  }
+
   _renderModalHolidayTab(leafToRoom = {}, leafGroupName = {}) {
+    if (this._editingHolidayId !== null && this._editingHolidayDraft) {
+      return this._renderHolidayEditorView();
+    }
     const wsHoliday = this._wsData?.holiday_exterior;
     const fallbackHoliday = this._getFallbackHolidayState();
     const holidayInfo = {
@@ -4543,6 +5606,17 @@ class PassableLightingCard extends LitElement {
             `
           : ""}
 
+        <div class="holiday-catalog-header">
+          <span>Holiday Catalog &amp; Per-Light Presets</span>
+          <button
+            type="button"
+            class="catalog-btn primary"
+            @click=${(ev) => this._openHolidayEditor(null, ev)}
+          >
+            + Add Holiday
+          </button>
+        </div>
+
         <div class="holiday-catalog-list">
           ${catalog.map((h) => {
             const isSel = active && (active.id === h.id || active.name === h.name);
@@ -4560,10 +5634,22 @@ class PassableLightingCard extends LitElement {
                         ? html`<span class="holiday-cat-dates">· ${h.start_date}–${h.end_date}</span>`
                         : ""}
                     </div>
-                    <div class="holiday-cat-sub">${h.phrase || h.light_mode}</div>
+                    <div class="holiday-cat-sub">
+                      ${h.phrase || h.light_mode}
+                      ${Number(h.override_count || 0) > 0
+                        ? html`<span class="holiday-cat-ov-tag">· ${h.override_count} custom light(s)</span>`
+                        : ""}
+                    </div>
                   </div>
                 </div>
                 <div class="holiday-cat-actions">
+                  <button
+                    type="button"
+                    class="catalog-btn"
+                    @click=${(ev) => this._openHolidayEditor(h, ev)}
+                  >
+                    Edit
+                  </button>
                   <button
                     type="button"
                     class="catalog-btn"
@@ -9474,8 +10560,171 @@ class PassableLightingCard extends LitElement {
         font-size: 11.5px;
         color: var(--secondary-text-color);
       }
+      .holiday-catalog-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 4px 0 8px;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--secondary-text-color);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .holiday-cat-ov-tag {
+        color: var(--primary-color, #3b82f6);
+        font-weight: 600;
+        margin-left: 4px;
+      }
+      .holiday-mode-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .holiday-mode-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .holiday-chip-pick-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-bottom: 4px;
+      }
+      .holiday-mini-chip {
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.28));
+        background: var(--card-background-color, rgba(128, 128, 128, 0.08));
+        color: var(--primary-text-color);
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .holiday-mini-chip.active {
+        border-color: var(--primary-color, #3b82f6);
+        background: rgba(var(--rgb-primary-color, 59, 130, 246), 0.2);
+        font-weight: 700;
+      }
+      .holiday-light-ov-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .holiday-light-ov-item {
+        border-radius: 10px;
+        border: 1px solid var(--divider-color, rgba(128, 128, 128, 0.25));
+        background: rgba(128, 128, 128, 0.05);
+        overflow: hidden;
+      }
+      .holiday-light-ov-item.customized {
+        border-color: rgba(var(--rgb-primary-color, 59, 130, 246), 0.45);
+        background: rgba(var(--rgb-primary-color, 59, 130, 246), 0.06);
+      }
+      .holiday-light-ov-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 9px 11px;
+        cursor: pointer;
+      }
+      .holiday-light-ov-info {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .holiday-light-ov-name {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--primary-text-color);
+      }
+      .holiday-light-ov-id {
+        font-size: 10.5px;
+        color: var(--secondary-text-color);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .holiday-light-ov-right {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+      .holiday-ov-pill {
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: rgba(148, 163, 184, 0.16);
+        color: var(--secondary-text-color);
+        max-width: 170px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .holiday-ov-pill.active {
+        background: rgba(var(--rgb-primary-color, 59, 130, 246), 0.2);
+        color: var(--primary-color, #60a5fa);
+      }
+      .holiday-cap-tag {
+        padding: 1px 6px;
+        border-radius: 6px;
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        background: rgba(168, 85, 247, 0.18);
+        color: #c084fc;
+      }
+      .holiday-cap-tag.wled {
+        background: rgba(16, 185, 129, 0.2);
+        color: #34d399;
+      }
+      .holiday-light-ov-body {
+        padding: 10px 11px 12px;
+        border-top: 1px solid var(--divider-color, rgba(128, 128, 128, 0.18));
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .holiday-reset-ov-btn {
+        border: 1px solid rgba(239, 68, 68, 0.35);
+        background: rgba(239, 68, 68, 0.12);
+        color: #f87171;
+        border-radius: 7px;
+        padding: 4px 9px;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .holiday-delete-btn {
+        border: 1px solid rgba(239, 68, 68, 0.35);
+        background: rgba(239, 68, 68, 0.12);
+        color: #f87171;
+        border-radius: 8px;
+        padding: 6px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .holiday-delete-btn.confirm {
+        background: #dc2626;
+        border-color: #dc2626;
+        color: #ffffff;
+      }
 
       @media (max-width: 768px) {
+        .holiday-mode-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
         .popup-overlay {
           align-items: flex-end;
           padding: 0;

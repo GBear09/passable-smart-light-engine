@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import logging
 import math
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from homeassistant.components import recorder, websocket_api
@@ -98,6 +99,16 @@ from .const import (
     LATE_NIGHT_MODE_DATETIME_HELPER,
     LATE_NIGHT_MODE_ENTITY_STATE,
     LATE_NIGHT_MODE_FIXED_TIME,
+    LIGHT_MODE_COLOR_TEMP,
+    LIGHT_MODE_DEFAULT,
+    LIGHT_MODE_EFFECT,
+    LIGHT_MODE_HA_SCENE,
+    LIGHT_MODE_HUE_SCENE,
+    LIGHT_MODE_OFF,
+    LIGHT_MODE_RGB,
+    LIGHT_MODE_WLED_PRESET,
+    LIGHT_MODES,
+    PER_LIGHT_MODES,
     RESET_TYPES,
 )
 from .engine import (
@@ -111,6 +122,7 @@ from .engine import (
     get_light_members,
     normalize_late_night_mode,
 )
+from .holiday_lighting import build_light_capabilities_map
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -153,9 +165,21 @@ def _find_controller_and_entry(
 
 
 def _serialize_holiday(holiday: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Serialize a holiday catalog entry into a concise JSON-safe dict."""
+    """Serialize a holiday catalog entry including per-light overrides into a JSON-safe dict."""
     if not holiday:
         return None
+    raw_overrides = holiday.get("light_overrides")
+    light_overrides = (
+        {str(k): dict(v) for k, v in raw_overrides.items() if isinstance(v, dict)}
+        if isinstance(raw_overrides, dict)
+        else {}
+    )
+    raw_rgb = holiday.get("rgb_color", [255, 140, 0])
+    rgb_color = (
+        [int(raw_rgb[0]), int(raw_rgb[1]), int(raw_rgb[2])]
+        if isinstance(raw_rgb, (list, tuple)) and len(raw_rgb) >= 3
+        else [255, 140, 0]
+    )
     return {
         "id": holiday.get("id"),
         "name": holiday.get("name"),
@@ -166,7 +190,27 @@ def _serialize_holiday(holiday: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
         "phrase": holiday.get("phrase", ""),
         "theme_color": holiday.get("theme_color", "#b45f06"),
         "light_mode": holiday.get("light_mode", "rgb"),
+        "hue_scene": holiday.get("hue_scene", "") or "",
+        "dynamic_scene": bool(holiday.get("dynamic_scene", True)),
+        "ha_scene": holiday.get("ha_scene", "") or "",
+        "wled_preset_entity": holiday.get("wled_preset_entity", "") or "",
+        "wled_preset": holiday.get("wled_preset", "") or "",
+        "wled_palette_entity": holiday.get("wled_palette_entity", "") or "",
+        "wled_palette": holiday.get("wled_palette", "") or "",
+        "effect": holiday.get("effect", "") or "",
+        "fallback_effect": holiday.get("fallback_effect", "") or "",
+        "rgb_color": rgb_color,
+        "color_temp_kelvin": int(holiday.get("color_temp_kelvin", 2200)),
+        "brightness_pct": int(holiday.get("brightness_pct", 100)),
         "decorations_on": bool(holiday.get("decorations_on", True)),
+        "participating_lights": list(holiday.get("participating_lights") or []),
+        "participating_decorations": list(holiday.get("participating_decorations") or []),
+        "light_overrides": light_overrides,
+        "override_count": sum(
+            1
+            for ov in light_overrides.values()
+            if ov.get("light_mode", LIGHT_MODE_DEFAULT) != LIGHT_MODE_DEFAULT
+        ),
     }
 
 
@@ -249,7 +293,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
     engine: Optional[PassableLightingEngine] = data.get("engine")
     if not engine:
         return {
-            "version": data.get("version") or "2.11.0",
+            "version": data.get("version") or "2.12.0",
             "summary": {},
             "rooms": [],
             "holiday_exterior": {},
@@ -595,6 +639,8 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
         "exterior_lights": [],
         "active_lights": [],
         "active_decorations": [],
+        "default_lights": [],
+        "light_capabilities": {},
         "catalog": [],
     }
     holiday_coord = engine.holiday_lighting
@@ -620,6 +666,8 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
                 "exterior_lights": holiday_coord.resolve_exterior_lights(),
                 "active_lights": holiday_coord.active_lights,
                 "active_decorations": holiday_coord.active_decorations,
+                "default_lights": holiday_coord.resolve_participating_lights(None),
+                "light_capabilities": build_light_capabilities_map(hass),
                 "catalog": catalog,
             }
         except Exception as err:
@@ -664,7 +712,7 @@ def build_engine_snapshot(hass: HomeAssistant) -> Dict[str, Any]:
         summary_payload = {}
 
     return {
-        "version": data.get("version") or "2.11.0",
+        "version": data.get("version") or "2.12.0",
         "summary": summary_payload,
         "rooms": rooms_payload,
         "holiday_exterior": holiday_payload,
@@ -693,6 +741,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_reset_learning_data)
     websocket_api.async_register_command(hass, ws_preview_holiday)
     websocket_api.async_register_command(hass, ws_apply_holiday)
+    websocket_api.async_register_command(hass, ws_save_holiday)
+    websocket_api.async_register_command(hass, ws_delete_holiday)
     domain_data["websocket_registered"] = True
 
 
@@ -1384,6 +1434,258 @@ async def ws_apply_holiday(
             "holiday_id": holiday_obj.get("id") if holiday_obj else None,
         },
     )
+
+
+def _validate_ws_mm_dd(val: Any) -> bool:
+    """Validate an MM-DD calendar date string."""
+    if not isinstance(val, str):
+        return False
+    parts = val.strip().split("-")
+    if len(parts) != 2:
+        return False
+    try:
+        month = int(parts[0])
+        day = int(parts[1])
+    except ValueError:
+        return False
+    return 1 <= month <= 12 and 1 <= day <= 31
+
+
+def _normalize_ws_rgb(raw_rgb: Any, fallback: Optional[List[int]] = None) -> List[int]:
+    """Normalize an RGB color triplet to 0..255 integers."""
+    base = fallback if isinstance(fallback, (list, tuple)) and len(fallback) >= 3 else [255, 140, 0]
+    if isinstance(raw_rgb, (list, tuple)) and len(raw_rgb) >= 3:
+        try:
+            return [
+                max(0, min(255, int(raw_rgb[0]))),
+                max(0, min(255, int(raw_rgb[1]))),
+                max(0, min(255, int(raw_rgb[2]))),
+            ]
+        except (TypeError, ValueError):
+            pass
+    return [int(base[0]), int(base[1]), int(base[2])]
+
+
+def _normalize_ws_light_cfg(
+    raw: Mapping[str, Any],
+    base: Optional[Mapping[str, Any]] = None,
+    *,
+    is_override: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate and normalize a holiday or per-light override lighting configuration."""
+    b = base or {}
+    allowed_modes = PER_LIGHT_MODES if is_override else LIGHT_MODES
+    default_mode = LIGHT_MODE_DEFAULT if is_override else LIGHT_MODE_RGB
+    mode = str(raw.get("light_mode", b.get("light_mode", default_mode)) or default_mode).strip()
+    if mode not in allowed_modes:
+        return None, f"Unsupported light mode '{mode}'."
+
+    if is_override and mode == LIGHT_MODE_DEFAULT:
+        return None, None
+
+    if is_override and mode == LIGHT_MODE_OFF:
+        return {"light_mode": LIGHT_MODE_OFF}, None
+
+    hue_scene = str(raw.get("hue_scene", b.get("hue_scene", "")) or "").strip()
+    ha_scene = str(raw.get("ha_scene", b.get("ha_scene", "")) or "").strip()
+    wled_preset_entity = str(
+        raw.get("wled_preset_entity", b.get("wled_preset_entity", "")) or ""
+    ).strip()
+    wled_preset = str(raw.get("wled_preset", b.get("wled_preset", "")) or "").strip()
+    wled_palette_entity = str(
+        raw.get("wled_palette_entity", b.get("wled_palette_entity", "")) or ""
+    ).strip()
+    wled_palette = str(raw.get("wled_palette", b.get("wled_palette", "")) or "").strip()
+    effect = str(raw.get("effect", b.get("effect", "")) or "").strip()
+    fallback_effect = str(
+        raw.get("fallback_effect", b.get("fallback_effect", "")) or ""
+    ).strip()
+
+    if mode == LIGHT_MODE_HUE_SCENE and not hue_scene:
+        return None, "Please select a Hue Scene."
+    if mode == LIGHT_MODE_HA_SCENE and not ha_scene:
+        return None, "Please select a Home Assistant Scene or Script."
+    if mode == LIGHT_MODE_WLED_PRESET and not wled_preset:
+        return None, "Please enter or select a WLED / Soffit Preset name."
+    if mode == LIGHT_MODE_EFFECT and not effect:
+        return None, "Please enter or select a bulb / firmware Effect."
+
+    try:
+        brightness_pct = max(
+            1, min(100, int(raw.get("brightness_pct", b.get("brightness_pct", 100))))
+        )
+    except (TypeError, ValueError):
+        brightness_pct = 100
+
+    try:
+        color_temp_kelvin = max(
+            1500,
+            min(6500, int(raw.get("color_temp_kelvin", b.get("color_temp_kelvin", 2200)))),
+        )
+    except (TypeError, ValueError):
+        color_temp_kelvin = 2200
+
+    cfg: Dict[str, Any] = {
+        "light_mode": mode,
+        "hue_scene": hue_scene,
+        "dynamic_scene": bool(raw.get("dynamic_scene", b.get("dynamic_scene", True))),
+        "ha_scene": ha_scene,
+        "wled_preset_entity": wled_preset_entity,
+        "wled_preset": wled_preset,
+        "wled_palette_entity": wled_palette_entity,
+        "wled_palette": wled_palette,
+        "effect": effect,
+        "fallback_effect": fallback_effect,
+        "rgb_color": _normalize_ws_rgb(
+            raw.get("rgb_color"),
+            b.get("rgb_color") if isinstance(b.get("rgb_color"), list) else None,
+        ),
+        "color_temp_kelvin": color_temp_kelvin,
+        "brightness_pct": brightness_pct,
+    }
+
+    for num_key in ("effect_speed", "effect_intensity"):
+        raw_num = raw.get(num_key, b.get(num_key))
+        if raw_num is not None and raw_num != "":
+            try:
+                cfg[num_key] = float(raw_num)
+            except (TypeError, ValueError):
+                pass
+
+    return cfg, None
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/save_holiday",
+        vol.Required("holiday"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_save_holiday(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    """Create or update a holiday configuration including per-light overrides."""
+    data = hass.data.get(DOMAIN, {})
+    holiday_store = data.get("holiday_store")
+    holiday_coord = data.get("holiday_coordinator")
+    if not holiday_store:
+        connection.send_error(msg["id"], "not_found", "Holiday Store is not loaded.")
+        return
+
+    raw = msg.get("holiday") or {}
+    name = str(raw.get("name") or "").strip()
+    if not name:
+        connection.send_error(msg["id"], "invalid_format", "Holiday name is required.")
+        return
+
+    start_date = str(raw.get("start_date") or "").strip()
+    end_date = str(raw.get("end_date") or "").strip()
+    if not _validate_ws_mm_dd(start_date) or not _validate_ws_mm_dd(end_date):
+        connection.send_error(
+            msg["id"], "invalid_format", "Start and end dates must be in MM-DD format."
+        )
+        return
+
+    raw_id = str(raw.get("id") or "").strip()
+    if raw_id:
+        h_id = raw_id
+    else:
+        base_slug = re.sub(r"[^a-z0-9]+", "_", name.replace("'", "").lower()).strip("_") or "custom_holiday"
+        h_id = base_slug
+        suffix = 2
+        while h_id in holiday_store.holidays:
+            h_id = f"{base_slug}_{suffix}"
+            suffix += 1
+
+    curr_holiday = holiday_store.holidays.get(h_id, {})
+    base_cfg, err_msg = _normalize_ws_light_cfg(raw, curr_holiday, is_override=False)
+    if err_msg or base_cfg is None:
+        connection.send_error(msg["id"], "invalid_format", err_msg or "Invalid lighting mode configuration.")
+        return
+
+    raw_overrides = raw.get("light_overrides")
+    if raw_overrides is None:
+        raw_overrides = curr_holiday.get("light_overrides") or {}
+    if not isinstance(raw_overrides, dict):
+        connection.send_error(msg["id"], "invalid_format", "light_overrides must be an object.")
+        return
+
+    clean_overrides: Dict[str, Dict[str, Any]] = {}
+    for lid, ov_raw in raw_overrides.items():
+        if not lid or not isinstance(ov_raw, dict):
+            continue
+        ov_cfg, ov_err = _normalize_ws_light_cfg(ov_raw, None, is_override=True)
+        if ov_err:
+            connection.send_error(msg["id"], "invalid_format", f"{lid}: {ov_err}")
+            return
+        if ov_cfg is not None:
+            clean_overrides[str(lid).strip()] = ov_cfg
+
+    part_lights = raw.get("participating_lights", curr_holiday.get("participating_lights", []))
+    part_decos = raw.get("participating_decorations", curr_holiday.get("participating_decorations", []))
+
+    holiday_data = {
+        "id": h_id,
+        "name": name,
+        "enabled": bool(raw.get("enabled", curr_holiday.get("enabled", True))),
+        "start_date": start_date,
+        "end_date": end_date,
+        "icon": str(raw.get("icon", curr_holiday.get("icon", "mdi:calendar-star")) or "mdi:calendar-star").strip(),
+        "phrase": str(raw.get("phrase", curr_holiday.get("phrase", "")) or "").strip(),
+        "theme_color": str(raw.get("theme_color", curr_holiday.get("theme_color", "#9c4600")) or "#9c4600").strip(),
+        **base_cfg,
+        "decorations_on": bool(raw.get("decorations_on", curr_holiday.get("decorations_on", True))),
+        "participating_lights": [str(x).strip() for x in (part_lights or []) if str(x).strip()],
+        "participating_decorations": [str(x).strip() for x in (part_decos or []) if str(x).strip()],
+        "light_overrides": clean_overrides,
+    }
+
+    holiday_store.set_holiday(h_id, holiday_data)
+    await holiday_store.async_save()
+
+    if holiday_coord:
+        holiday_coord._active_holiday = holiday_coord.evaluate_active_holiday()
+        hass.async_create_task(holiday_coord._async_evaluate_schedule_trigger())
+
+    connection.send_result(msg["id"], {"success": True, "holiday_id": h_id})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/delete_holiday",
+        vol.Required("holiday_id"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_delete_holiday(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: Dict[str, Any],
+) -> None:
+    """Delete a holiday from the store and refresh the holiday coordinator."""
+    data = hass.data.get(DOMAIN, {})
+    holiday_store = data.get("holiday_store")
+    holiday_coord = data.get("holiday_coordinator")
+    if not holiday_store:
+        connection.send_error(msg["id"], "not_found", "Holiday Store is not loaded.")
+        return
+
+    holiday_id = str(msg.get("holiday_id") or "").strip()
+    if holiday_id not in holiday_store.holidays:
+        connection.send_error(msg["id"], "not_found", f"Holiday '{holiday_id}' was not found.")
+        return
+
+    holiday_store.delete_holiday(holiday_id)
+    await holiday_store.async_save()
+
+    if holiday_coord:
+        holiday_coord._active_holiday = holiday_coord.evaluate_active_holiday()
+        hass.async_create_task(holiday_coord._async_evaluate_schedule_trigger())
+
+    connection.send_result(msg["id"], {"success": True, "holiday_id": holiday_id})
 
 
 # ==========================================

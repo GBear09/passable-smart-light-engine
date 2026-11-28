@@ -586,24 +586,90 @@
       },
       "holiday_edit_mode": {
         "title": "Edit Holiday — Step 2: {holiday_name} ({mode_name})",
-        "description": "Configure the lighting settings for **{mode_name}**.",
+        "description": "Configure the default holiday lighting settings for **{mode_name}**. Optionally enable **Customize Individual Lights** below to give specific lights (such as your porch light or Lumary soffit lights) their own independent mode or color.",
         "data": {
           "hue_scene": "Philips Hue Scene",
           "dynamic_scene": "Enable Dynamic Hue Scene Animation",
-          "effect": "Bulb Firmware Effect",
+          "ha_scene": "Home Assistant Scene / Tuya Tap-to-Run / Script",
+          "wled_preset_entity": "WLED / Soffit Preset Select Entity (Auto-detected if blank)",
+          "wled_preset": "Preset / Playlist Name (Select or Type)",
+          "effect": "Bulb / WLED Firmware Effect",
+          "wled_palette_entity": "WLED Color Palette Select Entity (Optional)",
+          "wled_palette": "WLED Color Palette (Optional)",
           "fallback_effect": "Fallback Bulb Effect (Optional, if primary unavailable)",
           "rgb_color": "RGB Color (or Fallback for Non-Effect/Non-Hue Bulbs)",
           "color_temp_kelvin": "Color Temperature (Kelvin)",
-          "brightness_pct": "Brightness %"
+          "brightness_pct": "Brightness %",
+          "customize_individual_lights": "Customize Individual Lights Independently"
         },
         "data_description": {
           "hue_scene": "Select the Home Assistant scene entity for this holiday.",
           "dynamic_scene": "Enables dynamic animation when activating Philips Hue scenes.",
-          "effect": "Firmware effect sent to supporting lights (e.g. fire, candle, prism).",
+          "ha_scene": "Select any HA scene or script (including Lumary/Tuya Tap-to-Run scenes).",
+          "wled_preset_entity": "Select entity on your WLED/Lumary controller (e.g. select.soffit_preset). Leave blank to auto-detect per light.",
+          "wled_preset": "Exact WLED preset/playlist name or number to activate.",
+          "effect": "Firmware effect sent to supporting lights (e.g. fire, candle, prism, or WLED chases).",
+          "wled_palette_entity": "Optional WLED color palette select entity (e.g. select.soffit_color_palette).",
+          "wled_palette": "Optional WLED color palette applied alongside the firmware effect.",
           "fallback_effect": "Used if a fixture cannot activate the primary Hue scene or effect.",
           "rgb_color": "Color applied directly in RGB mode, or as a fallback if a bulb lacks scenes/effects.",
           "color_temp_kelvin": "Color temperature applied in Kelvin mode.",
-          "brightness_pct": "Target brightness percentage for the holiday."
+          "brightness_pct": "Target brightness percentage for the holiday.",
+          "customize_individual_lights": "Enable to configure per-light overrides (e.g. Porch = Hue Flame, Side Light = Purple, Soffit = WLED Preset)."
+        }
+      },
+      "holiday_light_select": {
+        "title": "Customize Individual Lights — {holiday_name}",
+        "description": "Choose a light to customize independently, add any extra light, or select **Save & Finish Holiday** when done.\n\n**Current Per-Light Setup:**\n{overrides_summary}",
+        "data": {
+          "selected_light_action": "Select Light to Customize (or Save & Finish)",
+          "add_extra_light": "Add Any Light to Customize for This Holiday (Optional)"
+        },
+        "data_description": {
+          "selected_light_action": "Pick a participating light to edit its independent mode, or choose Save & Finish.",
+          "add_extra_light": "Pick any light entity (such as your Lumary soffit lights) to customize and include it in this holiday."
+        }
+      },
+      "holiday_light_mode": {
+        "title": "Light Mode for {light_name}",
+        "description": "Choose how **{light_name}** (`{light_entity}`) should behave during **{holiday_name}**.",
+        "data": {
+          "light_mode": "Lighting Mode for This Light"
+        },
+        "data_description": {
+          "light_mode": "Select 'Use Holiday Default' to inherit the holiday's main settings, 'Keep Light OFF', or any independent mode (Hue Scene, WLED Preset, HA/Tuya Scene, Effect, RGB, or Kelvin)."
+        }
+      },
+      "holiday_light_details": {
+        "title": "{light_name} — {mode_name}",
+        "description": "Configure **{mode_name}** for **{light_name}** during **{holiday_name}**.",
+        "data": {
+          "hue_scene": "Philips Hue Scene",
+          "dynamic_scene": "Enable Dynamic Hue Scene Animation",
+          "ha_scene": "Home Assistant Scene / Tuya Tap-to-Run / Script",
+          "wled_preset_entity": "WLED / Soffit Preset Select Entity (Auto-detected if blank)",
+          "wled_preset": "Preset / Playlist Name (Select or Type)",
+          "effect": "Bulb / WLED Firmware Effect",
+          "wled_palette_entity": "WLED Color Palette Select Entity (Optional)",
+          "wled_palette": "WLED Color Palette (Optional)",
+          "fallback_effect": "Fallback Bulb Effect (Optional)",
+          "rgb_color": "RGB Color",
+          "color_temp_kelvin": "Color Temperature (Kelvin)",
+          "brightness_pct": "Brightness %"
+        },
+        "data_description": {
+          "hue_scene": "Hue scene activated for this light.",
+          "dynamic_scene": "Enables dynamic animation on Philips Hue scenes.",
+          "ha_scene": "HA scene or script (including Lumary/Tuya Tap-to-Run scenes) activated for this light.",
+          "wled_preset_entity": "Companion select entity for WLED/Lumary presets (auto-detected when left blank).",
+          "wled_preset": "WLED preset or playlist option to select.",
+          "effect": "Firmware effect for this light.",
+          "wled_palette_entity": "Companion WLED color palette select entity (auto-detected when left blank).",
+          "wled_palette": "WLED color palette applied with the effect.",
+          "fallback_effect": "Fallback effect if the primary scene/effect is unsupported.",
+          "rgb_color": "RGB color for this light.",
+          "color_temp_kelvin": "White color temperature (Kelvin) for this light.",
+          "brightness_pct": "Brightness percentage for this light."
         }
       },
       "holiday_reset": {
@@ -622,6 +688,8 @@
       "missing_notification_trigger": "Please select a Notification Trigger Entity.",
       "missing_notification_light": "Please select a Target Notification Bulb.",
       "missing_hue_scene": "Please select a Philips Hue Scene entity.",
+      "missing_ha_scene": "Please select a Home Assistant Scene or Script entity.",
+      "missing_wled_preset": "Please select or enter a WLED Preset / Playlist name.",
       "missing_bulb_effect": "Please select or enter a Bulb Firmware Effect."
     }
   },

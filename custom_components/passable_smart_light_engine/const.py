@@ -297,9 +297,21 @@ MODE_HOLIDAY = "holiday"
 MODE_EXTERIOR_BASELINE = "exterior_baseline"
 LIGHT_MODE_HUE_SCENE = "hue_scene"
 LIGHT_MODE_EFFECT = "effect"
+LIGHT_MODE_WLED_PRESET = "wled_preset"
+LIGHT_MODE_HA_SCENE = "ha_scene"
 LIGHT_MODE_RGB = "rgb"
 LIGHT_MODE_COLOR_TEMP = "color_temp"
-LIGHT_MODES = [LIGHT_MODE_HUE_SCENE, LIGHT_MODE_EFFECT, LIGHT_MODE_RGB, LIGHT_MODE_COLOR_TEMP]
+LIGHT_MODE_DEFAULT = "default"
+LIGHT_MODE_OFF = "off"
+LIGHT_MODES = [
+    LIGHT_MODE_HUE_SCENE,
+    LIGHT_MODE_EFFECT,
+    LIGHT_MODE_WLED_PRESET,
+    LIGHT_MODE_HA_SCENE,
+    LIGHT_MODE_RGB,
+    LIGHT_MODE_COLOR_TEMP,
+]
+PER_LIGHT_MODES = [LIGHT_MODE_DEFAULT, *LIGHT_MODES, LIGHT_MODE_OFF]
 
 # Holiday Lighting entity IDs & unique IDs
 HOLIDAY_LIGHTING_MASTER_SWITCH_ENTITY_ID = "switch.holiday_lighting"
@@ -342,6 +354,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": True,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
     "christmas": {
         "id": "christmas",
@@ -362,6 +375,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": True,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
     "thanksgiving": {
         "id": "thanksgiving",
@@ -382,6 +396,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": True,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
     "new_years_eve": {
         "id": "new_years_eve",
@@ -402,6 +417,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": True,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
     "july_4th": {
         "id": "july_4th",
@@ -422,6 +438,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": False,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
     "memorial_day": {
         "id": "memorial_day",
@@ -442,6 +459,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": False,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
     "labor_day": {
         "id": "labor_day",
@@ -462,6 +480,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": False,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
     "valentines_day": {
         "id": "valentines_day",
@@ -482,6 +501,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": False,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
     "st_patricks_day": {
         "id": "st_patricks_day",
@@ -502,6 +522,7 @@ DEFAULT_HOLIDAYS = {
         "decorations_on": False,
         "participating_lights": [],
         "participating_decorations": [],
+        "light_overrides": {},
     },
 }
 

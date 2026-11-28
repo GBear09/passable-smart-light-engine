@@ -82,13 +82,17 @@ from .const import (
     HOLIDAY_STORAGE_KEY,
     HOLIDAY_STORAGE_VERSION,
     LIGHT_MODE_COLOR_TEMP,
+    LIGHT_MODE_DEFAULT,
     LIGHT_MODE_EFFECT,
+    LIGHT_MODE_HA_SCENE,
     LIGHT_MODE_HUE_SCENE,
+    LIGHT_MODE_OFF,
     LIGHT_MODE_RGB,
+    LIGHT_MODE_WLED_PRESET,
     MODE_EXTERIOR_BASELINE,
     MODE_HOLIDAY,
 )
-from .engine import clamp_kelvin_for_entity
+from .engine import clamp_kelvin_for_entity, get_light_members
 
 if TYPE_CHECKING:
     from .engine import PassableLightingEngine, RoomController
@@ -114,6 +118,142 @@ def is_date_in_range(now_m: int, now_d: int, sm: int, sd: int, em: int, ed: int)
         return start <= curr <= end
     # Range wraps around the new year (e.g., Dec 31 to Jan 1)
     return curr >= start or curr <= end
+
+
+def _extract_companions_from_siblings(
+    hass: HomeAssistant, light_entity_id: str, sibling_entries: List[Any]
+) -> Dict[str, Any]:
+    """Extract firmware effects and companion WLED/Tuya select/number entities for a light."""
+    st = hass.states.get(light_entity_id)
+    raw_effects = st.attributes.get("effect_list") if st else None
+    effects: List[str] = []
+    if isinstance(raw_effects, (list, tuple)):
+        for eff in raw_effects:
+            if eff and isinstance(eff, str):
+                s_eff = eff.strip()
+                if s_eff and s_eff.lower() not in ("none", "off"):
+                    effects.append(s_eff)
+
+    preset_select: Optional[str] = None
+    playlist_select: Optional[str] = None
+    scene_select: Optional[str] = None
+    palette_select: Optional[str] = None
+    speed_number: Optional[str] = None
+    intensity_number: Optional[str] = None
+
+    for ent in sibling_entries:
+        eid = getattr(ent, "entity_id", None)
+        if not eid or getattr(ent, "disabled", False):
+            continue
+        dom = getattr(ent, "domain", None) or eid.split(".")[0]
+        key_text = f"{eid} {getattr(ent, 'unique_id', '') or ''}".lower()
+
+        if dom == "select":
+            if "preset" in key_text and not preset_select:
+                preset_select = eid
+            elif "playlist" in key_text and not playlist_select:
+                playlist_select = eid
+            elif ("palette" in key_text or "color_palette" in key_text) and not palette_select:
+                palette_select = eid
+            elif ("scene" in key_text or "work_mode" in key_text) and not scene_select:
+                scene_select = eid
+        elif dom == "number":
+            if "speed" in key_text and not speed_number:
+                speed_number = eid
+            elif "intensity" in key_text and not intensity_number:
+                intensity_number = eid
+
+    def _read_options(select_id: Optional[str]) -> List[str]:
+        if not select_id:
+            return []
+        sel_st = hass.states.get(select_id)
+        opts = sel_st.attributes.get("options") if sel_st else None
+        if not isinstance(opts, (list, tuple)):
+            return []
+        return [str(o).strip() for o in opts if o is not None and str(o).strip()]
+
+    presets: List[str] = []
+    for cand_sel in (preset_select, playlist_select, scene_select):
+        for opt in _read_options(cand_sel):
+            if opt not in presets:
+                presets.append(opt)
+
+    palettes = _read_options(palette_select)
+
+    return {
+        "effects": effects,
+        "preset_select": preset_select,
+        "playlist_select": playlist_select,
+        "scene_select": scene_select,
+        "presets": presets,
+        "palette_select": palette_select,
+        "palettes": palettes,
+        "speed_number": speed_number,
+        "intensity_number": intensity_number,
+    }
+
+
+def discover_light_companions(hass: HomeAssistant, light_entity_id: str) -> Dict[str, Any]:
+    """Discover firmware effects and sibling WLED/Tuya companion entities on the same HA device."""
+    sibling_entries: List[Any] = []
+    try:
+        reg = er.async_get(hass)
+        if reg and getattr(reg, "entities", None):
+            ent_entry = reg.async_get(light_entity_id) if hasattr(reg, "async_get") else None
+            if not ent_entry:
+                ent_entry = reg.entities.get(light_entity_id)
+            dev_id = getattr(ent_entry, "device_id", None) if ent_entry else None
+            if dev_id:
+                sibling_entries = [
+                    e for e in reg.entities.values() if getattr(e, "device_id", None) == dev_id
+                ]
+    except Exception:
+        sibling_entries = []
+
+    return _extract_companions_from_siblings(hass, light_entity_id, sibling_entries)
+
+
+def build_light_capabilities_map(hass: HomeAssistant) -> Dict[str, Dict[str, Any]]:
+    """Build capability & companion entity map across all light entities in Home Assistant."""
+    by_device: Dict[str, List[Any]] = {}
+    light_to_device: Dict[str, str] = {}
+    try:
+        reg = er.async_get(hass)
+        if reg and getattr(reg, "entities", None):
+            for ent in reg.entities.values():
+                if getattr(ent, "disabled", False):
+                    continue
+                dev_id = getattr(ent, "device_id", None)
+                if not dev_id:
+                    continue
+                by_device.setdefault(dev_id, []).append(ent)
+                if getattr(ent, "domain", None) == "light":
+                    light_to_device[ent.entity_id] = dev_id
+    except Exception:
+        pass
+
+    all_light_ids: Set[str] = set(light_to_device.keys())
+    try:
+        for st in hass.states.async_all("light"):
+            if st and getattr(st, "entity_id", None):
+                all_light_ids.add(st.entity_id)
+    except Exception:
+        pass
+
+    capabilities: Dict[str, Dict[str, Any]] = {}
+    for lid in sorted(all_light_ids):
+        dev_id = light_to_device.get(lid)
+        siblings = by_device.get(dev_id, []) if dev_id else []
+        info = _extract_companions_from_siblings(hass, lid, siblings)
+        if (
+            info["effects"]
+            or info["preset_select"]
+            or info["playlist_select"]
+            or info["scene_select"]
+            or info["palette_select"]
+        ):
+            capabilities[lid] = info
+    return capabilities
 
 
 class HolidayStore:
@@ -203,6 +343,9 @@ class HolidayStore:
             if not saved_holidays:
                 self._data["holidays"] = copy.deepcopy(DEFAULT_HOLIDAYS)
             else:
+                for h_obj in saved_holidays.values():
+                    if isinstance(h_obj, dict) and not isinstance(h_obj.get("light_overrides"), dict):
+                        h_obj["light_overrides"] = {}
                 self._data["holidays"] = saved_holidays
 
             _LOGGER.info(
@@ -482,7 +625,7 @@ class HolidayLightingCoordinator:
         return sorted(list(resolved))
 
     def resolve_participating_lights(self, holiday: Optional[Dict[str, Any]] = None) -> List[str]:
-        """Resolve all participating lights for a given holiday, falling back to exterior lights."""
+        """Resolve all participating lights for a given holiday, expanding groups if members are overridden."""
         lights = (holiday.get("participating_lights") if holiday else None) or self.store.options.get(
             CONF_HOLIDAY_GLOBAL_LIGHTS, DEFAULT_HOLIDAY_GLOBAL_LIGHTS
         )
@@ -498,14 +641,40 @@ class HolidayLightingCoordinator:
         target_label = self.store.options.get(CONF_HOLIDAY_GLOBAL_LABEL, DEFAULT_HOLIDAY_GLOBAL_LABEL)
         if target_label:
             reg = er.async_get(self.hass)
-            for entry in reg.entities.values():
-                if entry.domain == "light" and not entry.disabled and target_label in entry.labels:
-                    resolved.add(entry.entity_id)
+            if reg and getattr(reg, "entities", None):
+                for entry in reg.entities.values():
+                    if entry.domain == "light" and not entry.disabled and target_label in entry.labels:
+                        resolved.add(entry.entity_id)
 
         # Fallback to exterior lights if no custom lights were set
         if not resolved:
             for ext in self.resolve_exterior_lights():
                 resolved.add(ext)
+
+        overrides = holiday.get("light_overrides") if isinstance(holiday, dict) else None
+        active_override_keys: Set[str] = set()
+        if isinstance(overrides, dict):
+            for ov_id, ov_cfg in overrides.items():
+                if (
+                    isinstance(ov_id, str)
+                    and ov_id.strip()
+                    and isinstance(ov_cfg, dict)
+                    and ov_cfg.get("light_mode", LIGHT_MODE_DEFAULT) != LIGHT_MODE_DEFAULT
+                ):
+                    clean_id = ov_id.strip()
+                    active_override_keys.add(clean_id)
+                    resolved.add(clean_id)
+
+        # Disaggregate any light group whose leaf member has an independent per-light override
+        if active_override_keys:
+            expanded_resolved: Set[str] = set()
+            for lid in resolved:
+                members = get_light_members(self.hass, lid)
+                if len(members) > 1 and any(m in active_override_keys for m in members):
+                    expanded_resolved.update(members)
+                else:
+                    expanded_resolved.add(lid)
+            resolved = expanded_resolved
 
         return sorted(list(resolved))
 
@@ -802,6 +971,26 @@ class HolidayLightingCoordinator:
 
         self._solar_unsub = async_call_later(self.hass, max(2.0, delay), _solar_fired)
 
+    def _inject_solid_reset_if_needed(self, light_id: str, svc_data: Dict[str, Any]) -> None:
+        """Reset animated WLED/bulb effects back to Solid/None when applying static white or RGB."""
+        st = self.hass.states.get(light_id)
+        if not st:
+            return
+        curr_eff = str(st.attributes.get("effect") or "").strip()
+        if not curr_eff or curr_eff.lower() in ("none", "off", "solid"):
+            return
+        eff_list = st.attributes.get("effect_list")
+        if not isinstance(eff_list, (list, tuple)):
+            return
+        for item in eff_list:
+            if isinstance(item, str) and item.strip().lower() == "solid":
+                svc_data["effect"] = item.strip()
+                return
+        for item in eff_list:
+            if isinstance(item, str) and item.strip().lower() in ("none", "off"):
+                svc_data["effect"] = item.strip()
+                return
+
     async def _async_turn_on_exterior_baseline(
         self, lights: Optional[List[str]] = None, context: Optional[Context] = None
     ) -> None:
@@ -839,6 +1028,7 @@ class HolidayLightingCoordinator:
                 ATTR_ENTITY_ID: light_id,
                 "brightness_pct": brightness_pct,
             }
+            self._inject_solid_reset_if_needed(light_id, svc_data)
             clamped_k = clamp_kelvin_for_entity(self.hass, light_id, kelvin)
             if clamped_k is not None:
                 svc_data["color_temp_kelvin"] = clamped_k
@@ -935,7 +1125,7 @@ class HolidayLightingCoordinator:
 
 
     async def async_turn_on_holiday_lighting(self, preview_holiday: Optional[Dict[str, Any]] = None) -> None:
-        """Actuate lights and decorations for the active or preview holiday."""
+        """Actuate lights and decorations for the active or preview holiday with per-light override support."""
         holiday = preview_holiday or self.active_holiday
         if not holiday:
             _LOGGER.debug("PassableSmartLighting: No active holiday to turn on.")
@@ -945,19 +1135,32 @@ class HolidayLightingCoordinator:
         self.engine.register_engine_context(ctx.id, ttl_sec=30.0)
 
         target_lights = self.resolve_participating_lights(holiday)
-        mode = holiday.get("light_mode", LIGHT_MODE_RGB)
-        brightness_pct = int(holiday.get("brightness_pct", 100))
+        overrides = holiday.get("light_overrides") if isinstance(holiday.get("light_overrides"), dict) else {}
+
+        def _effective_light_cfg(lid: str) -> Dict[str, Any]:
+            ov = overrides.get(lid) if overrides else None
+            if isinstance(ov, dict) and ov.get("light_mode", LIGHT_MODE_DEFAULT) != LIGHT_MODE_DEFAULT:
+                return {**holiday, **ov}
+            return holiday
+
+        # Two-pass actuation: run room/area scenes first so per-light overrides in Pass 2 win cleanly
+        scene_modes = (LIGHT_MODE_HUE_SCENE, LIGHT_MODE_HA_SCENE)
+        ordered_lights = sorted(
+            target_lights,
+            key=lambda lid: (0 if _effective_light_cfg(lid).get("light_mode", LIGHT_MODE_RGB) in scene_modes else 1, lid),
+        )
 
         _LOGGER.info(
-            "PassableSmartLighting: Actuating holiday '%s' across %d light(s) using mode '%s'.",
+            "PassableSmartLighting: Actuating holiday '%s' across %d light(s) (default mode '%s', %d per-light override(s)).",
             holiday["name"],
-            len(target_lights),
-            mode,
+            len(ordered_lights),
+            holiday.get("light_mode", LIGHT_MODE_RGB),
+            len([v for v in overrides.values() if isinstance(v, dict) and v.get("light_mode", LIGHT_MODE_DEFAULT) != LIGHT_MODE_DEFAULT]),
         )
 
         activated_scenes: Set[str] = set()
 
-        for light_id in target_lights:
+        for light_id in ordered_lights:
             # Check presence simulation arbitration
             if self.store.options.get(CONF_HOLIDAY_RESPECT_PRESENCE_SIMULATION, True):
                 if self.engine.is_simulating_presence(light_id):
@@ -968,23 +1171,38 @@ class HolidayLightingCoordinator:
                     continue
 
             self._active_lights.add(light_id)
+            eff_cfg = _effective_light_cfg(light_id)
+            mode = eff_cfg.get("light_mode", LIGHT_MODE_RGB)
+            brightness_pct = int(eff_cfg.get("brightness_pct", holiday.get("brightness_pct", 100)))
             success = False
 
+            # Mode 0: Explicitly Keep Off for this holiday
+            if mode == LIGHT_MODE_OFF:
+                try:
+                    await self.hass.services.async_call(
+                        "light",
+                        "turn_off",
+                        {ATTR_ENTITY_ID: light_id},
+                        context=ctx,
+                    )
+                except Exception as err:
+                    _LOGGER.warning("PassableSmartLighting: Failed to turn off overridden light '%s': %s", light_id, err)
+                continue
+
             # Mode 1: Hue Dynamic Scene (activated once per unique scene entity)
-            if mode == LIGHT_MODE_HUE_SCENE and holiday.get("hue_scene"):
-                scene_id = holiday["hue_scene"].strip()
+            if mode == LIGHT_MODE_HUE_SCENE and eff_cfg.get("hue_scene"):
+                scene_id = str(eff_cfg["hue_scene"]).strip()
                 if scene_id in activated_scenes:
                     success = True
                 else:
                     scene_state = self.hass.states.get(scene_id)
                     if scene_state:
                         try:
-                            # Attempt native Hue activate_scene with dynamic=True
                             if self.hass.services.has_service("hue", "activate_scene"):
                                 await self.hass.services.async_call(
                                     "hue",
                                     "activate_scene",
-                                    {"dynamic": bool(holiday.get("dynamic_scene", True))},
+                                    {"dynamic": bool(eff_cfg.get("dynamic_scene", True))},
                                     target={"entity_id": scene_id},
                                     context=ctx,
                                 )
@@ -1002,15 +1220,92 @@ class HolidayLightingCoordinator:
                                 err,
                             )
 
-            # Mode 2: Hardware Bulb Effect (e.g. fire, candle, prism)
+            # Mode 1B: Home Assistant Scene / Tuya Tap-to-Run / Script
+            if not success and mode == LIGHT_MODE_HA_SCENE and eff_cfg.get("ha_scene"):
+                target_scene = str(eff_cfg["ha_scene"]).strip()
+                if target_scene in activated_scenes:
+                    success = True
+                else:
+                    try:
+                        if target_scene.startswith("script."):
+                            await self.hass.services.async_call(
+                                "script", "turn_on", {ATTR_ENTITY_ID: target_scene}, context=ctx
+                            )
+                        else:
+                            await self.hass.services.async_call(
+                                "scene", "turn_on", {ATTR_ENTITY_ID: target_scene}, context=ctx
+                            )
+                        activated_scenes.add(target_scene)
+                        success = True
+                        _LOGGER.debug("PassableSmartLighting: Activated HA scene/script '%s'.", target_scene)
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "PassableSmartLighting: Failed to activate HA scene/script '%s': %s. Falling back.",
+                            target_scene,
+                            err,
+                        )
+
+            # Mode 1C: WLED / Soffit Preset or Playlist (Lumary 3 WLED)
+            if not success and mode == LIGHT_MODE_WLED_PRESET:
+                companions = discover_light_companions(self.hass, light_id)
+                preset_ent = (
+                    str(eff_cfg.get("wled_preset_entity") or "").strip()
+                    or companions.get("preset_select")
+                    or companions.get("playlist_select")
+                    or companions.get("scene_select")
+                )
+                preset_val = str(eff_cfg.get("wled_preset") or "").strip()
+                if preset_ent and preset_val:
+                    try:
+                        await self.hass.services.async_call(
+                            "select",
+                            "select_option",
+                            {ATTR_ENTITY_ID: preset_ent, "option": preset_val},
+                            context=ctx,
+                        )
+                        await self.hass.services.async_call(
+                            "light",
+                            "turn_on",
+                            {ATTR_ENTITY_ID: light_id, "brightness_pct": brightness_pct},
+                            context=ctx,
+                        )
+                        success = True
+                        _LOGGER.debug(
+                            "PassableSmartLighting: Applied WLED preset '%s' via '%s' on '%s'.",
+                            preset_val,
+                            preset_ent,
+                            light_id,
+                        )
+                    except Exception as err:
+                        _LOGGER.warning(
+                            "PassableSmartLighting: Failed to apply WLED preset '%s' on '%s': %s. Falling back.",
+                            preset_val,
+                            light_id,
+                            err,
+                        )
+
+            # Mode 2: Hardware Bulb / WLED Firmware Effect (e.g. fire, candle, prism)
             if not success and (
                 mode == LIGHT_MODE_EFFECT
-                or (mode == LIGHT_MODE_HUE_SCENE and holiday.get("fallback_effect"))
+                or (mode == LIGHT_MODE_HUE_SCENE and eff_cfg.get("fallback_effect"))
             ):
-                effect_name = holiday.get("effect") if mode == LIGHT_MODE_EFFECT else holiday.get("fallback_effect")
+                effect_name = eff_cfg.get("effect") if mode == LIGHT_MODE_EFFECT else eff_cfg.get("fallback_effect")
                 if not effect_name and mode == LIGHT_MODE_EFFECT:
-                    effect_name = holiday.get("fallback_effect")
+                    effect_name = eff_cfg.get("fallback_effect")
                 if effect_name and str(effect_name).strip().lower() not in ("none", "off", ""):
+                    companions = discover_light_companions(self.hass, light_id)
+                    pal_val = str(eff_cfg.get("wled_palette") or "").strip()
+                    pal_ent = str(eff_cfg.get("wled_palette_entity") or "").strip() or companions.get("palette_select")
+                    if pal_ent and pal_val:
+                        try:
+                            await self.hass.services.async_call(
+                                "select",
+                                "select_option",
+                                {ATTR_ENTITY_ID: pal_ent, "option": pal_val},
+                                context=ctx,
+                            )
+                        except Exception as err:
+                            _LOGGER.debug("PassableSmartLighting: Could not set palette '%s' on '%s': %s", pal_val, pal_ent, err)
                     try:
                         await self.hass.services.async_call(
                             "light",
@@ -1022,6 +1317,21 @@ class HolidayLightingCoordinator:
                             },
                             context=ctx,
                         )
+                        for num_key, comp_key in (
+                            ("effect_speed", "speed_number"),
+                            ("effect_intensity", "intensity_number"),
+                        ):
+                            num_ent = companions.get(comp_key)
+                            if eff_cfg.get(num_key) is not None and num_ent:
+                                try:
+                                    await self.hass.services.async_call(
+                                        "number",
+                                        "set_value",
+                                        {ATTR_ENTITY_ID: num_ent, "value": float(eff_cfg[num_key])},
+                                        context=ctx,
+                                    )
+                                except Exception:
+                                    pass
                         success = True
                         _LOGGER.debug("PassableSmartLighting: Applied effect '%s' to '%s'.", effect_name, light_id)
                     except Exception as err:
@@ -1029,12 +1339,13 @@ class HolidayLightingCoordinator:
 
             # Mode 3: Color Temp (Kelvin)
             if not success and mode == LIGHT_MODE_COLOR_TEMP:
-                kelvin = int(holiday.get("color_temp_kelvin", 2000))
+                kelvin = int(eff_cfg.get("color_temp_kelvin", 2000))
                 clamped_k = clamp_kelvin_for_entity(self.hass, light_id, kelvin)
                 svc_data: Dict[str, Any] = {
                     ATTR_ENTITY_ID: light_id,
                     "brightness_pct": brightness_pct,
                 }
+                self._inject_solid_reset_if_needed(light_id, svc_data)
                 if clamped_k is not None:
                     svc_data["color_temp_kelvin"] = clamped_k
                 try:
@@ -1050,16 +1361,18 @@ class HolidayLightingCoordinator:
 
             # Mode 4: Standard RGB Color (Default fallback)
             if not success:
-                rgb = holiday.get("rgb_color", [255, 209, 163])
+                rgb = eff_cfg.get("rgb_color", [255, 209, 163])
+                svc_data = {
+                    ATTR_ENTITY_ID: light_id,
+                    "rgb_color": rgb,
+                    "brightness_pct": brightness_pct,
+                }
+                self._inject_solid_reset_if_needed(light_id, svc_data)
                 try:
                     await self.hass.services.async_call(
                         "light",
                         "turn_on",
-                        {
-                            ATTR_ENTITY_ID: light_id,
-                            "rgb_color": rgb,
-                            "brightness_pct": brightness_pct,
-                        },
+                        svc_data,
                         context=ctx,
                     )
                 except Exception as err:

@@ -1,6 +1,7 @@
 """Config flow and Options flow for Passable Smart Light Engine."""
 
 from collections.abc import Mapping
+import copy
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -150,15 +151,20 @@ from .const import (
     LATE_NIGHT_MODE_ENTITY_STATE,
     LATE_NIGHT_MODE_FIXED_TIME,
     LIGHT_MODE_COLOR_TEMP,
+    LIGHT_MODE_DEFAULT,
     LIGHT_MODE_EFFECT,
+    LIGHT_MODE_HA_SCENE,
     LIGHT_MODE_HUE_SCENE,
+    LIGHT_MODE_OFF,
     LIGHT_MODE_RGB,
+    LIGHT_MODE_WLED_PRESET,
     SECTION_AUXILIARY_TUNING,
     SECTION_BYPASS_ENTITIES,
     SECTION_HARDWARE_SAFEGUARDS,
     SECTION_OVERRIDE_BEHAVIOR,
 )
-from .engine import normalize_late_night_mode
+from .engine import get_light_members, normalize_late_night_mode
+from .holiday_lighting import discover_light_companions
 
 
 class OptionalEntitySelector(selector.EntitySelector):
@@ -575,6 +581,236 @@ def get_available_bulb_effects(
         options.append(selector.SelectOptionDict(value=val, label=lbl))
 
     return options
+
+
+_HOLIDAY_MODE_LABELS: Dict[str, str] = {
+    LIGHT_MODE_DEFAULT: "Use Holiday Default",
+    LIGHT_MODE_HUE_SCENE: "Philips Hue Dynamic Scene",
+    LIGHT_MODE_EFFECT: "Bulb / WLED Firmware Effect (fire, candle, chases)",
+    LIGHT_MODE_WLED_PRESET: "WLED / Soffit Preset or Playlist (Lumary 3 WLED)",
+    LIGHT_MODE_HA_SCENE: "Home Assistant Scene / Tuya Tap-to-Run / Script",
+    LIGHT_MODE_RGB: "Solid RGB Color",
+    LIGHT_MODE_COLOR_TEMP: "Warm / Cool White (Kelvin)",
+    LIGHT_MODE_OFF: "Keep Light OFF for This Holiday",
+}
+
+
+def _holiday_mode_options() -> List[selector.SelectOptionDict]:
+    """Return SelectSelector options for holiday-level lighting modes."""
+    return [
+        selector.SelectOptionDict(value=m, label=_HOLIDAY_MODE_LABELS[m])
+        for m in (
+            LIGHT_MODE_HUE_SCENE,
+            LIGHT_MODE_EFFECT,
+            LIGHT_MODE_WLED_PRESET,
+            LIGHT_MODE_HA_SCENE,
+            LIGHT_MODE_RGB,
+            LIGHT_MODE_COLOR_TEMP,
+        )
+    ]
+
+
+def _per_light_mode_options() -> List[selector.SelectOptionDict]:
+    """Return SelectSelector options for per-light holiday customization."""
+    return [
+        selector.SelectOptionDict(value=m, label=_HOLIDAY_MODE_LABELS[m])
+        for m in (
+            LIGHT_MODE_DEFAULT,
+            LIGHT_MODE_RGB,
+            LIGHT_MODE_COLOR_TEMP,
+            LIGHT_MODE_HUE_SCENE,
+            LIGHT_MODE_EFFECT,
+            LIGHT_MODE_WLED_PRESET,
+            LIGHT_MODE_HA_SCENE,
+            LIGHT_MODE_OFF,
+        )
+    ]
+
+
+def _discover_select_options(
+    hass: Optional[HomeAssistant],
+    option_kind: str,
+    target_light_id: Optional[str] = None,
+    current_value: str = "",
+) -> List[selector.SelectOptionDict]:
+    """Collect WLED/Tuya preset or palette options from companion select entities."""
+    seen: Dict[str, str] = {}
+    if hass:
+        if target_light_id:
+            comp = discover_light_companions(hass, target_light_id)
+            raw_list = comp.get("presets" if option_kind == "preset" else "palettes", [])
+            for item in raw_list:
+                seen[item] = item
+        elif hasattr(hass, "states"):
+            keywords = ("preset", "playlist", "scene") if option_kind == "preset" else ("palette",)
+            for st in hass.states.async_all("select"):
+                eid_low = st.entity_id.lower()
+                if any(kw in eid_low for kw in keywords):
+                    for opt in st.attributes.get("options") or []:
+                        if opt and isinstance(opt, str) and opt.strip():
+                            seen[opt.strip()] = opt.strip()
+
+    if current_value and current_value.strip() and current_value.strip() not in seen:
+        seen[current_value.strip()] = current_value.strip()
+
+    opts = [selector.SelectOptionDict(value="", label="None / Select or Type...")]
+    for val in sorted(seen.keys(), key=lambda x: x.lower()):
+        opts.append(selector.SelectOptionDict(value=val, label=val))
+    return opts
+
+
+def _build_lighting_mode_fields(
+    hass: Optional[HomeAssistant],
+    mode: str,
+    defaults: Mapping[str, Any],
+    target_light_id: Optional[str] = None,
+) -> Dict[Any, Any]:
+    """Build dynamic schema fields matching the selected holiday or per-light mode."""
+    kelvin_unit = getattr(getattr(selector, "ColorTempSelectorUnit", None), "KELVIN", "kelvin")
+    curr_effect = str(defaults.get("effect") or "")
+    curr_fallback = str(defaults.get("fallback_effect") or "")
+    companions = discover_light_companions(hass, target_light_id) if (hass and target_light_id) else {}
+
+    if target_light_id and companions.get("effects"):
+        effect_opts = [selector.SelectOptionDict(value="", label="None / No Effect")]
+        seen_effs = set()
+        for eff in companions["effects"]:
+            if eff not in seen_effs:
+                effect_opts.append(selector.SelectOptionDict(value=eff, label=eff))
+                seen_effs.add(eff)
+        for opt in get_available_bulb_effects(hass, [curr_effect, curr_fallback]):
+            if opt["value"] and opt["value"] not in seen_effs:
+                effect_opts.append(opt)
+                seen_effs.add(opt["value"])
+    else:
+        effect_opts = get_available_bulb_effects(hass, [curr_effect, curr_fallback])
+
+    fields: Dict[Any, Any] = {}
+    if mode == LIGHT_MODE_HUE_SCENE:
+        fields[
+            vol.Optional("hue_scene", default=defaults.get("hue_scene", ""))
+        ] = OptionalEntitySelector(selector.EntitySelectorConfig(domain="scene"))
+        fields[
+            vol.Optional("dynamic_scene", default=defaults.get("dynamic_scene", True))
+        ] = selector.BooleanSelector()
+        fields[
+            vol.Optional("fallback_effect", default=curr_fallback)
+        ] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=effect_opts, custom_value=True, mode=selector.SelectSelectorMode.DROPDOWN
+            )
+        )
+        fields[
+            vol.Optional("rgb_color", default=defaults.get("rgb_color", [255, 140, 0]))
+        ] = selector.ColorRGBSelector()
+    elif mode == LIGHT_MODE_HA_SCENE:
+        fields[
+            vol.Optional("ha_scene", default=defaults.get("ha_scene", ""))
+        ] = OptionalEntitySelector(selector.EntitySelectorConfig(domain=["scene", "script"]))
+        fields[
+            vol.Optional("rgb_color", default=defaults.get("rgb_color", [255, 140, 0]))
+        ] = selector.ColorRGBSelector()
+    elif mode == LIGHT_MODE_WLED_PRESET:
+        default_preset_ent = str(
+            defaults.get("wled_preset_entity")
+            or companions.get("preset_select")
+            or companions.get("playlist_select")
+            or companions.get("scene_select")
+            or ""
+        )
+        curr_preset = str(defaults.get("wled_preset") or "")
+        preset_opts = _discover_select_options(hass, "preset", target_light_id, curr_preset)
+        fields[
+            vol.Optional("wled_preset_entity", description={"suggested_value": default_preset_ent})
+        ] = OptionalEntitySelector(selector.EntitySelectorConfig(domain="select"))
+        fields[
+            vol.Optional("wled_preset", default=curr_preset)
+        ] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=preset_opts, custom_value=True, mode=selector.SelectSelectorMode.DROPDOWN
+            )
+        )
+    elif mode == LIGHT_MODE_EFFECT:
+        curr_palette = str(defaults.get("wled_palette") or "")
+        default_pal_ent = str(
+            defaults.get("wled_palette_entity") or companions.get("palette_select") or ""
+        )
+        palette_opts = _discover_select_options(hass, "palette", target_light_id, curr_palette)
+        fields[vol.Optional("effect", default=curr_effect)] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=effect_opts, custom_value=True, mode=selector.SelectSelectorMode.DROPDOWN
+            )
+        )
+        fields[vol.Optional("wled_palette_entity", description={"suggested_value": default_pal_ent})] = (
+            OptionalEntitySelector(selector.EntitySelectorConfig(domain="select"))
+        )
+        fields[vol.Optional("wled_palette", default=curr_palette)] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=palette_opts, custom_value=True, mode=selector.SelectSelectorMode.DROPDOWN
+            )
+        )
+        fields[vol.Optional("fallback_effect", default=curr_fallback)] = selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=effect_opts, custom_value=True, mode=selector.SelectSelectorMode.DROPDOWN
+            )
+        )
+        fields[
+            vol.Optional("rgb_color", default=defaults.get("rgb_color", [255, 140, 0]))
+        ] = selector.ColorRGBSelector()
+    elif mode == LIGHT_MODE_COLOR_TEMP:
+        fields[
+            vol.Required("color_temp_kelvin", default=defaults.get("color_temp_kelvin", 2200))
+        ] = selector.ColorTempSelector(
+            selector.ColorTempSelectorConfig(min=2000, max=6500, unit=kelvin_unit)
+        )
+    else:
+        fields[
+            vol.Required("rgb_color", default=defaults.get("rgb_color", [255, 140, 0]))
+        ] = selector.ColorRGBSelector()
+
+    fields[
+        vol.Required("brightness_pct", default=defaults.get("brightness_pct", 100))
+    ] = selector.NumberSelector(
+        selector.NumberSelectorConfig(min=10, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
+    )
+    return fields
+
+
+def _validate_lighting_mode_fields(mode: str, user_input: Mapping[str, Any]) -> Dict[str, str]:
+    """Validate required fields for a holiday or per-light lighting mode."""
+    errors: Dict[str, str] = {}
+    if mode == LIGHT_MODE_HUE_SCENE and not str(user_input.get("hue_scene") or "").strip():
+        errors["hue_scene"] = "missing_hue_scene"
+    elif mode == LIGHT_MODE_HA_SCENE and not str(user_input.get("ha_scene") or "").strip():
+        errors["ha_scene"] = "missing_ha_scene"
+    elif mode == LIGHT_MODE_WLED_PRESET and not str(user_input.get("wled_preset") or "").strip():
+        errors["wled_preset"] = "missing_wled_preset"
+    elif mode == LIGHT_MODE_EFFECT and not str(user_input.get("effect") or "").strip():
+        errors["effect"] = "missing_bulb_effect"
+    return errors
+
+
+def _format_override_summary(cfg: Optional[Mapping[str, Any]]) -> str:
+    """Format a compact human-readable label describing a per-light holiday override."""
+    if not cfg or cfg.get("light_mode", LIGHT_MODE_DEFAULT) == LIGHT_MODE_DEFAULT:
+        return "Holiday Default"
+    m = str(cfg.get("light_mode"))
+    pct = cfg.get("brightness_pct", 100)
+    if m == LIGHT_MODE_OFF:
+        return "Keep OFF"
+    if m == LIGHT_MODE_HUE_SCENE:
+        return f"Hue Scene `{cfg.get('hue_scene', '')}` ({pct}%)"
+    if m == LIGHT_MODE_HA_SCENE:
+        return f"Scene/Script `{cfg.get('ha_scene', '')}`"
+    if m == LIGHT_MODE_WLED_PRESET:
+        return f"WLED Preset `{cfg.get('wled_preset', '')}` ({pct}%)"
+    if m == LIGHT_MODE_EFFECT:
+        pal = f", palette `{cfg['wled_palette']}`" if cfg.get("wled_palette") else ""
+        return f"Effect `{cfg.get('effect', '')}`{pal} ({pct}%)"
+    if m == LIGHT_MODE_COLOR_TEMP:
+        return f"{cfg.get('color_temp_kelvin', 2200)}K White ({pct}%)"
+    rgb = cfg.get("rgb_color", [255, 140, 0])
+    return f"RGB {rgb} ({pct}%)"
 
 
 class PassableSmartLightingConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -1043,6 +1279,10 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
         self._pending_exterior: Dict[str, Any] = {}
         self._pending_decorations: Dict[str, Any] = {}
         self._pending_holiday: Dict[str, Any] = {}
+        self._pending_holiday_mode_data: Dict[str, Any] = {}
+        self._pending_light_overrides: Dict[str, Dict[str, Any]] = {}
+        self._editing_holiday_light_id: Optional[str] = None
+        self._editing_holiday_light_mode: str = LIGHT_MODE_DEFAULT
         self._selected_holiday_id: str = "__add_new__"
 
     async def _async_save_room_data(self, updates: Dict[str, Any], new_title: Optional[str] = None) -> config_entries.ConfigFlowResult:
@@ -1953,14 +2193,7 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
             vol.Optional("phrase", default=curr_holiday.get("phrase", "Happy Holidays!")): selector.TextSelector(),
             vol.Optional("theme_color", default=curr_holiday.get("theme_color", "#9c4600")): selector.TextSelector(),
             vol.Required("light_mode", default=curr_holiday.get("light_mode", LIGHT_MODE_RGB)): selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=[
-                        selector.SelectOptionDict(value="hue_scene", label="Philips Hue Dynamic Scene"),
-                        selector.SelectOptionDict(value="effect", label="Bulb Firmware Effect (fire, candle, prism)"),
-                        selector.SelectOptionDict(value="rgb", label="RGB Color Palette"),
-                        selector.SelectOptionDict(value="color_temp", label="Color Temperature (Kelvin)"),
-                    ]
-                )
+                selector.SelectSelectorConfig(options=_holiday_mode_options())
             ),
             vol.Required("decorations_on", default=curr_holiday.get("decorations_on", True)): selector.BooleanSelector(),
             vol.Optional(
@@ -1994,142 +2227,273 @@ class PassableSmartLightingOptionsFlow(config_entries.OptionsFlow):
         errors: Dict[str, str] = {}
 
         if user_input is not None:
-            if mode == LIGHT_MODE_HUE_SCENE and not str(user_input.get("hue_scene") or "").strip():
-                errors["hue_scene"] = "missing_hue_scene"
-            if mode == LIGHT_MODE_EFFECT and not str(user_input.get("effect") or "").strip():
-                errors["effect"] = "missing_bulb_effect"
-
+            errors = _validate_lighting_mode_fields(mode, user_input)
             if not errors:
-                h_name = str(
-                    self._pending_holiday.get("name", curr_holiday.get("name", "Custom Holiday"))
-                ).strip()
-                h_id = (
-                    self._selected_holiday_id
-                    if not is_new
-                    else _slugify_room_id(h_name.replace("'", "")) or "custom_holiday"
-                )
+                self._pending_holiday_mode_data = dict(user_input)
+                self._pending_light_overrides = copy.deepcopy(curr_holiday.get("light_overrides") or {})
+                if user_input.get("customize_individual_lights"):
+                    return await self.async_step_holiday_light_select()
+                return await self._async_finalize_holiday_save()
 
-                raw_rgb = user_input.get("rgb_color", curr_holiday.get("rgb_color", [255, 140, 0]))
-                if isinstance(raw_rgb, (list, tuple)) and len(raw_rgb) >= 3:
-                    rgb = [int(raw_rgb[0]), int(raw_rgb[1]), int(raw_rgb[2])]
-                else:
-                    rgb = curr_holiday.get("rgb_color", [255, 140, 0])
-
-                holiday_data = {
-                    "id": h_id,
-                    "name": h_name,
-                    "enabled": bool(self._pending_holiday.get("enabled", True)),
-                    "start_date": self._pending_holiday["start_date"],
-                    "end_date": self._pending_holiday["end_date"],
-                    "icon": str(self._pending_holiday.get("icon", "mdi:calendar-star")).strip(),
-                    "phrase": str(self._pending_holiday.get("phrase", "")).strip(),
-                    "theme_color": str(self._pending_holiday.get("theme_color", "#9c4600")).strip(),
-                    "light_mode": mode,
-                    "hue_scene": str(user_input.get("hue_scene", curr_holiday.get("hue_scene", "")) or "").strip(),
-                    "dynamic_scene": bool(user_input.get("dynamic_scene", curr_holiday.get("dynamic_scene", True))),
-                    "effect": str(user_input.get("effect", curr_holiday.get("effect", "")) or "").strip(),
-                    "fallback_effect": str(
-                        user_input.get("fallback_effect", curr_holiday.get("fallback_effect", "")) or ""
-                    ).strip(),
-                    "rgb_color": rgb,
-                    "color_temp_kelvin": int(
-                        user_input.get("color_temp_kelvin", curr_holiday.get("color_temp_kelvin", 2200))
-                    ),
-                    "brightness_pct": int(
-                        user_input.get("brightness_pct", curr_holiday.get("brightness_pct", 100))
-                    ),
-                    "decorations_on": bool(self._pending_holiday.get("decorations_on", True)),
-                    "participating_lights": self._pending_holiday.get("participating_lights") or [],
-                    "participating_decorations": self._pending_holiday.get("participating_decorations") or [],
-                }
-
-                holiday_store.set_holiday(h_id, holiday_data)
-                await holiday_store.async_save()
-
-                coordinator = self.hass.data.get(DOMAIN, {}).get("holiday_coordinator")
-                if coordinator:
-                    coordinator._active_holiday = coordinator.evaluate_active_holiday()
-                    self.hass.async_create_task(coordinator._async_evaluate_schedule_trigger())
-
-                return self.async_create_entry(title="", data={})
-
-        curr_effect = curr_holiday.get("effect") or ""
-        curr_fallback_effect = curr_holiday.get("fallback_effect") or ""
-        effect_options = get_available_bulb_effects(self.hass, [curr_effect, curr_fallback_effect])
-        kelvin_unit = getattr(getattr(selector, "ColorTempSelectorUnit", None), "KELVIN", "kelvin")
-
-        fields: Dict[Any, Any] = {}
-        if mode == LIGHT_MODE_HUE_SCENE:
-            fields[
-                vol.Optional("hue_scene", default=curr_holiday.get("hue_scene", ""))
-            ] = OptionalEntitySelector(selector.EntitySelectorConfig(domain="scene"))
-            fields[
-                vol.Optional("dynamic_scene", default=curr_holiday.get("dynamic_scene", True))
-            ] = selector.BooleanSelector()
-            fields[
-                vol.Optional("fallback_effect", default=curr_fallback_effect)
-            ] = selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=effect_options,
-                    custom_value=True,
-                    mode=selector.SelectSelectorMode.DROPDOWN,
-                )
-            )
-            fields[
-                vol.Optional("rgb_color", default=curr_holiday.get("rgb_color", [255, 140, 0]))
-            ] = selector.ColorRGBSelector()
-        elif mode == LIGHT_MODE_EFFECT:
-            fields[vol.Optional("effect", default=curr_effect)] = selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=effect_options,
-                    custom_value=True,
-                    mode=selector.SelectSelectorMode.DROPDOWN,
-                )
-            )
-            fields[
-                vol.Optional("fallback_effect", default=curr_fallback_effect)
-            ] = selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=effect_options,
-                    custom_value=True,
-                    mode=selector.SelectSelectorMode.DROPDOWN,
-                )
-            )
-            fields[
-                vol.Optional("rgb_color", default=curr_holiday.get("rgb_color", [255, 140, 0]))
-            ] = selector.ColorRGBSelector()
-        elif mode == LIGHT_MODE_COLOR_TEMP:
-            fields[
-                vol.Required("color_temp_kelvin", default=curr_holiday.get("color_temp_kelvin", 2200))
-            ] = selector.ColorTempSelector(
-                selector.ColorTempSelectorConfig(min=2000, max=6500, unit=kelvin_unit)
-            )
-        else:
-            fields[
-                vol.Required("rgb_color", default=curr_holiday.get("rgb_color", [255, 140, 0]))
-            ] = selector.ColorRGBSelector()
-
+        fields = _build_lighting_mode_fields(self.hass, mode, curr_holiday, target_light_id=None)
         fields[
-            vol.Required("brightness_pct", default=curr_holiday.get("brightness_pct", 100))
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(min=10, max=100, step=5, mode=selector.NumberSelectorMode.SLIDER)
-        )
+            vol.Optional(
+                "customize_individual_lights",
+                default=bool(curr_holiday.get("light_overrides")),
+            )
+        ] = selector.BooleanSelector()
 
-        mode_names = {
-            LIGHT_MODE_HUE_SCENE: "Philips Hue Dynamic Scene",
-            LIGHT_MODE_EFFECT: "Bulb Firmware Effect",
-            LIGHT_MODE_COLOR_TEMP: "Color Temperature (Kelvin)",
-            LIGHT_MODE_RGB: "RGB Color Palette",
-        }
         return self.async_show_form(
             step_id="holiday_edit_mode",
             data_schema=vol.Schema(fields),
             errors=errors,
             description_placeholders={
                 "holiday_name": str(self._pending_holiday.get("name", "Holiday")),
-                "mode_name": mode_names.get(mode, mode),
+                "mode_name": _HOLIDAY_MODE_LABELS.get(mode, mode),
             },
         )
+
+    def _get_holiday_candidate_lights(self, curr_holiday: Mapping[str, Any]) -> List[str]:
+        """Resolve all candidate lights for per-light holiday customization."""
+        holiday_coord = self.hass.data.get(DOMAIN, {}).get("holiday_coordinator")
+        explicit = self._pending_holiday.get("participating_lights") or []
+        raw_list: List[str] = []
+        if explicit:
+            raw_list.extend(explicit)
+        elif holiday_coord:
+            raw_list.extend(holiday_coord.resolve_participating_lights({**curr_holiday, "participating_lights": []}))
+        else:
+            raw_list.extend(curr_holiday.get("participating_lights") or [])
+
+        expanded: List[str] = []
+        for lid in raw_list:
+            if not lid:
+                continue
+            members = get_light_members(self.hass, lid)
+            for m in (members if len(members) > 1 else [lid]):
+                if m not in expanded:
+                    expanded.append(m)
+
+        for ov_id in self._pending_light_overrides:
+            if ov_id and ov_id not in expanded:
+                expanded.append(ov_id)
+
+        return expanded
+
+    async def async_step_holiday_light_select(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> config_entries.ConfigFlowResult:
+        """Per-light Holiday Step 3: choose a participating light to customize or save."""
+        holiday_store = self.hass.data.get(DOMAIN, {}).get("holiday_store")
+        if not holiday_store:
+            return self.async_abort(reason="store_unavailable")
+
+        is_new = getattr(self, "_selected_holiday_id", "__add_new__") == "__add_new__"
+        curr_holiday = {} if is_new else holiday_store.holidays.get(self._selected_holiday_id, {})
+
+        if user_input is not None:
+            extra_light = str(user_input.get("add_extra_light") or "").strip()
+            selected_action = str(user_input.get("selected_light_action") or "__save__")
+            if extra_light:
+                self._editing_holiday_light_id = extra_light
+                return await self.async_step_holiday_light_mode()
+            if selected_action == "__save__":
+                return await self._async_finalize_holiday_save()
+            self._editing_holiday_light_id = selected_action
+            return await self.async_step_holiday_light_mode()
+
+        candidates = self._get_holiday_candidate_lights(curr_holiday)
+        summary_lines = []
+        options = [selector.SelectOptionDict(value="__save__", label="✅ Save & Finish Holiday")]
+        for lid in candidates:
+            st = self.hass.states.get(lid)
+            fname = st.attributes.get("friendly_name", lid) if st else lid
+            ov_cfg = self._pending_light_overrides.get(lid)
+            ov_label = _format_override_summary(ov_cfg)
+            summary_lines.append(f"- **{fname}** (`{lid}`): {ov_label}")
+            options.append(
+                selector.SelectOptionDict(value=lid, label=f"Customize: {fname} [{ov_label}]")
+            )
+
+        overrides_summary = (
+            "\n".join(summary_lines)
+            if summary_lines
+            else "No default participating lights configured yet. Use **Add Any Light to Customize** below."
+        )
+
+        schema = vol.Schema(
+            {
+                vol.Required("selected_light_action", default="__save__"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=options)
+                ),
+                vol.Optional("add_extra_light"): OptionalEntitySelector(
+                    selector.EntitySelectorConfig(domain="light")
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="holiday_light_select",
+            data_schema=schema,
+            description_placeholders={
+                "holiday_name": str(self._pending_holiday.get("name", "Holiday")),
+                "overrides_summary": overrides_summary,
+            },
+        )
+
+    async def async_step_holiday_light_mode(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> config_entries.ConfigFlowResult:
+        """Per-light Holiday Step 4: choose the mode for one specific light."""
+        light_id = self._editing_holiday_light_id or ""
+        if not light_id:
+            return await self.async_step_holiday_light_select()
+
+        if user_input is not None:
+            chosen_mode = str(user_input.get("light_mode", LIGHT_MODE_DEFAULT))
+            if chosen_mode == LIGHT_MODE_DEFAULT:
+                self._pending_light_overrides.pop(light_id, None)
+                return await self.async_step_holiday_light_select()
+            if chosen_mode == LIGHT_MODE_OFF:
+                self._pending_light_overrides[light_id] = {"light_mode": LIGHT_MODE_OFF}
+                return await self.async_step_holiday_light_select()
+            self._editing_holiday_light_mode = chosen_mode
+            return await self.async_step_holiday_light_details()
+
+        curr_ov = self._pending_light_overrides.get(light_id, {})
+        st = self.hass.states.get(light_id)
+        light_name = st.attributes.get("friendly_name", light_id) if st else light_id
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    "light_mode", default=curr_ov.get("light_mode", LIGHT_MODE_DEFAULT)
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=_per_light_mode_options())
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="holiday_light_mode",
+            data_schema=schema,
+            description_placeholders={
+                "holiday_name": str(self._pending_holiday.get("name", "Holiday")),
+                "light_name": light_name,
+                "light_entity": light_id,
+            },
+        )
+
+    async def async_step_holiday_light_details(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> config_entries.ConfigFlowResult:
+        """Per-light Holiday Step 5: configure mode-specific parameters for one light."""
+        holiday_store = self.hass.data.get(DOMAIN, {}).get("holiday_store")
+        is_new = getattr(self, "_selected_holiday_id", "__add_new__") == "__add_new__"
+        curr_holiday = (
+            {} if (is_new or not holiday_store) else holiday_store.holidays.get(self._selected_holiday_id, {})
+        )
+
+        light_id = self._editing_holiday_light_id or ""
+        mode = self._editing_holiday_light_mode or LIGHT_MODE_RGB
+        errors: Dict[str, str] = {}
+
+        if user_input is not None:
+            errors = _validate_lighting_mode_fields(mode, user_input)
+            if not errors:
+                clean_ov: Dict[str, Any] = {"light_mode": mode}
+                for key, val in user_input.items():
+                    if key == "rgb_color" and isinstance(val, (list, tuple)) and len(val) >= 3:
+                        clean_ov["rgb_color"] = [int(val[0]), int(val[1]), int(val[2])]
+                    elif key in ("color_temp_kelvin", "brightness_pct") and val is not None:
+                        clean_ov[key] = int(val)
+                    elif key == "dynamic_scene":
+                        clean_ov[key] = bool(val)
+                    elif val is not None:
+                        clean_ov[key] = str(val).strip()
+                self._pending_light_overrides[light_id] = clean_ov
+                return await self.async_step_holiday_light_select()
+
+        defaults = {**curr_holiday, **self._pending_holiday_mode_data, **self._pending_light_overrides.get(light_id, {})}
+        fields = _build_lighting_mode_fields(self.hass, mode, defaults, target_light_id=light_id)
+        st = self.hass.states.get(light_id)
+        light_name = st.attributes.get("friendly_name", light_id) if st else light_id
+
+        return self.async_show_form(
+            step_id="holiday_light_details",
+            data_schema=vol.Schema(fields),
+            errors=errors,
+            description_placeholders={
+                "holiday_name": str(self._pending_holiday.get("name", "Holiday")),
+                "light_name": light_name,
+                "mode_name": _HOLIDAY_MODE_LABELS.get(mode, mode),
+            },
+        )
+
+    async def _async_finalize_holiday_save(self) -> config_entries.ConfigFlowResult:
+        """Persist holiday definition including any per-light overrides."""
+        holiday_store = self.hass.data.get(DOMAIN, {}).get("holiday_store")
+        if not holiday_store:
+            return self.async_abort(reason="store_unavailable")
+
+        is_new = getattr(self, "_selected_holiday_id", "__add_new__") == "__add_new__"
+        curr_holiday = {} if is_new else holiday_store.holidays.get(self._selected_holiday_id, {})
+        mode_data = self._pending_holiday_mode_data
+        mode = str(self._pending_holiday.get("light_mode", curr_holiday.get("light_mode", LIGHT_MODE_RGB)))
+
+        h_name = str(self._pending_holiday.get("name", curr_holiday.get("name", "Custom Holiday"))).strip()
+        h_id = (
+            self._selected_holiday_id
+            if not is_new
+            else _slugify_room_id(h_name.replace("'", "")) or "custom_holiday"
+        )
+
+        raw_rgb = mode_data.get("rgb_color", curr_holiday.get("rgb_color", [255, 140, 0]))
+        if isinstance(raw_rgb, (list, tuple)) and len(raw_rgb) >= 3:
+            rgb = [int(raw_rgb[0]), int(raw_rgb[1]), int(raw_rgb[2])]
+        else:
+            rgb = curr_holiday.get("rgb_color", [255, 140, 0])
+
+        clean_overrides = {
+            lid: ov
+            for lid, ov in self._pending_light_overrides.items()
+            if lid and isinstance(ov, dict) and ov.get("light_mode", LIGHT_MODE_DEFAULT) != LIGHT_MODE_DEFAULT
+        }
+
+        holiday_data = {
+            "id": h_id,
+            "name": h_name,
+            "enabled": bool(self._pending_holiday.get("enabled", True)),
+            "start_date": self._pending_holiday["start_date"],
+            "end_date": self._pending_holiday["end_date"],
+            "icon": str(self._pending_holiday.get("icon", "mdi:calendar-star")).strip(),
+            "phrase": str(self._pending_holiday.get("phrase", "")).strip(),
+            "theme_color": str(self._pending_holiday.get("theme_color", "#9c4600")).strip(),
+            "light_mode": mode,
+            "hue_scene": str(mode_data.get("hue_scene", curr_holiday.get("hue_scene", "")) or "").strip(),
+            "dynamic_scene": bool(mode_data.get("dynamic_scene", curr_holiday.get("dynamic_scene", True))),
+            "ha_scene": str(mode_data.get("ha_scene", curr_holiday.get("ha_scene", "")) or "").strip(),
+            "wled_preset_entity": str(mode_data.get("wled_preset_entity", curr_holiday.get("wled_preset_entity", "")) or "").strip(),
+            "wled_preset": str(mode_data.get("wled_preset", curr_holiday.get("wled_preset", "")) or "").strip(),
+            "wled_palette_entity": str(mode_data.get("wled_palette_entity", curr_holiday.get("wled_palette_entity", "")) or "").strip(),
+            "wled_palette": str(mode_data.get("wled_palette", curr_holiday.get("wled_palette", "")) or "").strip(),
+            "effect": str(mode_data.get("effect", curr_holiday.get("effect", "")) or "").strip(),
+            "fallback_effect": str(mode_data.get("fallback_effect", curr_holiday.get("fallback_effect", "")) or "").strip(),
+            "rgb_color": rgb,
+            "color_temp_kelvin": int(mode_data.get("color_temp_kelvin", curr_holiday.get("color_temp_kelvin", 2200))),
+            "brightness_pct": int(mode_data.get("brightness_pct", curr_holiday.get("brightness_pct", 100))),
+            "decorations_on": bool(self._pending_holiday.get("decorations_on", True)),
+            "participating_lights": self._pending_holiday.get("participating_lights") or [],
+            "participating_decorations": self._pending_holiday.get("participating_decorations") or [],
+            "light_overrides": clean_overrides,
+        }
+
+        holiday_store.set_holiday(h_id, holiday_data)
+        await holiday_store.async_save()
+
+        coordinator = self.hass.data.get(DOMAIN, {}).get("holiday_coordinator")
+        if coordinator:
+            coordinator._active_holiday = coordinator.evaluate_active_holiday()
+            self.hass.async_create_task(coordinator._async_evaluate_schedule_trigger())
+
+        return self.async_create_entry(title="", data={})
 
     async def async_step_holiday_reset(
         self, user_input: Optional[Dict[str, Any]] = None
